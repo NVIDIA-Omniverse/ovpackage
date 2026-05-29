@@ -1,0 +1,1981 @@
+{
+    "root": "omniverse://localhost/.packages/test_package/1.0.0",
+    "items": [
+        {
+            "source_path": "omniverse://localhost/.packages/test_package/1.0.0/aamtngho",
+            "relative_path": "aamtngho",
+            "type": "folder"
+        },
+        {
+            "source_path": "omniverse://localhost/.packages/test_package/1.0.0/aamtngho/source_package",
+            "relative_path": "aamtngho/source_package",
+            "type": "folder"
+        },
+        {
+            "relative_path": "aamtngho/source_package/testfile.txt",
+            "source_path": "omniverse://localhost/.packages/test_package/1.0.0/aamtngho/source_package/testfile.txt?&1",
+            "version": "16750",
+            "hash": "sha-256-flat;1048576;5a27e26e252d9445fd2ccce11576ba4d612fb0905ed85ca2f816581e922f43dd",
+            "type": "file",
+            "size": 6
+        },
+        {
+            "source_path": "omniverse://localhost/.packages/test_package/1.0.0/alleejoe",
+            "relative_path": "alleejoe",
+            "type": "folder"
+        },
+        {
+            "source_path": "omniverse://localhost/.packages/test_package/1.0.0/alleejoe/package_source",
+            "relative_path": "alleejoe/package_source",
+            "type": "folder"
+        },
+        {
+            "source_path": "omniverse://localhost/.packages/test_package/1.0.0/alleejoe/package_source/source_package",
+            "relative_path": "alleejoe/package_source/source_package",
+            "type": "folder"
+        },
+        {
+            "relative_path": "alleejoe/package_source/source_package/testfile.txt",
+            "source_path": "omniverse://localhost/.packages/test_package/1.0.0/alleejoe/package_source/source_package/testfile.txt?&1",
+            "version": "16731",
+            "hash": "sha-256-flat;1048576;5a27e26e252d9445fd2ccce11576ba4d612fb0905ed85ca2f816581e922f43dd",
+            "type": "file",
+            "size": 6
+        },
+        {
+            "source_path": "omniverse://localhost/.packages/test_package/1.0.0/alleejoe/target1",
+            "relative_path": "alleejoe/target1",
+            "type": "folder"
+        },
+        {
+            "relative_path": "alleejoe/target1/testfile.txt",
+            "source_path": "omniverse://localhost/.packages/test_package/1.0.0/alleejoe/target1/testfile.txt?&1",
+            "version": "16731",
+            "hash": "sha-256-flat;1048576;5a27e26e252d9445fd2ccce11576ba4d612fb0905ed85ca2f816581e922f43dd",
+            "type": "file",
+            "size": 6
+        },
+        {
+            "source_path": "omniverse://localhost/.packages/test_package/1.0.0/alleejoe/target2",
+            "relative_path": "alleejoe/target2",
+            "type": "folder"
+        },
+        {
+            "source_path": "omniverse://localhost/.packages/test_package/1.0.0/aojvtbyd",
+            "relative_path": "aojvtbyd",
+            "type": "folder"
+        },
+        {
+            "source_path": "omniverse://localhost/.packages/test_package/1.0.0/aojvtbyd/package_source",
+            "relative_path": "aojvtbyd/package_source",
+            "type": "folder"
+        },
+        {
+            "source_path": "omniverse://localhost/.packages/test_package/1.0.0/aojvtbyd/package_source/source_package",
+            "relative_path": "aojvtbyd/package_source/source_package",
+            "type": "folder"
+        },
+        {
+            "relative_path": "aojvtbyd/package_source/source_package/testfile.txt",
+            "source_path": "omniverse://localhost/.packages/test_package/1.0.0/aojvtbyd/package_source/source_package/testfile.txt?&1",
+            "version": "16715",
+            "hash": "sha-256-flat;1048576;5a27e26e252d9445fd2ccce11576ba4d612fb0905ed85ca2f816581e922f43dd",
+            "type": "file",
+            "size": 6
+        },
+        {
+            "source_path": "omniverse://localhost/.packages/test_package/1.0.0/aojvtbyd/target1",
+            "relative_path": "aojvtbyd/target1",
+            "type": "folder"
+        },
+        {
+            "relative_path": "aojvtbyd/target1/testfile.txt",
+            "source_path": "omniverse://localhost/.packages/test_package/1.0.0/aojvtbyd/target1/testfile.txt?&1",
+            "version": "16715",
+            "hash": "sha-256-flat;1048576;5a27e26e252d9445fd2ccce11576ba4d612fb0905ed85ca2f816581e922f43dd",
+            "type": "file",
+            "size": 6
+        },
+        {
+            "source_path": "omniverse://localhost/.packages/test_package/1.0.0/aojvtbyd/target2",
+            "relative_path": "aojvtbyd/target2",
+            "type": "folder"
+        },
+        {
+            "source_path": "omniverse://localhost/.packages/test_package/1.0.0/auvjcvpr",
+            "relative_path": "auvjcvpr",
+            "type": "folder"
+        },
+        {
+            "source_path": "omniverse://localhost/.packages/test_package/1.0.0/auvjcvpr/.packages",
+            "relative_path": "auvjcvpr/.packages",
+            "type": "folder"
+        },
+        {
+            "source_path": "omniverse://localhost/.packages/test_package/1.0.0/auvjcvpr/.packages/oernaaoe",
+            "relative_path": "auvjcvpr/.packages/oernaaoe",
+            "type": "folder"
+        },
+        {
+            "source_path": "omniverse://localhost/.packages/test_package/1.0.0/auvjcvpr/.packages/oernaaoe/1.0.0-ahggwllc",
+            "relative_path": "auvjcvpr/.packages/oernaaoe/1.0.0-ahggwllc",
+            "type": "folder"
+        },
+        {
+            "relative_path": "auvjcvpr/.packages/oernaaoe/1.0.0-ahggwllc/oernaaoe.toml",
+            "source_path": "omniverse://localhost/.packages/test_package/1.0.0/auvjcvpr/.packages/oernaaoe/1.0.0-ahggwllc/oernaaoe.toml?&1",
+            "version": "16756",
+            "hash": "sha-256-flat;1048576;78aa8561d3130caddfaa6c5ff1ab20bb92d23c767f21e065892d8921e2b0e451",
+            "type": "file",
+            "size": 111
+        },
+        {
+            "relative_path": "auvjcvpr/.packages/oernaaoe/1.0.0-ahggwllc/testfile.txt",
+            "source_path": "omniverse://localhost/.packages/test_package/1.0.0/auvjcvpr/.packages/oernaaoe/1.0.0-ahggwllc/testfile.txt?&1",
+            "version": "16755",
+            "hash": "sha-256-flat;1048576;5a27e26e252d9445fd2ccce11576ba4d612fb0905ed85ca2f816581e922f43dd",
+            "type": "file",
+            "size": 6
+        },
+        {
+            "source_path": "omniverse://localhost/.packages/test_package/1.0.0/auvjcvpr/source_package",
+            "relative_path": "auvjcvpr/source_package",
+            "type": "folder"
+        },
+        {
+            "relative_path": "auvjcvpr/source_package/testfile.txt",
+            "source_path": "omniverse://localhost/.packages/test_package/1.0.0/auvjcvpr/source_package/testfile.txt?&1",
+            "version": "16755",
+            "hash": "sha-256-flat;1048576;5a27e26e252d9445fd2ccce11576ba4d612fb0905ed85ca2f816581e922f43dd",
+            "type": "file",
+            "size": 6,
+            "tags": [
+                {
+                    "name": "Cat is dead",
+                    "ns": "appearance",
+                    "value": "base_value"
+                }]
+        },
+        {
+            "source_path": "omniverse://localhost/.packages/test_package/1.0.0/bsgxunbg",
+            "relative_path": "bsgxunbg",
+            "type": "folder"
+        },
+        {
+            "source_path": "omniverse://localhost/.packages/test_package/1.0.0/bsgxunbg/source_package",
+            "relative_path": "bsgxunbg/source_package",
+            "type": "folder"
+        },
+        {
+            "relative_path": "bsgxunbg/source_package/testfile.txt",
+            "source_path": "omniverse://localhost/.packages/test_package/1.0.0/bsgxunbg/source_package/testfile.txt?&1",
+            "version": "16718",
+            "hash": "sha-256-flat;1048576;5a27e26e252d9445fd2ccce11576ba4d612fb0905ed85ca2f816581e922f43dd",
+            "type": "file",
+            "size": 6
+        },
+        {
+            "source_path": "omniverse://localhost/.packages/test_package/1.0.0/bxeiytqp",
+            "relative_path": "bxeiytqp",
+            "type": "folder"
+        },
+        {
+            "source_path": "omniverse://localhost/.packages/test_package/1.0.0/bxeiytqp/.packages",
+            "relative_path": "bxeiytqp/.packages",
+            "type": "folder"
+        },
+        {
+            "source_path": "omniverse://localhost/.packages/test_package/1.0.0/bxeiytqp/.packages/igozwmdg",
+            "relative_path": "bxeiytqp/.packages/igozwmdg",
+            "type": "folder"
+        },
+        {
+            "source_path": "omniverse://localhost/.packages/test_package/1.0.0/bxeiytqp/.packages/igozwmdg/1.0.0-abtuutew",
+            "relative_path": "bxeiytqp/.packages/igozwmdg/1.0.0-abtuutew",
+            "type": "folder"
+        },
+        {
+            "relative_path": "bxeiytqp/.packages/igozwmdg/1.0.0-abtuutew/igozwmdg.toml",
+            "source_path": "omniverse://localhost/.packages/test_package/1.0.0/bxeiytqp/.packages/igozwmdg/1.0.0-abtuutew/igozwmdg.toml?&1",
+            "version": "16680",
+            "hash": "sha-256-flat;1048576;a4cf274ac38e03ad3f12387e8a55a5a1a82dcf114028caeea0206637b9b722fc",
+            "type": "file",
+            "size": 111
+        },
+        {
+            "source_path": "omniverse://localhost/.packages/test_package/1.0.0/bxeiytqp/source_package",
+            "relative_path": "bxeiytqp/source_package",
+            "type": "folder"
+        },
+        {
+            "relative_path": "bxeiytqp/source_package/testfile.txt",
+            "source_path": "omniverse://localhost/.packages/test_package/1.0.0/bxeiytqp/source_package/testfile.txt?&1",
+            "version": "16679",
+            "hash": "sha-256-flat;1048576;5a27e26e252d9445fd2ccce11576ba4d612fb0905ed85ca2f816581e922f43dd",
+            "type": "file",
+            "size": 6
+        },
+        {
+            "source_path": "omniverse://localhost/.packages/test_package/1.0.0/celthbxi",
+            "relative_path": "celthbxi",
+            "type": "folder"
+        },
+        {
+            "source_path": "omniverse://localhost/.packages/test_package/1.0.0/celthbxi/.packages",
+            "relative_path": "celthbxi/.packages",
+            "type": "folder"
+        },
+        {
+            "source_path": "omniverse://localhost/.packages/test_package/1.0.0/celthbxi/.packages/yctrhkix",
+            "relative_path": "celthbxi/.packages/yctrhkix",
+            "type": "folder"
+        },
+        {
+            "source_path": "omniverse://localhost/.packages/test_package/1.0.0/celthbxi/.packages/yctrhkix/1.0.0-wekyuief",
+            "relative_path": "celthbxi/.packages/yctrhkix/1.0.0-wekyuief",
+            "type": "folder"
+        },
+        {
+            "relative_path": "celthbxi/.packages/yctrhkix/1.0.0-wekyuief/testfile.txt",
+            "source_path": "omniverse://localhost/.packages/test_package/1.0.0/celthbxi/.packages/yctrhkix/1.0.0-wekyuief/testfile.txt?&1",
+            "version": "16677",
+            "hash": "sha-256-flat;1048576;5a27e26e252d9445fd2ccce11576ba4d612fb0905ed85ca2f816581e922f43dd",
+            "type": "file",
+            "size": 6
+        },
+        {
+            "relative_path": "celthbxi/.packages/yctrhkix/1.0.0-wekyuief/yctrhkix.toml",
+            "source_path": "omniverse://localhost/.packages/test_package/1.0.0/celthbxi/.packages/yctrhkix/1.0.0-wekyuief/yctrhkix.toml?&1",
+            "version": "16678",
+            "hash": "sha-256-flat;1048576;c711395f5a996e8e2d96457f9befc001b65bc1f7dc9990dd74df72d91d2abafe",
+            "type": "file",
+            "size": 111
+        },
+        {
+            "source_path": "omniverse://localhost/.packages/test_package/1.0.0/celthbxi/source_package",
+            "relative_path": "celthbxi/source_package",
+            "type": "folder"
+        },
+        {
+            "relative_path": "celthbxi/source_package/testfile.txt",
+            "source_path": "omniverse://localhost/.packages/test_package/1.0.0/celthbxi/source_package/testfile.txt?&1",
+            "version": "16677",
+            "hash": "sha-256-flat;1048576;5a27e26e252d9445fd2ccce11576ba4d612fb0905ed85ca2f816581e922f43dd",
+            "type": "file",
+            "size": 6
+        },
+        {
+            "source_path": "omniverse://localhost/.packages/test_package/1.0.0/cfnxnnjc",
+            "relative_path": "cfnxnnjc",
+            "type": "folder"
+        },
+        {
+            "source_path": "omniverse://localhost/.packages/test_package/1.0.0/cfnxnnjc/.packages",
+            "relative_path": "cfnxnnjc/.packages",
+            "type": "folder"
+        },
+        {
+            "source_path": "omniverse://localhost/.packages/test_package/1.0.0/cfnxnnjc/.packages/tewyfire",
+            "relative_path": "cfnxnnjc/.packages/tewyfire",
+            "type": "folder"
+        },
+        {
+            "source_path": "omniverse://localhost/.packages/test_package/1.0.0/cfnxnnjc/.packages/tewyfire/1.0.0-gldvdawj",
+            "relative_path": "cfnxnnjc/.packages/tewyfire/1.0.0-gldvdawj",
+            "type": "folder"
+        },
+        {
+            "relative_path": "cfnxnnjc/.packages/tewyfire/1.0.0-gldvdawj/testfile.txt",
+            "source_path": "omniverse://localhost/.packages/test_package/1.0.0/cfnxnnjc/.packages/tewyfire/1.0.0-gldvdawj/testfile.txt?&1",
+            "version": "16739",
+            "hash": "sha-256-flat;1048576;5a27e26e252d9445fd2ccce11576ba4d612fb0905ed85ca2f816581e922f43dd",
+            "type": "file",
+            "size": 6
+        },
+        {
+            "relative_path": "cfnxnnjc/.packages/tewyfire/1.0.0-gldvdawj/tewyfire.toml",
+            "source_path": "omniverse://localhost/.packages/test_package/1.0.0/cfnxnnjc/.packages/tewyfire/1.0.0-gldvdawj/tewyfire.toml?&1",
+            "version": "16740",
+            "hash": "sha-256-flat;1048576;0cea7c223c248e4ced21cbedc2d1d70f97a2d00de11723686ce1a4220371ed54",
+            "type": "file",
+            "size": 111
+        },
+        {
+            "source_path": "omniverse://localhost/.packages/test_package/1.0.0/cfnxnnjc/source_package",
+            "relative_path": "cfnxnnjc/source_package",
+            "type": "folder"
+        },
+        {
+            "relative_path": "cfnxnnjc/source_package/testfile.txt",
+            "source_path": "omniverse://localhost/.packages/test_package/1.0.0/cfnxnnjc/source_package/testfile.txt?&1",
+            "version": "16739",
+            "hash": "sha-256-flat;1048576;5a27e26e252d9445fd2ccce11576ba4d612fb0905ed85ca2f816581e922f43dd",
+            "type": "file",
+            "size": 6
+        },
+        {
+            "source_path": "omniverse://localhost/.packages/test_package/1.0.0/dcwrbknl",
+            "relative_path": "dcwrbknl",
+            "type": "folder"
+        },
+        {
+            "relative_path": "dcwrbknl/test_new.toml",
+            "source_path": "omniverse://localhost/.packages/test_package/1.0.0/dcwrbknl/test_new.toml?&1",
+            "version": "16676",
+            "hash": "sha-256-flat;1048576;1823af10467f016e6bdecb77bfd564cdf3b3cc19d7802756394ba9953468d1bc",
+            "type": "file",
+            "size": 65
+        },
+        {
+            "source_path": "omniverse://localhost/.packages/test_package/1.0.0/dvjmflds",
+            "relative_path": "dvjmflds",
+            "type": "folder"
+        },
+        {
+            "source_path": "omniverse://localhost/.packages/test_package/1.0.0/dvjmflds/source_package",
+            "relative_path": "dvjmflds/source_package",
+            "type": "folder"
+        },
+        {
+            "relative_path": "dvjmflds/source_package/testfile.txt",
+            "source_path": "omniverse://localhost/.packages/test_package/1.0.0/dvjmflds/source_package/testfile.txt?&1",
+            "version": "16766",
+            "hash": "sha-256-flat;1048576;5a27e26e252d9445fd2ccce11576ba4d612fb0905ed85ca2f816581e922f43dd",
+            "type": "file",
+            "size": 6
+        },
+        {
+            "source_path": "omniverse://localhost/.packages/test_package/1.0.0/eipixdri",
+            "relative_path": "eipixdri",
+            "type": "folder"
+        },
+        {
+            "relative_path": "eipixdri/test_new.toml",
+            "source_path": "omniverse://localhost/.packages/test_package/1.0.0/eipixdri/test_new.toml?&1",
+            "version": "16706",
+            "hash": "sha-256-flat;1048576;a5d0a1ff2e4e6e7e9985c28b73a45d05fcc0ade0fbfa3737b85b374fce5e3c42",
+            "type": "file",
+            "size": 65
+        },
+        {
+            "source_path": "omniverse://localhost/.packages/test_package/1.0.0/eqvghekk",
+            "relative_path": "eqvghekk",
+            "type": "folder"
+        },
+        {
+            "source_path": "omniverse://localhost/.packages/test_package/1.0.0/eqvghekk/source_package",
+            "relative_path": "eqvghekk/source_package",
+            "type": "folder"
+        },
+        {
+            "relative_path": "eqvghekk/source_package/added.txt",
+            "source_path": "omniverse://localhost/.packages/test_package/1.0.0/eqvghekk/source_package/added.txt?&1",
+            "version": "16721",
+            "hash": "sha-256-flat;1048576;1161450d74fad7a0b5f6bc73d218ccc7e8f10450e64f4823f89173680d2f8084",
+            "type": "file",
+            "size": 12
+        },
+        {
+            "relative_path": "eqvghekk/source_package/testfile.txt",
+            "source_path": "omniverse://localhost/.packages/test_package/1.0.0/eqvghekk/source_package/testfile.txt?&1",
+            "version": "16720",
+            "hash": "sha-256-flat;1048576;9cd9b0a31923b9e53165e9a180e3fed1336efed68505321e538c2673b061f08e",
+            "type": "file",
+            "size": 4
+        },
+        {
+            "source_path": "omniverse://localhost/.packages/test_package/1.0.0/eswytcnl",
+            "relative_path": "eswytcnl",
+            "type": "folder"
+        },
+        {
+            "source_path": "omniverse://localhost/.packages/test_package/1.0.0/eswytcnl/source_package",
+            "relative_path": "eswytcnl/source_package",
+            "type": "folder"
+        },
+        {
+            "relative_path": "eswytcnl/source_package/added.txt",
+            "source_path": "omniverse://localhost/.packages/test_package/1.0.0/eswytcnl/source_package/added.txt?&1",
+            "version": "16769",
+            "hash": "sha-256-flat;1048576;1161450d74fad7a0b5f6bc73d218ccc7e8f10450e64f4823f89173680d2f8084",
+            "type": "file",
+            "size": 12
+        },
+        {
+            "relative_path": "eswytcnl/source_package/testfile.txt",
+            "source_path": "omniverse://localhost/.packages/test_package/1.0.0/eswytcnl/source_package/testfile.txt?&1",
+            "version": "16768",
+            "hash": "sha-256-flat;1048576;9cd9b0a31923b9e53165e9a180e3fed1336efed68505321e538c2673b061f08e",
+            "type": "file",
+            "size": 4
+        },
+        {
+            "source_path": "omniverse://localhost/.packages/test_package/1.0.0/fvoubzxw",
+            "relative_path": "fvoubzxw",
+            "type": "folder"
+        },
+        {
+            "source_path": "omniverse://localhost/.packages/test_package/1.0.0/fvoubzxw/source_package",
+            "relative_path": "fvoubzxw/source_package",
+            "type": "folder"
+        },
+        {
+            "relative_path": "fvoubzxw/source_package/added.txt",
+            "source_path": "omniverse://localhost/.packages/test_package/1.0.0/fvoubzxw/source_package/added.txt?&1",
+            "version": "16690",
+            "hash": "sha-256-flat;1048576;1161450d74fad7a0b5f6bc73d218ccc7e8f10450e64f4823f89173680d2f8084",
+            "type": "file",
+            "size": 12
+        },
+        {
+            "relative_path": "fvoubzxw/source_package/testfile.txt",
+            "source_path": "omniverse://localhost/.packages/test_package/1.0.0/fvoubzxw/source_package/testfile.txt?&1",
+            "version": "16689",
+            "hash": "sha-256-flat;1048576;9cd9b0a31923b9e53165e9a180e3fed1336efed68505321e538c2673b061f08e",
+            "type": "file",
+            "size": 4
+        },
+        {
+            "source_path": "omniverse://localhost/.packages/test_package/1.0.0/idwncsct",
+            "relative_path": "idwncsct",
+            "type": "folder"
+        },
+        {
+            "source_path": "omniverse://localhost/.packages/test_package/1.0.0/idwncsct/source_package",
+            "relative_path": "idwncsct/source_package",
+            "type": "folder"
+        },
+        {
+            "relative_path": "idwncsct/source_package/testfile.txt",
+            "source_path": "omniverse://localhost/.packages/test_package/1.0.0/idwncsct/source_package/testfile.txt?&1",
+            "version": "16687",
+            "hash": "sha-256-flat;1048576;5a27e26e252d9445fd2ccce11576ba4d612fb0905ed85ca2f816581e922f43dd",
+            "type": "file",
+            "size": 6
+        },
+        {
+            "source_path": "omniverse://localhost/.packages/test_package/1.0.0/imwndlqz",
+            "relative_path": "imwndlqz",
+            "type": "folder"
+        },
+        {
+            "source_path": "omniverse://localhost/.packages/test_package/1.0.0/imwndlqz/.package_cache",
+            "relative_path": "imwndlqz/.package_cache",
+            "type": "folder"
+        },
+        {
+            "source_path": "omniverse://localhost/.packages/test_package/1.0.0/imwndlqz/.package_cache/.packages",
+            "relative_path": "imwndlqz/.package_cache/.packages",
+            "type": "folder"
+        },
+        {
+            "source_path": "omniverse://localhost/.packages/test_package/1.0.0/imwndlqz/.package_cache/.packages/jbayfhng",
+            "relative_path": "imwndlqz/.package_cache/.packages/jbayfhng",
+            "type": "folder"
+        },
+        {
+            "source_path": "omniverse://localhost/.packages/test_package/1.0.0/imwndlqz/.package_cache/.packages/jbayfhng/1.0.0-cjpuneyh",
+            "relative_path": "imwndlqz/.package_cache/.packages/jbayfhng/1.0.0-cjpuneyh",
+            "type": "folder"
+        },
+        {
+            "relative_path": "imwndlqz/.package_cache/.packages/jbayfhng/1.0.0-cjpuneyh/jbayfhng.toml",
+            "source_path": "omniverse://localhost/.packages/test_package/1.0.0/imwndlqz/.package_cache/.packages/jbayfhng/1.0.0-cjpuneyh/jbayfhng.toml?&1",
+            "version": "16712",
+            "hash": "sha-256-flat;1048576;6d886fc376d719432db5f729380d13020efd071b07e4e7dc0361b2bd38ad47d2",
+            "type": "file",
+            "size": 126
+        },
+        {
+            "relative_path": "imwndlqz/.package_cache/.packages/jbayfhng/1.0.0-cjpuneyh/testfile.txt",
+            "source_path": "omniverse://localhost/.packages/test_package/1.0.0/imwndlqz/.package_cache/.packages/jbayfhng/1.0.0-cjpuneyh/testfile.txt?&1",
+            "version": "16711",
+            "hash": "sha-256-flat;1048576;5a27e26e252d9445fd2ccce11576ba4d612fb0905ed85ca2f816581e922f43dd",
+            "type": "file",
+            "size": 6
+        },
+        {
+            "source_path": "omniverse://localhost/.packages/test_package/1.0.0/imwndlqz/installed_package",
+            "relative_path": "imwndlqz/installed_package",
+            "type": "folder"
+        },
+        {
+            "relative_path": "imwndlqz/installed_package/jbayfhng.toml",
+            "source_path": "omniverse://localhost/.packages/test_package/1.0.0/imwndlqz/installed_package/jbayfhng.toml?&1",
+            "version": "16712",
+            "hash": "sha-256-flat;1048576;6d886fc376d719432db5f729380d13020efd071b07e4e7dc0361b2bd38ad47d2",
+            "type": "file",
+            "size": 126
+        },
+        {
+            "relative_path": "imwndlqz/installed_package/testfile.txt",
+            "source_path": "omniverse://localhost/.packages/test_package/1.0.0/imwndlqz/installed_package/testfile.txt?&1",
+            "version": "16711",
+            "hash": "sha-256-flat;1048576;5a27e26e252d9445fd2ccce11576ba4d612fb0905ed85ca2f816581e922f43dd",
+            "type": "file",
+            "size": 6
+        },
+        {
+            "source_path": "omniverse://localhost/.packages/test_package/1.0.0/imwndlqz/installed_package_with_dependency",
+            "relative_path": "imwndlqz/installed_package_with_dependency",
+            "type": "folder"
+        },
+        {
+            "relative_path": "imwndlqz/installed_package_with_dependency/dependencies.txt",
+            "source_path": "omniverse://localhost/.packages/test_package/1.0.0/imwndlqz/installed_package_with_dependency/dependencies.txt?&1",
+            "version": "16714",
+            "hash": "sha-256-flat;1048576;1dff5efddbf00333d6ca26407379024a87e6d83e3683d3020762665f0a2c59b5",
+            "type": "file",
+            "size": 256
+        },
+        {
+            "relative_path": "imwndlqz/installed_package_with_dependency/jbayfhng.toml",
+            "source_path": "omniverse://localhost/.packages/test_package/1.0.0/imwndlqz/installed_package_with_dependency/jbayfhng.toml?&1",
+            "version": "16712",
+            "hash": "sha-256-flat;1048576;6d886fc376d719432db5f729380d13020efd071b07e4e7dc0361b2bd38ad47d2",
+            "type": "file",
+            "size": 126
+        },
+        {
+            "relative_path": "imwndlqz/installed_package_with_dependency/testfile.txt",
+            "source_path": "omniverse://localhost/.packages/test_package/1.0.0/imwndlqz/installed_package_with_dependency/testfile.txt?&1",
+            "version": "16711",
+            "hash": "sha-256-flat;1048576;5a27e26e252d9445fd2ccce11576ba4d612fb0905ed85ca2f816581e922f43dd",
+            "type": "file",
+            "size": 6
+        },
+        {
+            "source_path": "omniverse://localhost/.packages/test_package/1.0.0/imwndlqz/package_source",
+            "relative_path": "imwndlqz/package_source",
+            "type": "folder"
+        },
+        {
+            "source_path": "omniverse://localhost/.packages/test_package/1.0.0/imwndlqz/package_source/source_package",
+            "relative_path": "imwndlqz/package_source/source_package",
+            "type": "folder"
+        },
+        {
+            "relative_path": "imwndlqz/package_source/source_package/testfile.txt",
+            "source_path": "omniverse://localhost/.packages/test_package/1.0.0/imwndlqz/package_source/source_package/testfile.txt?&1",
+            "version": "16711",
+            "hash": "sha-256-flat;1048576;5a27e26e252d9445fd2ccce11576ba4d612fb0905ed85ca2f816581e922f43dd",
+            "type": "file",
+            "size": 6
+        },
+        {
+            "source_path": "omniverse://localhost/.packages/test_package/1.0.0/iyksvhin",
+            "relative_path": "iyksvhin",
+            "type": "folder"
+        },
+        {
+            "source_path": "omniverse://localhost/.packages/test_package/1.0.0/iyksvhin/source_package",
+            "relative_path": "iyksvhin/source_package",
+            "type": "folder"
+        },
+        {
+            "relative_path": "iyksvhin/source_package/testfile.txt",
+            "source_path": "omniverse://localhost/.packages/test_package/1.0.0/iyksvhin/source_package/testfile.txt?&1",
+            "version": "16702",
+            "hash": "sha-256-flat;1048576;5a27e26e252d9445fd2ccce11576ba4d612fb0905ed85ca2f816581e922f43dd",
+            "type": "file",
+            "size": 6
+        },
+        {
+            "source_path": "omniverse://localhost/.packages/test_package/1.0.0/jbyeroai",
+            "relative_path": "jbyeroai",
+            "type": "folder"
+        },
+        {
+            "source_path": "omniverse://localhost/.packages/test_package/1.0.0/jbyeroai/source_package",
+            "relative_path": "jbyeroai/source_package",
+            "type": "folder"
+        },
+        {
+            "relative_path": "jbyeroai/source_package/testfile.txt",
+            "source_path": "omniverse://localhost/.packages/test_package/1.0.0/jbyeroai/source_package/testfile.txt?&1",
+            "version": "16748",
+            "hash": "sha-256-flat;1048576;5a27e26e252d9445fd2ccce11576ba4d612fb0905ed85ca2f816581e922f43dd",
+            "type": "file",
+            "size": 6
+        },
+        {
+            "source_path": "omniverse://localhost/.packages/test_package/1.0.0/jbyeroai/target",
+            "relative_path": "jbyeroai/target",
+            "type": "folder"
+        },
+        {
+            "source_path": "omniverse://localhost/.packages/test_package/1.0.0/jbyeroai/target/source_package",
+            "relative_path": "jbyeroai/target/source_package",
+            "type": "folder"
+        },
+        {
+            "relative_path": "jbyeroai/target/source_package/testfile.txt",
+            "source_path": "omniverse://localhost/.packages/test_package/1.0.0/jbyeroai/target/source_package/testfile.txt?&1",
+            "version": "16749",
+            "hash": "sha-256-flat;1048576;5a27e26e252d9445fd2ccce11576ba4d612fb0905ed85ca2f816581e922f43dd",
+            "type": "file",
+            "size": 6
+        },
+        {
+            "source_path": "omniverse://localhost/.packages/test_package/1.0.0/jjowqspo",
+            "relative_path": "jjowqspo",
+            "type": "folder"
+        },
+        {
+            "source_path": "omniverse://localhost/.packages/test_package/1.0.0/jjowqspo/.package_cache",
+            "relative_path": "jjowqspo/.package_cache",
+            "type": "folder"
+        },
+        {
+            "source_path": "omniverse://localhost/.packages/test_package/1.0.0/jjowqspo/.package_cache/.packages",
+            "relative_path": "jjowqspo/.package_cache/.packages",
+            "type": "folder"
+        },
+        {
+            "source_path": "omniverse://localhost/.packages/test_package/1.0.0/jjowqspo/.package_cache/.packages/jiqakpek",
+            "relative_path": "jjowqspo/.package_cache/.packages/jiqakpek",
+            "type": "folder"
+        },
+        {
+            "source_path": "omniverse://localhost/.packages/test_package/1.0.0/jjowqspo/.package_cache/.packages/jiqakpek/1.0.0-umenmbdv",
+            "relative_path": "jjowqspo/.package_cache/.packages/jiqakpek/1.0.0-umenmbdv",
+            "type": "folder"
+        },
+        {
+            "relative_path": "jjowqspo/.package_cache/.packages/jiqakpek/1.0.0-umenmbdv/jiqakpek.toml",
+            "source_path": "omniverse://localhost/.packages/test_package/1.0.0/jjowqspo/.package_cache/.packages/jiqakpek/1.0.0-umenmbdv/jiqakpek.toml?&1",
+            "version": "16697",
+            "hash": "sha-256-flat;1048576;7769d4b12c45256f3367c54f157481f1881fa9c298550660421e1513cfbe6f90",
+            "type": "file",
+            "size": 126
+        },
+        {
+            "relative_path": "jjowqspo/.package_cache/.packages/jiqakpek/1.0.0-umenmbdv/testfile.txt",
+            "source_path": "omniverse://localhost/.packages/test_package/1.0.0/jjowqspo/.package_cache/.packages/jiqakpek/1.0.0-umenmbdv/testfile.txt?&1",
+            "version": "16696",
+            "hash": "sha-256-flat;1048576;5a27e26e252d9445fd2ccce11576ba4d612fb0905ed85ca2f816581e922f43dd",
+            "type": "file",
+            "size": 6
+        },
+        {
+            "source_path": "omniverse://localhost/.packages/test_package/1.0.0/jjowqspo/installed_package",
+            "relative_path": "jjowqspo/installed_package",
+            "type": "folder"
+        },
+        {
+            "relative_path": "jjowqspo/installed_package/jiqakpek.toml",
+            "source_path": "omniverse://localhost/.packages/test_package/1.0.0/jjowqspo/installed_package/jiqakpek.toml?&1",
+            "version": "16697",
+            "hash": "sha-256-flat;1048576;7769d4b12c45256f3367c54f157481f1881fa9c298550660421e1513cfbe6f90",
+            "type": "file",
+            "size": 126
+        },
+        {
+            "relative_path": "jjowqspo/installed_package/testfile.txt",
+            "source_path": "omniverse://localhost/.packages/test_package/1.0.0/jjowqspo/installed_package/testfile.txt?&1",
+            "version": "16696",
+            "hash": "sha-256-flat;1048576;5a27e26e252d9445fd2ccce11576ba4d612fb0905ed85ca2f816581e922f43dd",
+            "type": "file",
+            "size": 6
+        },
+        {
+            "source_path": "omniverse://localhost/.packages/test_package/1.0.0/jjowqspo/installed_package_with_dependency",
+            "relative_path": "jjowqspo/installed_package_with_dependency",
+            "type": "folder"
+        },
+        {
+            "relative_path": "jjowqspo/installed_package_with_dependency/dependencies.txt",
+            "source_path": "omniverse://localhost/.packages/test_package/1.0.0/jjowqspo/installed_package_with_dependency/dependencies.txt?&1",
+            "version": "16699",
+            "hash": "sha-256-flat;1048576;5dfb3d383a70e7dc88fa47e0d5f9cdd00227999242136e65abd817cc19568d9d",
+            "type": "file",
+            "size": 256
+        },
+        {
+            "relative_path": "jjowqspo/installed_package_with_dependency/jiqakpek.toml",
+            "source_path": "omniverse://localhost/.packages/test_package/1.0.0/jjowqspo/installed_package_with_dependency/jiqakpek.toml?&1",
+            "version": "16697",
+            "hash": "sha-256-flat;1048576;7769d4b12c45256f3367c54f157481f1881fa9c298550660421e1513cfbe6f90",
+            "type": "file",
+            "size": 126
+        },
+        {
+            "relative_path": "jjowqspo/installed_package_with_dependency/testfile.txt",
+            "source_path": "omniverse://localhost/.packages/test_package/1.0.0/jjowqspo/installed_package_with_dependency/testfile.txt?&1",
+            "version": "16696",
+            "hash": "sha-256-flat;1048576;5a27e26e252d9445fd2ccce11576ba4d612fb0905ed85ca2f816581e922f43dd",
+            "type": "file",
+            "size": 6
+        },
+        {
+            "source_path": "omniverse://localhost/.packages/test_package/1.0.0/jjowqspo/package_source",
+            "relative_path": "jjowqspo/package_source",
+            "type": "folder"
+        },
+        {
+            "source_path": "omniverse://localhost/.packages/test_package/1.0.0/jjowqspo/package_source/source_package",
+            "relative_path": "jjowqspo/package_source/source_package",
+            "type": "folder"
+        },
+        {
+            "relative_path": "jjowqspo/package_source/source_package/testfile.txt",
+            "source_path": "omniverse://localhost/.packages/test_package/1.0.0/jjowqspo/package_source/source_package/testfile.txt?&1",
+            "version": "16696",
+            "hash": "sha-256-flat;1048576;5a27e26e252d9445fd2ccce11576ba4d612fb0905ed85ca2f816581e922f43dd",
+            "type": "file",
+            "size": 6
+        },
+        {
+            "source_path": "omniverse://localhost/.packages/test_package/1.0.0/jkfvtexr",
+            "relative_path": "jkfvtexr",
+            "type": "folder"
+        },
+        {
+            "source_path": "omniverse://localhost/.packages/test_package/1.0.0/jkfvtexr/.packages",
+            "relative_path": "jkfvtexr/.packages",
+            "type": "folder"
+        },
+        {
+            "source_path": "omniverse://localhost/.packages/test_package/1.0.0/jkfvtexr/.packages/igzqssdg",
+            "relative_path": "jkfvtexr/.packages/igzqssdg",
+            "type": "folder"
+        },
+        {
+            "source_path": "omniverse://localhost/.packages/test_package/1.0.0/jkfvtexr/.packages/igzqssdg/1.0.0-hdvfdpvo",
+            "relative_path": "jkfvtexr/.packages/igzqssdg/1.0.0-hdvfdpvo",
+            "type": "folder"
+        },
+        {
+            "relative_path": "jkfvtexr/.packages/igzqssdg/1.0.0-hdvfdpvo/igzqssdg.toml",
+            "source_path": "omniverse://localhost/.packages/test_package/1.0.0/jkfvtexr/.packages/igzqssdg/1.0.0-hdvfdpvo/igzqssdg.toml?&1",
+            "version": "16710",
+            "hash": "sha-256-flat;1048576;79ff3eecd4ce4164588c8ac86116992f01d670386828add51bbc6d7c5b595652",
+            "type": "file",
+            "size": 111
+        },
+        {
+            "source_path": "omniverse://localhost/.packages/test_package/1.0.0/jkfvtexr/source_package",
+            "relative_path": "jkfvtexr/source_package",
+            "type": "folder"
+        },
+        {
+            "relative_path": "jkfvtexr/source_package/testfile.txt",
+            "source_path": "omniverse://localhost/.packages/test_package/1.0.0/jkfvtexr/source_package/testfile.txt?&1",
+            "version": "16709",
+            "hash": "sha-256-flat;1048576;5a27e26e252d9445fd2ccce11576ba4d612fb0905ed85ca2f816581e922f43dd",
+            "type": "file",
+            "size": 6
+        },
+        {
+            "source_path": "omniverse://localhost/.packages/test_package/1.0.0/jzrfszvr",
+            "relative_path": "jzrfszvr",
+            "type": "folder"
+        },
+        {
+            "relative_path": "jzrfszvr/test_new.toml",
+            "source_path": "omniverse://localhost/.packages/test_package/1.0.0/jzrfszvr/test_new.toml?&1",
+            "version": "16722",
+            "hash": "sha-256-flat;1048576;bedb8b467b70f197087f6d4f9b2fe37974dd7c6ecd29570b62228fc55fcd502f",
+            "type": "file",
+            "size": 65
+        },
+        {
+            "source_path": "omniverse://localhost/.packages/test_package/1.0.0/kdxsrfxe",
+            "relative_path": "kdxsrfxe",
+            "type": "folder"
+        },
+        {
+            "source_path": "omniverse://localhost/.packages/test_package/1.0.0/kdxsrfxe/source_package",
+            "relative_path": "kdxsrfxe/source_package",
+            "type": "folder"
+        },
+        {
+            "relative_path": "kdxsrfxe/source_package/testfile.txt",
+            "source_path": "omniverse://localhost/.packages/test_package/1.0.0/kdxsrfxe/source_package/testfile.txt?&1",
+            "version": "16701",
+            "hash": "sha-256-flat;1048576;5a27e26e252d9445fd2ccce11576ba4d612fb0905ed85ca2f816581e922f43dd",
+            "type": "file",
+            "size": 6
+        },
+        {
+            "source_path": "omniverse://localhost/.packages/test_package/1.0.0/knvzqipc",
+            "relative_path": "knvzqipc",
+            "type": "folder"
+        },
+        {
+            "source_path": "omniverse://localhost/.packages/test_package/1.0.0/knvzqipc/.packages",
+            "relative_path": "knvzqipc/.packages",
+            "type": "folder"
+        },
+        {
+            "source_path": "omniverse://localhost/.packages/test_package/1.0.0/knvzqipc/.packages/ovfowhho",
+            "relative_path": "knvzqipc/.packages/ovfowhho",
+            "type": "folder"
+        },
+        {
+            "source_path": "omniverse://localhost/.packages/test_package/1.0.0/knvzqipc/.packages/ovfowhho/1.0.0-xrmwgtcr",
+            "relative_path": "knvzqipc/.packages/ovfowhho/1.0.0-xrmwgtcr",
+            "type": "folder"
+        },
+        {
+            "relative_path": "knvzqipc/.packages/ovfowhho/1.0.0-xrmwgtcr/ovfowhho.toml",
+            "source_path": "omniverse://localhost/.packages/test_package/1.0.0/knvzqipc/.packages/ovfowhho/1.0.0-xrmwgtcr/ovfowhho.toml?&1",
+            "version": "16726",
+            "hash": "sha-256-flat;1048576;e227ecbc3c54f785006937965caba46260e86c5d9c0fb976d3dda3637c96a1f2",
+            "type": "file",
+            "size": 111
+        },
+        {
+            "source_path": "omniverse://localhost/.packages/test_package/1.0.0/knvzqipc/source_package",
+            "relative_path": "knvzqipc/source_package",
+            "type": "folder"
+        },
+        {
+            "relative_path": "knvzqipc/source_package/testfile.txt",
+            "source_path": "omniverse://localhost/.packages/test_package/1.0.0/knvzqipc/source_package/testfile.txt?&1",
+            "version": "16725",
+            "hash": "sha-256-flat;1048576;5a27e26e252d9445fd2ccce11576ba4d612fb0905ed85ca2f816581e922f43dd",
+            "type": "file",
+            "size": 6
+        },
+        {
+            "source_path": "omniverse://localhost/.packages/test_package/1.0.0/lwxbjrqm",
+            "relative_path": "lwxbjrqm",
+            "type": "folder"
+        },
+        {
+            "source_path": "omniverse://localhost/.packages/test_package/1.0.0/lwxbjrqm/package_source",
+            "relative_path": "lwxbjrqm/package_source",
+            "type": "folder"
+        },
+        {
+            "source_path": "omniverse://localhost/.packages/test_package/1.0.0/lwxbjrqm/package_source/source_package",
+            "relative_path": "lwxbjrqm/package_source/source_package",
+            "type": "folder"
+        },
+        {
+            "relative_path": "lwxbjrqm/package_source/source_package/testfile.txt",
+            "source_path": "omniverse://localhost/.packages/test_package/1.0.0/lwxbjrqm/package_source/source_package/testfile.txt?&1",
+            "version": "16747",
+            "hash": "sha-256-flat;1048576;5a27e26e252d9445fd2ccce11576ba4d612fb0905ed85ca2f816581e922f43dd",
+            "type": "file",
+            "size": 6
+        },
+        {
+            "source_path": "omniverse://localhost/.packages/test_package/1.0.0/lwxbjrqm/target1",
+            "relative_path": "lwxbjrqm/target1",
+            "type": "folder"
+        },
+        {
+            "relative_path": "lwxbjrqm/target1/testfile.txt",
+            "source_path": "omniverse://localhost/.packages/test_package/1.0.0/lwxbjrqm/target1/testfile.txt?&1",
+            "version": "16747",
+            "hash": "sha-256-flat;1048576;5a27e26e252d9445fd2ccce11576ba4d612fb0905ed85ca2f816581e922f43dd",
+            "type": "file",
+            "size": 6
+        },
+        {
+            "source_path": "omniverse://localhost/.packages/test_package/1.0.0/lwxbjrqm/target2",
+            "relative_path": "lwxbjrqm/target2",
+            "type": "folder"
+        },
+        {
+            "source_path": "omniverse://localhost/.packages/test_package/1.0.0/nqvcmrti",
+            "relative_path": "nqvcmrti",
+            "type": "folder"
+        },
+        {
+            "source_path": "omniverse://localhost/.packages/test_package/1.0.0/nqvcmrti/source_package",
+            "relative_path": "nqvcmrti/source_package",
+            "type": "folder"
+        },
+        {
+            "relative_path": "nqvcmrti/source_package/added.txt",
+            "source_path": "omniverse://localhost/.packages/test_package/1.0.0/nqvcmrti/source_package/added.txt?&1",
+            "version": "16705",
+            "hash": "sha-256-flat;1048576;1161450d74fad7a0b5f6bc73d218ccc7e8f10450e64f4823f89173680d2f8084",
+            "type": "file",
+            "size": 12
+        },
+        {
+            "relative_path": "nqvcmrti/source_package/testfile.txt",
+            "source_path": "omniverse://localhost/.packages/test_package/1.0.0/nqvcmrti/source_package/testfile.txt?&1",
+            "version": "16704",
+            "hash": "sha-256-flat;1048576;9cd9b0a31923b9e53165e9a180e3fed1336efed68505321e538c2673b061f08e",
+            "type": "file",
+            "size": 4
+        },
+        {
+            "source_path": "omniverse://localhost/.packages/test_package/1.0.0/nsuhgmtl",
+            "relative_path": "nsuhgmtl",
+            "type": "folder"
+        },
+        {
+            "source_path": "omniverse://localhost/.packages/test_package/1.0.0/nsuhgmtl/source_package",
+            "relative_path": "nsuhgmtl/source_package",
+            "type": "folder"
+        },
+        {
+            "relative_path": "nsuhgmtl/source_package/testfile.txt",
+            "source_path": "omniverse://localhost/.packages/test_package/1.0.0/nsuhgmtl/source_package/testfile.txt?&1",
+            "version": "16716",
+            "hash": "sha-256-flat;1048576;5a27e26e252d9445fd2ccce11576ba4d612fb0905ed85ca2f816581e922f43dd",
+            "type": "file",
+            "size": 6
+        },
+        {
+            "source_path": "omniverse://localhost/.packages/test_package/1.0.0/nsuhgmtl/target",
+            "relative_path": "nsuhgmtl/target",
+            "type": "folder"
+        },
+        {
+            "source_path": "omniverse://localhost/.packages/test_package/1.0.0/nsuhgmtl/target/source_package",
+            "relative_path": "nsuhgmtl/target/source_package",
+            "type": "folder"
+        },
+        {
+            "relative_path": "nsuhgmtl/target/source_package/testfile.txt",
+            "source_path": "omniverse://localhost/.packages/test_package/1.0.0/nsuhgmtl/target/source_package/testfile.txt?&1",
+            "version": "16717",
+            "hash": "sha-256-flat;1048576;5a27e26e252d9445fd2ccce11576ba4d612fb0905ed85ca2f816581e922f43dd",
+            "type": "file",
+            "size": 6
+        },
+        {
+            "source_path": "omniverse://localhost/.packages/test_package/1.0.0/nwalmmff",
+            "relative_path": "nwalmmff",
+            "type": "folder"
+        },
+        {
+            "relative_path": "nwalmmff/test_new.toml",
+            "source_path": "omniverse://localhost/.packages/test_package/1.0.0/nwalmmff/test_new.toml?&1",
+            "version": "16738",
+            "hash": "sha-256-flat;1048576;f616cc68623ea9f17f730be2028afb7c87f2629a3abc6d2cac8d1bd77db18ad4",
+            "type": "file",
+            "size": 65
+        },
+        {
+            "source_path": "omniverse://localhost/.packages/test_package/1.0.0/ojazfkyj",
+            "relative_path": "ojazfkyj",
+            "type": "folder"
+        },
+        {
+            "source_path": "omniverse://localhost/.packages/test_package/1.0.0/ojazfkyj/.packages",
+            "relative_path": "ojazfkyj/.packages",
+            "type": "folder"
+        },
+        {
+            "source_path": "omniverse://localhost/.packages/test_package/1.0.0/ojazfkyj/.packages/xlprvann",
+            "relative_path": "ojazfkyj/.packages/xlprvann",
+            "type": "folder"
+        },
+        {
+            "source_path": "omniverse://localhost/.packages/test_package/1.0.0/ojazfkyj/.packages/xlprvann/1.0.0-xaazrlvu",
+            "relative_path": "ojazfkyj/.packages/xlprvann/1.0.0-xaazrlvu",
+            "type": "folder"
+        },
+        {
+            "relative_path": "ojazfkyj/.packages/xlprvann/1.0.0-xaazrlvu/testfile.txt",
+            "source_path": "omniverse://localhost/.packages/test_package/1.0.0/ojazfkyj/.packages/xlprvann/1.0.0-xaazrlvu/testfile.txt?&1",
+            "version": "16707",
+            "hash": "sha-256-flat;1048576;5a27e26e252d9445fd2ccce11576ba4d612fb0905ed85ca2f816581e922f43dd",
+            "type": "file",
+            "size": 6
+        },
+        {
+            "relative_path": "ojazfkyj/.packages/xlprvann/1.0.0-xaazrlvu/xlprvann.toml",
+            "source_path": "omniverse://localhost/.packages/test_package/1.0.0/ojazfkyj/.packages/xlprvann/1.0.0-xaazrlvu/xlprvann.toml?&1",
+            "version": "16708",
+            "hash": "sha-256-flat;1048576;ded7e4698c5a428405a3bc62589dcdc97571a80acedb3698522a4cd2358cb2e5",
+            "type": "file",
+            "size": 111
+        },
+        {
+            "source_path": "omniverse://localhost/.packages/test_package/1.0.0/ojazfkyj/source_package",
+            "relative_path": "ojazfkyj/source_package",
+            "type": "folder"
+        },
+        {
+            "relative_path": "ojazfkyj/source_package/testfile.txt",
+            "source_path": "omniverse://localhost/.packages/test_package/1.0.0/ojazfkyj/source_package/testfile.txt?&1",
+            "version": "16707",
+            "hash": "sha-256-flat;1048576;5a27e26e252d9445fd2ccce11576ba4d612fb0905ed85ca2f816581e922f43dd",
+            "type": "file",
+            "size": 6
+        },
+        {
+            "source_path": "omniverse://localhost/.packages/test_package/1.0.0/opsdrzem",
+            "relative_path": "opsdrzem",
+            "type": "folder"
+        },
+        {
+            "source_path": "omniverse://localhost/.packages/test_package/1.0.0/opsdrzem/source_package",
+            "relative_path": "opsdrzem/source_package",
+            "type": "folder"
+        },
+        {
+            "relative_path": "opsdrzem/source_package/added.txt",
+            "source_path": "omniverse://localhost/.packages/test_package/1.0.0/opsdrzem/source_package/added.txt?&1",
+            "version": "16753",
+            "hash": "sha-256-flat;1048576;1161450d74fad7a0b5f6bc73d218ccc7e8f10450e64f4823f89173680d2f8084",
+            "type": "file",
+            "size": 12
+        },
+        {
+            "relative_path": "opsdrzem/source_package/testfile.txt",
+            "source_path": "omniverse://localhost/.packages/test_package/1.0.0/opsdrzem/source_package/testfile.txt?&1",
+            "version": "16752",
+            "hash": "sha-256-flat;1048576;9cd9b0a31923b9e53165e9a180e3fed1336efed68505321e538c2673b061f08e",
+            "type": "file",
+            "size": 4
+        },
+        {
+            "source_path": "omniverse://localhost/.packages/test_package/1.0.0/qdvkbcwj",
+            "relative_path": "qdvkbcwj",
+            "type": "folder"
+        },
+        {
+            "source_path": "omniverse://localhost/.packages/test_package/1.0.0/qdvkbcwj/.package_cache",
+            "relative_path": "qdvkbcwj/.package_cache",
+            "type": "folder"
+        },
+        {
+            "source_path": "omniverse://localhost/.packages/test_package/1.0.0/qdvkbcwj/.package_cache/.packages",
+            "relative_path": "qdvkbcwj/.package_cache/.packages",
+            "type": "folder"
+        },
+        {
+            "source_path": "omniverse://localhost/.packages/test_package/1.0.0/qdvkbcwj/.package_cache/.packages/fcfspjde",
+            "relative_path": "qdvkbcwj/.package_cache/.packages/fcfspjde",
+            "type": "folder"
+        },
+        {
+            "source_path": "omniverse://localhost/.packages/test_package/1.0.0/qdvkbcwj/.package_cache/.packages/fcfspjde/1.0.0-lgdwszos",
+            "relative_path": "qdvkbcwj/.package_cache/.packages/fcfspjde/1.0.0-lgdwszos",
+            "type": "folder"
+        },
+        {
+            "relative_path": "qdvkbcwj/.package_cache/.packages/fcfspjde/1.0.0-lgdwszos/fcfspjde.toml",
+            "source_path": "omniverse://localhost/.packages/test_package/1.0.0/qdvkbcwj/.package_cache/.packages/fcfspjde/1.0.0-lgdwszos/fcfspjde.toml?&1",
+            "version": "16728",
+            "hash": "sha-256-flat;1048576;87cfcbdaf65f25d8427d21edb2a735da8c1fd36b6fc91e7d7ac66d77ac7f815e",
+            "type": "file",
+            "size": 126
+        },
+        {
+            "relative_path": "qdvkbcwj/.package_cache/.packages/fcfspjde/1.0.0-lgdwszos/testfile.txt",
+            "source_path": "omniverse://localhost/.packages/test_package/1.0.0/qdvkbcwj/.package_cache/.packages/fcfspjde/1.0.0-lgdwszos/testfile.txt?&1",
+            "version": "16727",
+            "hash": "sha-256-flat;1048576;5a27e26e252d9445fd2ccce11576ba4d612fb0905ed85ca2f816581e922f43dd",
+            "type": "file",
+            "size": 6
+        },
+        {
+            "source_path": "omniverse://localhost/.packages/test_package/1.0.0/qdvkbcwj/installed_package",
+            "relative_path": "qdvkbcwj/installed_package",
+            "type": "folder"
+        },
+        {
+            "relative_path": "qdvkbcwj/installed_package/fcfspjde.toml",
+            "source_path": "omniverse://localhost/.packages/test_package/1.0.0/qdvkbcwj/installed_package/fcfspjde.toml?&1",
+            "version": "16728",
+            "hash": "sha-256-flat;1048576;87cfcbdaf65f25d8427d21edb2a735da8c1fd36b6fc91e7d7ac66d77ac7f815e",
+            "type": "file",
+            "size": 126
+        },
+        {
+            "relative_path": "qdvkbcwj/installed_package/testfile.txt",
+            "source_path": "omniverse://localhost/.packages/test_package/1.0.0/qdvkbcwj/installed_package/testfile.txt?&1",
+            "version": "16727",
+            "hash": "sha-256-flat;1048576;5a27e26e252d9445fd2ccce11576ba4d612fb0905ed85ca2f816581e922f43dd",
+            "type": "file",
+            "size": 6
+        },
+        {
+            "source_path": "omniverse://localhost/.packages/test_package/1.0.0/qdvkbcwj/installed_package_with_dependency",
+            "relative_path": "qdvkbcwj/installed_package_with_dependency",
+            "type": "folder"
+        },
+        {
+            "relative_path": "qdvkbcwj/installed_package_with_dependency/dependencies.txt",
+            "source_path": "omniverse://localhost/.packages/test_package/1.0.0/qdvkbcwj/installed_package_with_dependency/dependencies.txt?&1",
+            "version": "16730",
+            "hash": "sha-256-flat;1048576;9ef7a50d6eeebce310e640c65f5864dc105dbe5f0eadf930ea2f25df111fc2b1",
+            "type": "file",
+            "size": 256
+        },
+        {
+            "relative_path": "qdvkbcwj/installed_package_with_dependency/fcfspjde.toml",
+            "source_path": "omniverse://localhost/.packages/test_package/1.0.0/qdvkbcwj/installed_package_with_dependency/fcfspjde.toml?&1",
+            "version": "16728",
+            "hash": "sha-256-flat;1048576;87cfcbdaf65f25d8427d21edb2a735da8c1fd36b6fc91e7d7ac66d77ac7f815e",
+            "type": "file",
+            "size": 126
+        },
+        {
+            "relative_path": "qdvkbcwj/installed_package_with_dependency/testfile.txt",
+            "source_path": "omniverse://localhost/.packages/test_package/1.0.0/qdvkbcwj/installed_package_with_dependency/testfile.txt?&1",
+            "version": "16727",
+            "hash": "sha-256-flat;1048576;5a27e26e252d9445fd2ccce11576ba4d612fb0905ed85ca2f816581e922f43dd",
+            "type": "file",
+            "size": 6
+        },
+        {
+            "source_path": "omniverse://localhost/.packages/test_package/1.0.0/qdvkbcwj/package_source",
+            "relative_path": "qdvkbcwj/package_source",
+            "type": "folder"
+        },
+        {
+            "source_path": "omniverse://localhost/.packages/test_package/1.0.0/qdvkbcwj/package_source/source_package",
+            "relative_path": "qdvkbcwj/package_source/source_package",
+            "type": "folder"
+        },
+        {
+            "relative_path": "qdvkbcwj/package_source/source_package/testfile.txt",
+            "source_path": "omniverse://localhost/.packages/test_package/1.0.0/qdvkbcwj/package_source/source_package/testfile.txt?&1",
+            "version": "16727",
+            "hash": "sha-256-flat;1048576;5a27e26e252d9445fd2ccce11576ba4d612fb0905ed85ca2f816581e922f43dd",
+            "type": "file",
+            "size": 6
+        },
+        {
+            "source_path": "omniverse://localhost/.packages/test_package/1.0.0/qrpxjasn",
+            "relative_path": "qrpxjasn",
+            "type": "folder"
+        },
+        {
+            "relative_path": "qrpxjasn/test_new.toml",
+            "source_path": "omniverse://localhost/.packages/test_package/1.0.0/qrpxjasn/test_new.toml?&1",
+            "version": "16691",
+            "hash": "sha-256-flat;1048576;750487d6a147f5844e29acf141b150fd844b12140dd76bd9f252b21dba585fea",
+            "type": "file",
+            "size": 65
+        },
+        {
+            "source_path": "omniverse://localhost/.packages/test_package/1.0.0/rguzlokb",
+            "relative_path": "rguzlokb",
+            "type": "folder"
+        },
+        {
+            "source_path": "omniverse://localhost/.packages/test_package/1.0.0/rguzlokb/source_package",
+            "relative_path": "rguzlokb/source_package",
+            "type": "folder"
+        },
+        {
+            "relative_path": "rguzlokb/source_package/testfile.txt",
+            "source_path": "omniverse://localhost/.packages/test_package/1.0.0/rguzlokb/source_package/testfile.txt?&1",
+            "version": "16734",
+            "hash": "sha-256-flat;1048576;5a27e26e252d9445fd2ccce11576ba4d612fb0905ed85ca2f816581e922f43dd",
+            "type": "file",
+            "size": 6
+        },
+        {
+            "source_path": "omniverse://localhost/.packages/test_package/1.0.0/rnicoztr",
+            "relative_path": "rnicoztr",
+            "type": "folder"
+        },
+        {
+            "source_path": "omniverse://localhost/.packages/test_package/1.0.0/rnicoztr/.packages",
+            "relative_path": "rnicoztr/.packages",
+            "type": "folder"
+        },
+        {
+            "source_path": "omniverse://localhost/.packages/test_package/1.0.0/rnicoztr/.packages/kechdtdv",
+            "relative_path": "rnicoztr/.packages/kechdtdv",
+            "type": "folder"
+        },
+        {
+            "source_path": "omniverse://localhost/.packages/test_package/1.0.0/rnicoztr/.packages/kechdtdv/1.0.0-mxxzxtre",
+            "relative_path": "rnicoztr/.packages/kechdtdv/1.0.0-mxxzxtre",
+            "type": "folder"
+        },
+        {
+            "relative_path": "rnicoztr/.packages/kechdtdv/1.0.0-mxxzxtre/kechdtdv.toml",
+            "source_path": "omniverse://localhost/.packages/test_package/1.0.0/rnicoztr/.packages/kechdtdv/1.0.0-mxxzxtre/kechdtdv.toml?&1",
+            "version": "16695",
+            "hash": "sha-256-flat;1048576;f6f1a3d358d088dbee8e56c27263efebd5a90035759c2af3faa3ee328c1dd4bd",
+            "type": "file",
+            "size": 111
+        },
+        {
+            "source_path": "omniverse://localhost/.packages/test_package/1.0.0/rnicoztr/source_package",
+            "relative_path": "rnicoztr/source_package",
+            "type": "folder"
+        },
+        {
+            "relative_path": "rnicoztr/source_package/testfile.txt",
+            "source_path": "omniverse://localhost/.packages/test_package/1.0.0/rnicoztr/source_package/testfile.txt?&1",
+            "version": "16694",
+            "hash": "sha-256-flat;1048576;5a27e26e252d9445fd2ccce11576ba4d612fb0905ed85ca2f816581e922f43dd",
+            "type": "file",
+            "size": 6
+        },
+        {
+            "source_path": "omniverse://localhost/.packages/test_package/1.0.0/rpffbrlo",
+            "relative_path": "rpffbrlo",
+            "type": "folder"
+        },
+        {
+            "source_path": "omniverse://localhost/.packages/test_package/1.0.0/rpffbrlo/package_source",
+            "relative_path": "rpffbrlo/package_source",
+            "type": "folder"
+        },
+        {
+            "source_path": "omniverse://localhost/.packages/test_package/1.0.0/rpffbrlo/package_source/source_package",
+            "relative_path": "rpffbrlo/package_source/source_package",
+            "type": "folder"
+        },
+        {
+            "relative_path": "rpffbrlo/package_source/source_package/testfile.txt",
+            "source_path": "omniverse://localhost/.packages/test_package/1.0.0/rpffbrlo/package_source/source_package/testfile.txt?&1",
+            "version": "16763",
+            "hash": "sha-256-flat;1048576;5a27e26e252d9445fd2ccce11576ba4d612fb0905ed85ca2f816581e922f43dd",
+            "type": "file",
+            "size": 6
+        },
+        {
+            "source_path": "omniverse://localhost/.packages/test_package/1.0.0/rpffbrlo/target1",
+            "relative_path": "rpffbrlo/target1",
+            "type": "folder"
+        },
+        {
+            "relative_path": "rpffbrlo/target1/testfile.txt",
+            "source_path": "omniverse://localhost/.packages/test_package/1.0.0/rpffbrlo/target1/testfile.txt?&1",
+            "version": "16763",
+            "hash": "sha-256-flat;1048576;5a27e26e252d9445fd2ccce11576ba4d612fb0905ed85ca2f816581e922f43dd",
+            "type": "file",
+            "size": 6
+        },
+        {
+            "source_path": "omniverse://localhost/.packages/test_package/1.0.0/rpffbrlo/target2",
+            "relative_path": "rpffbrlo/target2",
+            "type": "folder"
+        },
+        {
+            "source_path": "omniverse://localhost/.packages/test_package/1.0.0/sahfrcuy",
+            "relative_path": "sahfrcuy",
+            "type": "folder"
+        },
+        {
+            "source_path": "omniverse://localhost/.packages/test_package/1.0.0/sahfrcuy/.packages",
+            "relative_path": "sahfrcuy/.packages",
+            "type": "folder"
+        },
+        {
+            "source_path": "omniverse://localhost/.packages/test_package/1.0.0/sahfrcuy/.packages/ibqepzsz",
+            "relative_path": "sahfrcuy/.packages/ibqepzsz",
+            "type": "folder"
+        },
+        {
+            "source_path": "omniverse://localhost/.packages/test_package/1.0.0/sahfrcuy/.packages/ibqepzsz/1.0.0-arpohbth",
+            "relative_path": "sahfrcuy/.packages/ibqepzsz/1.0.0-arpohbth",
+            "type": "folder"
+        },
+        {
+            "relative_path": "sahfrcuy/.packages/ibqepzsz/1.0.0-arpohbth/ibqepzsz.toml",
+            "source_path": "omniverse://localhost/.packages/test_package/1.0.0/sahfrcuy/.packages/ibqepzsz/1.0.0-arpohbth/ibqepzsz.toml?&1",
+            "version": "16742",
+            "hash": "sha-256-flat;1048576;3c238faf998e4566850ea2149d1f44c48689ed4a9973c3e9ad4cb4b3a802c99e",
+            "type": "file",
+            "size": 111
+        },
+        {
+            "source_path": "omniverse://localhost/.packages/test_package/1.0.0/sahfrcuy/source_package",
+            "relative_path": "sahfrcuy/source_package",
+            "type": "folder"
+        },
+        {
+            "relative_path": "sahfrcuy/source_package/testfile.txt",
+            "source_path": "omniverse://localhost/.packages/test_package/1.0.0/sahfrcuy/source_package/testfile.txt?&1",
+            "version": "16741",
+            "hash": "sha-256-flat;1048576;5a27e26e252d9445fd2ccce11576ba4d612fb0905ed85ca2f816581e922f43dd",
+            "type": "file",
+            "size": 6
+        },
+        {
+            "source_path": "omniverse://localhost/.packages/test_package/1.0.0/sfnseqfs",
+            "relative_path": "sfnseqfs",
+            "type": "folder"
+        },
+        {
+            "source_path": "omniverse://localhost/.packages/test_package/1.0.0/sfnseqfs/package_source",
+            "relative_path": "sfnseqfs/package_source",
+            "type": "folder"
+        },
+        {
+            "source_path": "omniverse://localhost/.packages/test_package/1.0.0/sfnseqfs/package_source/source_package",
+            "relative_path": "sfnseqfs/package_source/source_package",
+            "type": "folder"
+        },
+        {
+            "relative_path": "sfnseqfs/package_source/source_package/testfile.txt",
+            "source_path": "omniverse://localhost/.packages/test_package/1.0.0/sfnseqfs/package_source/source_package/testfile.txt?&1",
+            "version": "16700",
+            "hash": "sha-256-flat;1048576;5a27e26e252d9445fd2ccce11576ba4d612fb0905ed85ca2f816581e922f43dd",
+            "type": "file",
+            "size": 6
+        },
+        {
+            "source_path": "omniverse://localhost/.packages/test_package/1.0.0/sfnseqfs/target1",
+            "relative_path": "sfnseqfs/target1",
+            "type": "folder"
+        },
+        {
+            "relative_path": "sfnseqfs/target1/testfile.txt",
+            "source_path": "omniverse://localhost/.packages/test_package/1.0.0/sfnseqfs/target1/testfile.txt?&1",
+            "version": "16700",
+            "hash": "sha-256-flat;1048576;5a27e26e252d9445fd2ccce11576ba4d612fb0905ed85ca2f816581e922f43dd",
+            "type": "file",
+            "size": 6
+        },
+        {
+            "source_path": "omniverse://localhost/.packages/test_package/1.0.0/sfnseqfs/target2",
+            "relative_path": "sfnseqfs/target2",
+            "type": "folder"
+        },
+        {
+            "source_path": "omniverse://localhost/.packages/test_package/1.0.0/skteordb",
+            "relative_path": "skteordb",
+            "type": "folder"
+        },
+        {
+            "source_path": "omniverse://localhost/.packages/test_package/1.0.0/skteordb/source_package",
+            "relative_path": "skteordb/source_package",
+            "type": "folder"
+        },
+        {
+            "relative_path": "skteordb/source_package/testfile.txt",
+            "source_path": "omniverse://localhost/.packages/test_package/1.0.0/skteordb/source_package/testfile.txt?&1",
+            "version": "16764",
+            "hash": "sha-256-flat;1048576;5a27e26e252d9445fd2ccce11576ba4d612fb0905ed85ca2f816581e922f43dd",
+            "type": "file",
+            "size": 6
+        },
+        {
+            "source_path": "omniverse://localhost/.packages/test_package/1.0.0/skteordb/target",
+            "relative_path": "skteordb/target",
+            "type": "folder"
+        },
+        {
+            "source_path": "omniverse://localhost/.packages/test_package/1.0.0/skteordb/target/source_package",
+            "relative_path": "skteordb/target/source_package",
+            "type": "folder"
+        },
+        {
+            "relative_path": "skteordb/target/source_package/testfile.txt",
+            "source_path": "omniverse://localhost/.packages/test_package/1.0.0/skteordb/target/source_package/testfile.txt?&1",
+            "version": "16765",
+            "hash": "sha-256-flat;1048576;5a27e26e252d9445fd2ccce11576ba4d612fb0905ed85ca2f816581e922f43dd",
+            "type": "file",
+            "size": 6
+        },
+        {
+            "source_path": "omniverse://localhost/.packages/test_package/1.0.0/swkcjexh",
+            "relative_path": "swkcjexh",
+            "type": "folder"
+        },
+        {
+            "source_path": "omniverse://localhost/.packages/test_package/1.0.0/swkcjexh/.package_cache",
+            "relative_path": "swkcjexh/.package_cache",
+            "type": "folder"
+        },
+        {
+            "source_path": "omniverse://localhost/.packages/test_package/1.0.0/swkcjexh/.package_cache/.packages",
+            "relative_path": "swkcjexh/.package_cache/.packages",
+            "type": "folder"
+        },
+        {
+            "source_path": "omniverse://localhost/.packages/test_package/1.0.0/swkcjexh/.package_cache/.packages/ykedyzwt",
+            "relative_path": "swkcjexh/.package_cache/.packages/ykedyzwt",
+            "type": "folder"
+        },
+        {
+            "source_path": "omniverse://localhost/.packages/test_package/1.0.0/swkcjexh/.package_cache/.packages/ykedyzwt/1.0.0-invfemvm",
+            "relative_path": "swkcjexh/.package_cache/.packages/ykedyzwt/1.0.0-invfemvm",
+            "type": "folder"
+        },
+        {
+            "relative_path": "swkcjexh/.package_cache/.packages/ykedyzwt/1.0.0-invfemvm/testfile.txt",
+            "source_path": "omniverse://localhost/.packages/test_package/1.0.0/swkcjexh/.package_cache/.packages/ykedyzwt/1.0.0-invfemvm/testfile.txt?&1",
+            "version": "16759",
+            "hash": "sha-256-flat;1048576;5a27e26e252d9445fd2ccce11576ba4d612fb0905ed85ca2f816581e922f43dd",
+            "type": "file",
+            "size": 6
+        },
+        {
+            "relative_path": "swkcjexh/.package_cache/.packages/ykedyzwt/1.0.0-invfemvm/ykedyzwt.toml",
+            "source_path": "omniverse://localhost/.packages/test_package/1.0.0/swkcjexh/.package_cache/.packages/ykedyzwt/1.0.0-invfemvm/ykedyzwt.toml?&1",
+            "version": "16760",
+            "hash": "sha-256-flat;1048576;86e4e2f34435098c41a7fad9c70a48c90ccdef1a3915e43cb8b7c354c3a7d737",
+            "type": "file",
+            "size": 126
+        },
+        {
+            "source_path": "omniverse://localhost/.packages/test_package/1.0.0/swkcjexh/installed_package",
+            "relative_path": "swkcjexh/installed_package",
+            "type": "folder"
+        },
+        {
+            "relative_path": "swkcjexh/installed_package/testfile.txt",
+            "source_path": "omniverse://localhost/.packages/test_package/1.0.0/swkcjexh/installed_package/testfile.txt?&1",
+            "version": "16759",
+            "hash": "sha-256-flat;1048576;5a27e26e252d9445fd2ccce11576ba4d612fb0905ed85ca2f816581e922f43dd",
+            "type": "file",
+            "size": 6
+        },
+        {
+            "relative_path": "swkcjexh/installed_package/ykedyzwt.toml",
+            "source_path": "omniverse://localhost/.packages/test_package/1.0.0/swkcjexh/installed_package/ykedyzwt.toml?&1",
+            "version": "16760",
+            "hash": "sha-256-flat;1048576;86e4e2f34435098c41a7fad9c70a48c90ccdef1a3915e43cb8b7c354c3a7d737",
+            "type": "file",
+            "size": 126
+        },
+        {
+            "source_path": "omniverse://localhost/.packages/test_package/1.0.0/swkcjexh/installed_package_with_dependency",
+            "relative_path": "swkcjexh/installed_package_with_dependency",
+            "type": "folder"
+        },
+        {
+            "relative_path": "swkcjexh/installed_package_with_dependency/dependencies.txt",
+            "source_path": "omniverse://localhost/.packages/test_package/1.0.0/swkcjexh/installed_package_with_dependency/dependencies.txt?&1",
+            "version": "16762",
+            "hash": "sha-256-flat;1048576;d6d389e395bef44e32a9e60205f11e2727cf656a25abc4dabfd21e60da33cd0d",
+            "type": "file",
+            "size": 256
+        },
+        {
+            "relative_path": "swkcjexh/installed_package_with_dependency/testfile.txt",
+            "source_path": "omniverse://localhost/.packages/test_package/1.0.0/swkcjexh/installed_package_with_dependency/testfile.txt?&1",
+            "version": "16759",
+            "hash": "sha-256-flat;1048576;5a27e26e252d9445fd2ccce11576ba4d612fb0905ed85ca2f816581e922f43dd",
+            "type": "file",
+            "size": 6
+        },
+        {
+            "relative_path": "swkcjexh/installed_package_with_dependency/ykedyzwt.toml",
+            "source_path": "omniverse://localhost/.packages/test_package/1.0.0/swkcjexh/installed_package_with_dependency/ykedyzwt.toml?&1",
+            "version": "16760",
+            "hash": "sha-256-flat;1048576;86e4e2f34435098c41a7fad9c70a48c90ccdef1a3915e43cb8b7c354c3a7d737",
+            "type": "file",
+            "size": 126
+        },
+        {
+            "source_path": "omniverse://localhost/.packages/test_package/1.0.0/swkcjexh/package_source",
+            "relative_path": "swkcjexh/package_source",
+            "type": "folder"
+        },
+        {
+            "source_path": "omniverse://localhost/.packages/test_package/1.0.0/swkcjexh/package_source/source_package",
+            "relative_path": "swkcjexh/package_source/source_package",
+            "type": "folder"
+        },
+        {
+            "relative_path": "swkcjexh/package_source/source_package/testfile.txt",
+            "source_path": "omniverse://localhost/.packages/test_package/1.0.0/swkcjexh/package_source/source_package/testfile.txt?&1",
+            "version": "16759",
+            "hash": "sha-256-flat;1048576;5a27e26e252d9445fd2ccce11576ba4d612fb0905ed85ca2f816581e922f43dd",
+            "type": "file",
+            "size": 6
+        },
+        {
+            "relative_path": "test_package.toml",
+            "source_path": "omniverse://localhost/.packages/test_package/1.0.0/test_package.toml?&1",
+            "version": "16770",
+            "hash": "sha-256-flat;1048576;53174b039e01e4c6fcfaac1fd2312ce3c58ff4f2ec81f50349781b47887769b6",
+            "type": "file",
+            "size": 82
+        },
+        {
+            "source_path": "omniverse://localhost/.packages/test_package/1.0.0/tljrnjht",
+            "relative_path": "tljrnjht",
+            "type": "folder"
+        },
+        {
+            "source_path": "omniverse://localhost/.packages/test_package/1.0.0/tljrnjht/.packages",
+            "relative_path": "tljrnjht/.packages",
+            "type": "folder"
+        },
+        {
+            "source_path": "omniverse://localhost/.packages/test_package/1.0.0/tljrnjht/.packages/uxxfdvvd",
+            "relative_path": "tljrnjht/.packages/uxxfdvvd",
+            "type": "folder"
+        },
+        {
+            "source_path": "omniverse://localhost/.packages/test_package/1.0.0/tljrnjht/.packages/uxxfdvvd/1.0.0-mfmodpuh",
+            "relative_path": "tljrnjht/.packages/uxxfdvvd/1.0.0-mfmodpuh",
+            "type": "folder"
+        },
+        {
+            "relative_path": "tljrnjht/.packages/uxxfdvvd/1.0.0-mfmodpuh/testfile.txt",
+            "source_path": "omniverse://localhost/.packages/test_package/1.0.0/tljrnjht/.packages/uxxfdvvd/1.0.0-mfmodpuh/testfile.txt?&1",
+            "version": "16692",
+            "hash": "sha-256-flat;1048576;5a27e26e252d9445fd2ccce11576ba4d612fb0905ed85ca2f816581e922f43dd",
+            "type": "file",
+            "size": 6
+        },
+        {
+            "relative_path": "tljrnjht/.packages/uxxfdvvd/1.0.0-mfmodpuh/uxxfdvvd.toml",
+            "source_path": "omniverse://localhost/.packages/test_package/1.0.0/tljrnjht/.packages/uxxfdvvd/1.0.0-mfmodpuh/uxxfdvvd.toml?&1",
+            "version": "16693",
+            "hash": "sha-256-flat;1048576;1129fe40623bc72eaec0583933b285137ec326e9eb6d8bec33657c1b82a0e458",
+            "type": "file",
+            "size": 111
+        },
+        {
+            "source_path": "omniverse://localhost/.packages/test_package/1.0.0/tljrnjht/source_package",
+            "relative_path": "tljrnjht/source_package",
+            "type": "folder"
+        },
+        {
+            "relative_path": "tljrnjht/source_package/testfile.txt",
+            "source_path": "omniverse://localhost/.packages/test_package/1.0.0/tljrnjht/source_package/testfile.txt?&1",
+            "version": "16692",
+            "hash": "sha-256-flat;1048576;5a27e26e252d9445fd2ccce11576ba4d612fb0905ed85ca2f816581e922f43dd",
+            "type": "file",
+            "size": 6
+        },
+        {
+            "source_path": "omniverse://localhost/.packages/test_package/1.0.0/tpnsrnqk",
+            "relative_path": "tpnsrnqk",
+            "type": "folder"
+        },
+        {
+            "source_path": "omniverse://localhost/.packages/test_package/1.0.0/tpnsrnqk/.packages",
+            "relative_path": "tpnsrnqk/.packages",
+            "type": "folder"
+        },
+        {
+            "source_path": "omniverse://localhost/.packages/test_package/1.0.0/tpnsrnqk/.packages/mucxlwts",
+            "relative_path": "tpnsrnqk/.packages/mucxlwts",
+            "type": "folder"
+        },
+        {
+            "source_path": "omniverse://localhost/.packages/test_package/1.0.0/tpnsrnqk/.packages/mucxlwts/1.0.0-ysuuzuai",
+            "relative_path": "tpnsrnqk/.packages/mucxlwts/1.0.0-ysuuzuai",
+            "type": "folder"
+        },
+        {
+            "relative_path": "tpnsrnqk/.packages/mucxlwts/1.0.0-ysuuzuai/mucxlwts.toml",
+            "source_path": "omniverse://localhost/.packages/test_package/1.0.0/tpnsrnqk/.packages/mucxlwts/1.0.0-ysuuzuai/mucxlwts.toml?&1",
+            "version": "16758",
+            "hash": "sha-256-flat;1048576;53f2e8a71738a342e4ae7d94caed19e78b97d60599c302b0ca7a2311067b9b58",
+            "type": "file",
+            "size": 111
+        },
+        {
+            "source_path": "omniverse://localhost/.packages/test_package/1.0.0/tpnsrnqk/source_package",
+            "relative_path": "tpnsrnqk/source_package",
+            "type": "folder"
+        },
+        {
+            "relative_path": "tpnsrnqk/source_package/testfile.txt",
+            "source_path": "omniverse://localhost/.packages/test_package/1.0.0/tpnsrnqk/source_package/testfile.txt?&1",
+            "version": "16757",
+            "hash": "sha-256-flat;1048576;5a27e26e252d9445fd2ccce11576ba4d612fb0905ed85ca2f816581e922f43dd",
+            "type": "file",
+            "size": 6
+        },
+        {
+            "source_path": "omniverse://localhost/.packages/test_package/1.0.0/udyqrmad",
+            "relative_path": "udyqrmad",
+            "type": "folder"
+        },
+        {
+            "source_path": "omniverse://localhost/.packages/test_package/1.0.0/udyqrmad/.package_cache",
+            "relative_path": "udyqrmad/.package_cache",
+            "type": "folder"
+        },
+        {
+            "source_path": "omniverse://localhost/.packages/test_package/1.0.0/udyqrmad/.package_cache/.packages",
+            "relative_path": "udyqrmad/.package_cache/.packages",
+            "type": "folder"
+        },
+        {
+            "source_path": "omniverse://localhost/.packages/test_package/1.0.0/udyqrmad/.package_cache/.packages/bhtlaagg",
+            "relative_path": "udyqrmad/.package_cache/.packages/bhtlaagg",
+            "type": "folder"
+        },
+        {
+            "source_path": "omniverse://localhost/.packages/test_package/1.0.0/udyqrmad/.package_cache/.packages/bhtlaagg/1.0.0-dpishotr",
+            "relative_path": "udyqrmad/.package_cache/.packages/bhtlaagg/1.0.0-dpishotr",
+            "type": "folder"
+        },
+        {
+            "relative_path": "udyqrmad/.package_cache/.packages/bhtlaagg/1.0.0-dpishotr/bhtlaagg.toml",
+            "source_path": "omniverse://localhost/.packages/test_package/1.0.0/udyqrmad/.package_cache/.packages/bhtlaagg/1.0.0-dpishotr/bhtlaagg.toml?&1",
+            "version": "16682",
+            "hash": "sha-256-flat;1048576;3079d4eb99ba5e5c36b66ff4347784783254fc4ddb274c9e1e1e8747f9935e30",
+            "type": "file",
+            "size": 126
+        },
+        {
+            "relative_path": "udyqrmad/.package_cache/.packages/bhtlaagg/1.0.0-dpishotr/testfile.txt",
+            "source_path": "omniverse://localhost/.packages/test_package/1.0.0/udyqrmad/.package_cache/.packages/bhtlaagg/1.0.0-dpishotr/testfile.txt?&1",
+            "version": "16681",
+            "hash": "sha-256-flat;1048576;5a27e26e252d9445fd2ccce11576ba4d612fb0905ed85ca2f816581e922f43dd",
+            "type": "file",
+            "size": 6
+        },
+        {
+            "source_path": "omniverse://localhost/.packages/test_package/1.0.0/udyqrmad/installed_package",
+            "relative_path": "udyqrmad/installed_package",
+            "type": "folder"
+        },
+        {
+            "relative_path": "udyqrmad/installed_package/bhtlaagg.toml",
+            "source_path": "omniverse://localhost/.packages/test_package/1.0.0/udyqrmad/installed_package/bhtlaagg.toml?&1",
+            "version": "16682",
+            "hash": "sha-256-flat;1048576;3079d4eb99ba5e5c36b66ff4347784783254fc4ddb274c9e1e1e8747f9935e30",
+            "type": "file",
+            "size": 126
+        },
+        {
+            "relative_path": "udyqrmad/installed_package/testfile.txt",
+            "source_path": "omniverse://localhost/.packages/test_package/1.0.0/udyqrmad/installed_package/testfile.txt?&1",
+            "version": "16681",
+            "hash": "sha-256-flat;1048576;5a27e26e252d9445fd2ccce11576ba4d612fb0905ed85ca2f816581e922f43dd",
+            "type": "file",
+            "size": 6
+        },
+        {
+            "source_path": "omniverse://localhost/.packages/test_package/1.0.0/udyqrmad/installed_package_with_dependency",
+            "relative_path": "udyqrmad/installed_package_with_dependency",
+            "type": "folder"
+        },
+        {
+            "relative_path": "udyqrmad/installed_package_with_dependency/bhtlaagg.toml",
+            "source_path": "omniverse://localhost/.packages/test_package/1.0.0/udyqrmad/installed_package_with_dependency/bhtlaagg.toml?&1",
+            "version": "16682",
+            "hash": "sha-256-flat;1048576;3079d4eb99ba5e5c36b66ff4347784783254fc4ddb274c9e1e1e8747f9935e30",
+            "type": "file",
+            "size": 126
+        },
+        {
+            "relative_path": "udyqrmad/installed_package_with_dependency/dependencies.txt",
+            "source_path": "omniverse://localhost/.packages/test_package/1.0.0/udyqrmad/installed_package_with_dependency/dependencies.txt?&1",
+            "version": "16684",
+            "hash": "sha-256-flat;1048576;bd26647794a28e0711813b12b76a4a74e0c47f817dcca264c0e642d632ff3865",
+            "type": "file",
+            "size": 256
+        },
+        {
+            "relative_path": "udyqrmad/installed_package_with_dependency/testfile.txt",
+            "source_path": "omniverse://localhost/.packages/test_package/1.0.0/udyqrmad/installed_package_with_dependency/testfile.txt?&1",
+            "version": "16681",
+            "hash": "sha-256-flat;1048576;5a27e26e252d9445fd2ccce11576ba4d612fb0905ed85ca2f816581e922f43dd",
+            "type": "file",
+            "size": 6
+        },
+        {
+            "source_path": "omniverse://localhost/.packages/test_package/1.0.0/udyqrmad/package_source",
+            "relative_path": "udyqrmad/package_source",
+            "type": "folder"
+        },
+        {
+            "source_path": "omniverse://localhost/.packages/test_package/1.0.0/udyqrmad/package_source/source_package",
+            "relative_path": "udyqrmad/package_source/source_package",
+            "type": "folder"
+        },
+        {
+            "relative_path": "udyqrmad/package_source/source_package/testfile.txt",
+            "source_path": "omniverse://localhost/.packages/test_package/1.0.0/udyqrmad/package_source/source_package/testfile.txt?&1",
+            "version": "16681",
+            "hash": "sha-256-flat;1048576;5a27e26e252d9445fd2ccce11576ba4d612fb0905ed85ca2f816581e922f43dd",
+            "type": "file",
+            "size": 6
+        },
+        {
+            "source_path": "omniverse://localhost/.packages/test_package/1.0.0/uulpgise",
+            "relative_path": "uulpgise",
+            "type": "folder"
+        },
+        {
+            "source_path": "omniverse://localhost/.packages/test_package/1.0.0/uulpgise/source_package",
+            "relative_path": "uulpgise/source_package",
+            "type": "folder"
+        },
+        {
+            "relative_path": "uulpgise/source_package/added.txt",
+            "source_path": "omniverse://localhost/.packages/test_package/1.0.0/uulpgise/source_package/added.txt?&1",
+            "version": "16737",
+            "hash": "sha-256-flat;1048576;1161450d74fad7a0b5f6bc73d218ccc7e8f10450e64f4823f89173680d2f8084",
+            "type": "file",
+            "size": 12
+        },
+        {
+            "relative_path": "uulpgise/source_package/testfile.txt",
+            "source_path": "omniverse://localhost/.packages/test_package/1.0.0/uulpgise/source_package/testfile.txt?&1",
+            "version": "16736",
+            "hash": "sha-256-flat;1048576;9cd9b0a31923b9e53165e9a180e3fed1336efed68505321e538c2673b061f08e",
+            "type": "file",
+            "size": 4
+        },
+        {
+            "source_path": "omniverse://localhost/.packages/test_package/1.0.0/vjfsgdhc",
+            "relative_path": "vjfsgdhc",
+            "type": "folder"
+        },
+        {
+            "source_path": "omniverse://localhost/.packages/test_package/1.0.0/vjfsgdhc/.package_cache",
+            "relative_path": "vjfsgdhc/.package_cache",
+            "type": "folder"
+        },
+        {
+            "source_path": "omniverse://localhost/.packages/test_package/1.0.0/vjfsgdhc/.package_cache/.packages",
+            "relative_path": "vjfsgdhc/.package_cache/.packages",
+            "type": "folder"
+        },
+        {
+            "source_path": "omniverse://localhost/.packages/test_package/1.0.0/vjfsgdhc/.package_cache/.packages/wshfoifh",
+            "relative_path": "vjfsgdhc/.package_cache/.packages/wshfoifh",
+            "type": "folder"
+        },
+        {
+            "source_path": "omniverse://localhost/.packages/test_package/1.0.0/vjfsgdhc/.package_cache/.packages/wshfoifh/1.0.0-yecccevf",
+            "relative_path": "vjfsgdhc/.package_cache/.packages/wshfoifh/1.0.0-yecccevf",
+            "type": "folder"
+        },
+        {
+            "relative_path": "vjfsgdhc/.package_cache/.packages/wshfoifh/1.0.0-yecccevf/testfile.txt",
+            "source_path": "omniverse://localhost/.packages/test_package/1.0.0/vjfsgdhc/.package_cache/.packages/wshfoifh/1.0.0-yecccevf/testfile.txt?&1",
+            "version": "16743",
+            "hash": "sha-256-flat;1048576;5a27e26e252d9445fd2ccce11576ba4d612fb0905ed85ca2f816581e922f43dd",
+            "type": "file",
+            "size": 6
+        },
+        {
+            "relative_path": "vjfsgdhc/.package_cache/.packages/wshfoifh/1.0.0-yecccevf/wshfoifh.toml",
+            "source_path": "omniverse://localhost/.packages/test_package/1.0.0/vjfsgdhc/.package_cache/.packages/wshfoifh/1.0.0-yecccevf/wshfoifh.toml?&1",
+            "version": "16744",
+            "hash": "sha-256-flat;1048576;148dd4732f976d54d9ef0f08ee9b31770c9dd8221184f1ca9248f1e4a925dd43",
+            "type": "file",
+            "size": 126
+        },
+        {
+            "source_path": "omniverse://localhost/.packages/test_package/1.0.0/vjfsgdhc/installed_package",
+            "relative_path": "vjfsgdhc/installed_package",
+            "type": "folder"
+        },
+        {
+            "relative_path": "vjfsgdhc/installed_package/testfile.txt",
+            "source_path": "omniverse://localhost/.packages/test_package/1.0.0/vjfsgdhc/installed_package/testfile.txt?&1",
+            "version": "16743",
+            "hash": "sha-256-flat;1048576;5a27e26e252d9445fd2ccce11576ba4d612fb0905ed85ca2f816581e922f43dd",
+            "type": "file",
+            "size": 6
+        },
+        {
+            "relative_path": "vjfsgdhc/installed_package/wshfoifh.toml",
+            "source_path": "omniverse://localhost/.packages/test_package/1.0.0/vjfsgdhc/installed_package/wshfoifh.toml?&1",
+            "version": "16744",
+            "hash": "sha-256-flat;1048576;148dd4732f976d54d9ef0f08ee9b31770c9dd8221184f1ca9248f1e4a925dd43",
+            "type": "file",
+            "size": 126
+        },
+        {
+            "source_path": "omniverse://localhost/.packages/test_package/1.0.0/vjfsgdhc/installed_package_with_dependency",
+            "relative_path": "vjfsgdhc/installed_package_with_dependency",
+            "type": "folder"
+        },
+        {
+            "relative_path": "vjfsgdhc/installed_package_with_dependency/dependencies.txt",
+            "source_path": "omniverse://localhost/.packages/test_package/1.0.0/vjfsgdhc/installed_package_with_dependency/dependencies.txt?&1",
+            "version": "16746",
+            "hash": "sha-256-flat;1048576;24b8db131bea40f9b726fcca3c00f4884583c146dfc80de3876d5a620ba6b0b2",
+            "type": "file",
+            "size": 256
+        },
+        {
+            "relative_path": "vjfsgdhc/installed_package_with_dependency/testfile.txt",
+            "source_path": "omniverse://localhost/.packages/test_package/1.0.0/vjfsgdhc/installed_package_with_dependency/testfile.txt?&1",
+            "version": "16743",
+            "hash": "sha-256-flat;1048576;5a27e26e252d9445fd2ccce11576ba4d612fb0905ed85ca2f816581e922f43dd",
+            "type": "file",
+            "size": 6
+        },
+        {
+            "relative_path": "vjfsgdhc/installed_package_with_dependency/wshfoifh.toml",
+            "source_path": "omniverse://localhost/.packages/test_package/1.0.0/vjfsgdhc/installed_package_with_dependency/wshfoifh.toml?&1",
+            "version": "16744",
+            "hash": "sha-256-flat;1048576;148dd4732f976d54d9ef0f08ee9b31770c9dd8221184f1ca9248f1e4a925dd43",
+            "type": "file",
+            "size": 126
+        },
+        {
+            "source_path": "omniverse://localhost/.packages/test_package/1.0.0/vjfsgdhc/package_source",
+            "relative_path": "vjfsgdhc/package_source",
+            "type": "folder"
+        },
+        {
+            "source_path": "omniverse://localhost/.packages/test_package/1.0.0/vjfsgdhc/package_source/source_package",
+            "relative_path": "vjfsgdhc/package_source/source_package",
+            "type": "folder"
+        },
+        {
+            "relative_path": "vjfsgdhc/package_source/source_package/testfile.txt",
+            "source_path": "omniverse://localhost/.packages/test_package/1.0.0/vjfsgdhc/package_source/source_package/testfile.txt?&1",
+            "version": "16743",
+            "hash": "sha-256-flat;1048576;5a27e26e252d9445fd2ccce11576ba4d612fb0905ed85ca2f816581e922f43dd",
+            "type": "file",
+            "size": 6
+        },
+        {
+            "source_path": "omniverse://localhost/.packages/test_package/1.0.0/woxiodrn",
+            "relative_path": "woxiodrn",
+            "type": "folder"
+        },
+        {
+            "relative_path": "woxiodrn/test_new.toml",
+            "source_path": "omniverse://localhost/.packages/test_package/1.0.0/woxiodrn/test_new.toml?&1",
+            "version": "16754",
+            "hash": "sha-256-flat;1048576;b1a2f11d458bf580e50c6a320c66b7e7f767cc6c092752d4973e532afc752e45",
+            "type": "file",
+            "size": 65
+        },
+        {
+            "source_path": "omniverse://localhost/.packages/test_package/1.0.0/xoqfidtw",
+            "relative_path": "xoqfidtw",
+            "type": "folder"
+        },
+        {
+            "source_path": "omniverse://localhost/.packages/test_package/1.0.0/xoqfidtw/source_package",
+            "relative_path": "xoqfidtw/source_package",
+            "type": "folder"
+        },
+        {
+            "relative_path": "xoqfidtw/source_package/testfile.txt",
+            "source_path": "omniverse://localhost/.packages/test_package/1.0.0/xoqfidtw/source_package/testfile.txt?&1",
+            "version": "16732",
+            "hash": "sha-256-flat;1048576;5a27e26e252d9445fd2ccce11576ba4d612fb0905ed85ca2f816581e922f43dd",
+            "type": "file",
+            "size": 6
+        },
+        {
+            "source_path": "omniverse://localhost/.packages/test_package/1.0.0/xoqfidtw/target",
+            "relative_path": "xoqfidtw/target",
+            "type": "folder"
+        },
+        {
+            "source_path": "omniverse://localhost/.packages/test_package/1.0.0/xoqfidtw/target/source_package",
+            "relative_path": "xoqfidtw/target/source_package",
+            "type": "folder"
+        },
+        {
+            "relative_path": "xoqfidtw/target/source_package/testfile.txt",
+            "source_path": "omniverse://localhost/.packages/test_package/1.0.0/xoqfidtw/target/source_package/testfile.txt?&1",
+            "version": "16733",
+            "hash": "sha-256-flat;1048576;5a27e26e252d9445fd2ccce11576ba4d612fb0905ed85ca2f816581e922f43dd",
+            "type": "file",
+            "size": 6
+        },
+        {
+            "source_path": "omniverse://localhost/.packages/test_package/1.0.0/yyihteyu",
+            "relative_path": "yyihteyu",
+            "type": "folder"
+        },
+        {
+            "source_path": "omniverse://localhost/.packages/test_package/1.0.0/yyihteyu/package_source",
+            "relative_path": "yyihteyu/package_source",
+            "type": "folder"
+        },
+        {
+            "source_path": "omniverse://localhost/.packages/test_package/1.0.0/yyihteyu/package_source/source_package",
+            "relative_path": "yyihteyu/package_source/source_package",
+            "type": "folder"
+        },
+        {
+            "relative_path": "yyihteyu/package_source/source_package/testfile.txt",
+            "source_path": "omniverse://localhost/.packages/test_package/1.0.0/yyihteyu/package_source/source_package/testfile.txt?&1",
+            "version": "16685",
+            "hash": "sha-256-flat;1048576;5a27e26e252d9445fd2ccce11576ba4d612fb0905ed85ca2f816581e922f43dd",
+            "type": "file",
+            "size": 6
+        },
+        {
+            "source_path": "omniverse://localhost/.packages/test_package/1.0.0/yyihteyu/target1",
+            "relative_path": "yyihteyu/target1",
+            "type": "folder"
+        },
+        {
+            "relative_path": "yyihteyu/target1/testfile.txt",
+            "source_path": "omniverse://localhost/.packages/test_package/1.0.0/yyihteyu/target1/testfile.txt?&1",
+            "version": "16685",
+            "hash": "sha-256-flat;1048576;5a27e26e252d9445fd2ccce11576ba4d612fb0905ed85ca2f816581e922f43dd",
+            "type": "file",
+            "size": 6
+        },
+        {
+            "source_path": "omniverse://localhost/.packages/test_package/1.0.0/yyihteyu/target2",
+            "relative_path": "yyihteyu/target2",
+            "type": "folder"
+        },
+        {
+            "source_path": "omniverse://localhost/.packages/test_package/1.0.0/zeddkoju",
+            "relative_path": "zeddkoju",
+            "type": "folder"
+        },
+        {
+            "source_path": "omniverse://localhost/.packages/test_package/1.0.0/zeddkoju/.packages",
+            "relative_path": "zeddkoju/.packages",
+            "type": "folder"
+        },
+        {
+            "source_path": "omniverse://localhost/.packages/test_package/1.0.0/zeddkoju/.packages/mhpuxjsf",
+            "relative_path": "zeddkoju/.packages/mhpuxjsf",
+            "type": "folder"
+        },
+        {
+            "source_path": "omniverse://localhost/.packages/test_package/1.0.0/zeddkoju/.packages/mhpuxjsf/1.0.0-zmnxnfgx",
+            "relative_path": "zeddkoju/.packages/mhpuxjsf/1.0.0-zmnxnfgx",
+            "type": "folder"
+        },
+        {
+            "relative_path": "zeddkoju/.packages/mhpuxjsf/1.0.0-zmnxnfgx/mhpuxjsf.toml",
+            "source_path": "omniverse://localhost/.packages/test_package/1.0.0/zeddkoju/.packages/mhpuxjsf/1.0.0-zmnxnfgx/mhpuxjsf.toml?&1",
+            "version": "16724",
+            "hash": "sha-256-flat;1048576;1a3e40d9527423be2b96571e67439050903b6f5c491ca48de6f4b36c9586097e",
+            "type": "file",
+            "size": 111
+        },
+        {
+            "relative_path": "zeddkoju/.packages/mhpuxjsf/1.0.0-zmnxnfgx/testfile.txt",
+            "source_path": "omniverse://localhost/.packages/test_package/1.0.0/zeddkoju/.packages/mhpuxjsf/1.0.0-zmnxnfgx/testfile.txt?&1",
+            "version": "16723",
+            "hash": "sha-256-flat;1048576;5a27e26e252d9445fd2ccce11576ba4d612fb0905ed85ca2f816581e922f43dd",
+            "type": "file",
+            "size": 6
+        },
+        {
+            "source_path": "omniverse://localhost/.packages/test_package/1.0.0/zeddkoju/source_package",
+            "relative_path": "zeddkoju/source_package",
+            "type": "folder"
+        },
+        {
+            "relative_path": "zeddkoju/source_package/testfile.txt",
+            "source_path": "omniverse://localhost/.packages/test_package/1.0.0/zeddkoju/source_package/testfile.txt?&1",
+            "version": "16723",
+            "hash": "sha-256-flat;1048576;5a27e26e252d9445fd2ccce11576ba4d612fb0905ed85ca2f816581e922f43dd",
+            "type": "file",
+            "size": 6
+        },
+        {
+            "source_path": "omniverse://localhost/.packages/test_package/1.0.0/zohcldev",
+            "relative_path": "zohcldev",
+            "type": "folder"
+        },
+        {
+            "source_path": "omniverse://localhost/.packages/test_package/1.0.0/zohcldev/source_package",
+            "relative_path": "zohcldev/source_package",
+            "type": "folder"
+        },
+        {
+            "relative_path": "zohcldev/source_package/testfile.txt",
+            "source_path": "omniverse://localhost/.packages/test_package/1.0.0/zohcldev/source_package/testfile.txt?&1",
+            "version": "16686",
+            "hash": "sha-256-flat;1048576;5a27e26e252d9445fd2ccce11576ba4d612fb0905ed85ca2f816581e922f43dd",
+            "type": "file",
+            "size": 6
+        }
+    ]
+}

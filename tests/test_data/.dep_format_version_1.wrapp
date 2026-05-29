@@ -1,0 +1,29 @@
+{
+  "format_version": "1",
+  "name": "shelter",
+  "version": "1.0",
+  "catalog": {
+    "root": "omniverse://localhost/.packages/shelter/1.0",
+    "format_version": "1",
+    "items": [],
+    "storage_map": null
+  },
+  "remote": "omniverse://localhost",
+  "source_url": null,
+  "dependencies": [
+    {
+      "format_version": "1",
+      "package": "cats",
+      "version": "1.0",
+      "relative_destination": "cat_folder",
+      "remote": "omniverse://cat_host/"
+    },
+    {
+      "format_version": "1",
+      "package": "dogs",
+      "version": "1.0",
+      "relative_destination": "dog_folder",
+      "remote": "omniverse://dog_host/"
+    }
+  ]
+}

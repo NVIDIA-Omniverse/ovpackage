@@ -1,0 +1,242 @@
+{
+    "$defs": {
+        "Catalog": {
+            "additionalProperties": true,
+            "properties": {
+                "format_version": {
+                    "$ref": "#/$defs/WRAPPModelVersion",
+                    "default": {
+                        "version_string": "5.0"
+                    }
+                },
+                "items": {
+                    "items": {
+                        "$ref": "#/$defs/CatalogItem"
+                    },
+                    "type": "array"
+                },
+                "root": {
+                    "type": "string"
+                },
+                "storage_map": {
+                    "anyOf": [
+                        {
+                            "$ref": "#/$defs/StorageMap"
+                        },
+                        {
+                            "type": "null"
+                        }
+                    ],
+                    "default": null
+                }
+            },
+            "required": [
+                "root",
+                "items"
+            ],
+            "type": "object"
+        },
+        "CatalogItem": {
+            "properties": {
+                "hash": {
+                    "anyOf": [
+                        {
+                            "type": "string"
+                        },
+                        {
+                            "type": "null"
+                        }
+                    ],
+                    "default": null
+                },
+                "relative_path": {
+                    "type": "string"
+                },
+                "resource_identity": {
+                    "anyOf": [
+                        {
+                            "type": "string"
+                        },
+                        {
+                            "type": "null"
+                        }
+                    ],
+                    "default": null
+                },
+                "size": {
+                    "anyOf": [
+                        {
+                            "type": "integer"
+                        },
+                        {
+                            "type": "null"
+                        }
+                    ],
+                    "default": null
+                },
+                "source_path": {
+                    "type": "string"
+                },
+                "tags": {
+                    "anyOf": [
+                        {
+                            "items": {
+                                "$ref": "#/$defs/Tag"
+                            },
+                            "type": "array"
+                        },
+                        {
+                            "type": "null"
+                        }
+                    ],
+                    "default": null
+                }
+            },
+            "required": [
+                "source_path",
+                "relative_path"
+            ],
+            "type": "object"
+        },
+        "Dependency": {
+            "additionalProperties": true,
+            "properties": {
+                "format_version": {
+                    "$ref": "#/$defs/WRAPPModelVersion",
+                    "default": {
+                        "version_string": "3.0"
+                    }
+                },
+                "package": {
+                    "type": "string"
+                },
+                "relative_destination": {
+                    "type": "string"
+                },
+                "repository": {
+                    "type": "string"
+                },
+                "version": {
+                    "type": "string"
+                }
+            },
+            "required": [
+                "package",
+                "version",
+                "relative_destination",
+                "repository"
+            ],
+            "type": "object"
+        },
+        "StorageMap": {
+            "properties": {
+                "storage_map": {
+                    "additionalProperties": {
+                        "type": "string"
+                    },
+                    "type": "object"
+                }
+            },
+            "required": [
+                "storage_map"
+            ],
+            "type": "object"
+        },
+        "Tag": {
+            "properties": {
+                "name": {
+                    "type": "string"
+                },
+                "ns": {
+                    "type": "string"
+                },
+                "value": {
+                    "type": "string"
+                }
+            },
+            "required": [
+                "name",
+                "ns",
+                "value"
+            ],
+            "type": "object"
+        },
+        "WRAPPModelVersion": {
+            "properties": {
+                "version_string": {
+                    "pattern": "[0-9]+(\\.[0-9]+)?",
+                    "type": "string"
+                }
+            },
+            "required": [
+                "version_string"
+            ],
+            "type": "object"
+        }
+    },
+    "additionalProperties": true,
+    "properties": {
+        "catalog": {
+            "anyOf": [
+                {
+                    "$ref": "#/$defs/Catalog"
+                },
+                {
+                    "type": "null"
+                }
+            ],
+            "default": null
+        },
+        "dependencies": {
+            "anyOf": [
+                {
+                    "items": {
+                        "$ref": "#/$defs/Dependency"
+                    },
+                    "type": "array"
+                },
+                {
+                    "type": "null"
+                }
+            ],
+            "default": null
+        },
+        "format_version": {
+            "$ref": "#/$defs/WRAPPModelVersion",
+            "default": {
+                "version_string": "5.2"
+            }
+        },
+        "name": {
+            "default": "",
+            "type": "string"
+        },
+        "repository": {
+            "anyOf": [
+                {
+                    "type": "string"
+                },
+                {
+                    "type": "null"
+                }
+            ],
+            "default": null
+        },
+        "source": {
+            "anyOf": [
+                {
+                    "type": "string"
+                },
+                {
+                    "type": "null"
+                }
+            ],
+            "default": null
+        },
+        "version": {
+            "default": "",
+            "type": "string"
+        }
+    },
+    "type": "object"
+}

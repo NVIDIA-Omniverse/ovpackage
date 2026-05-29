@@ -1,0 +1,25 @@
+{
+  "format_version": {
+    "version_string": "1.0"
+  },
+  "dependencies": [
+    {
+      "format_version": {
+        "version_string": "3.0"
+      },
+      "package": "cats",
+      "version": "1.0",
+      "relative_destination": "cat_folder",
+      "repository": "omniverse://cat_host/"
+    },
+    {
+      "format_version": {
+        "version_string": "3.0"
+      },
+      "package": "dogs",
+      "version": "1.0",
+      "relative_destination": "dog_folder",
+      "repository": "omniverse://dog_host/"
+    }
+  ]
+}

@@ -1,0 +1,65 @@
+{
+    "$defs": {
+        "Dependency": {
+            "additionalProperties": true,
+            "properties": {
+                "format_version": {
+                    "$ref": "#/$defs/WRAPPModelVersion",
+                    "default": {
+                        "version_string": "3.0"
+                    }
+                },
+                "package": {
+                    "type": "string"
+                },
+                "relative_destination": {
+                    "type": "string"
+                },
+                "repository": {
+                    "type": "string"
+                },
+                "version": {
+                    "type": "string"
+                }
+            },
+            "required": [
+                "package",
+                "version",
+                "relative_destination",
+                "repository"
+            ],
+            "type": "object"
+        },
+        "WRAPPModelVersion": {
+            "properties": {
+                "version_string": {
+                    "pattern": "[0-9]+(\\.[0-9]+)?",
+                    "type": "string"
+                }
+            },
+            "required": [
+                "version_string"
+            ],
+            "type": "object"
+        }
+    },
+    "additionalProperties": true,
+    "properties": {
+        "dependencies": {
+            "items": {
+                "$ref": "#/$defs/Dependency"
+            },
+            "type": "array"
+        },
+        "format_version": {
+            "$ref": "#/$defs/WRAPPModelVersion",
+            "default": {
+                "version_string": "1.0"
+            }
+        }
+    },
+    "required": [
+        "dependencies"
+    ],
+    "type": "object"
+}

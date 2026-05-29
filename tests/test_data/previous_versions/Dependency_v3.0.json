@@ -1,0 +1,9 @@
+{
+  "format_version": {
+    "version_string": "3.0"
+  },
+  "package": "cats",
+  "version": "1.0",
+  "relative_destination": "cat_folder",
+  "repository": "omniverse://cat_host/"
+}

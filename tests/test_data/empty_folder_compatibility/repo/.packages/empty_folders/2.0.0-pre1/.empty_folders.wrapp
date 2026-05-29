@@ -1,0 +1,60 @@
+{
+  "format_version": {
+    "version_string": "4.0"
+  },
+  "name": "empty_folders",
+  "version": "2.0.0-pre1",
+  "catalog": {
+    "format_version": {
+      "version_string": "3.0"
+    },
+    "root": "./repo/.packages/empty_folders/2.0.0-pre1",
+    "items": [
+      {
+        "source_path": "./repo/.packages/empty_folders/2.0.0-pre1/X.txt",
+        "relative_path": "X.txt",
+        "hash": "sha-256-flat;1048576;8ebf973a7ac4cd0804bca9124166e1ad433b95e33ca6d6a2ec830ba1ded8d233",
+        "size": 10,
+        "tags": null
+      },
+      {
+        "source_path": "./repo/.packages/empty_folders/2.0.0-pre1/f/.empty/f_X.txt",
+        "relative_path": "f/.empty/f_X.txt",
+        "hash": "sha-256-flat;1048576;1d27cbec94190dcf7f3dbe646ccecaec3319847d8d37125809c3d024920db371",
+        "size": 10,
+        "tags": null
+      },
+      {
+        "source_path": "./repo/.packages/empty_folders/2.0.0-pre1/f/f_X.txt",
+        "relative_path": "f/f_X.txt",
+        "hash": "sha-256-flat;1048576;1d27cbec94190dcf7f3dbe646ccecaec3319847d8d37125809c3d024920db371",
+        "size": 10,
+        "tags": null
+      },
+      {
+        "source_path": "./repo/.packages/empty_folders/2.0.0-pre1/f_2/.empty/f_2_1/f_2_1_X.txt",
+        "relative_path": "f_2/.empty/f_2_1/f_2_1_X.txt",
+        "hash": "sha-256-flat;1048576;1d27cbec94190dcf7f3dbe646ccecaec3319847d8d37125809c3d024920db371",
+        "size": 10,
+        "tags": null
+      },
+      {
+        "source_path": "./repo/.packages/empty_folders/2.0.0-pre1/f_2/f_2_1/.empty/f_2_1_X.txt",
+        "relative_path": "f_2/f_2_1/.empty/f_2_1_X.txt",
+        "hash": "sha-256-flat;1048576;1d27cbec94190dcf7f3dbe646ccecaec3319847d8d37125809c3d024920db371",
+        "size": 10,
+        "tags": null
+      },
+      {
+        "source_path": "./repo/.packages/empty_folders/2.0.0-pre1/f_2/f_2_1/f_2_1_X.txt",
+        "relative_path": "f_2/f_2_1/f_2_1_X.txt",
+        "hash": "sha-256-flat;1048576;1d27cbec94190dcf7f3dbe646ccecaec3319847d8d37125809c3d024920db371",
+        "size": 10,
+        "tags": null
+      }
+    ],
+    "storage_map": null
+  },
+  "repository": "./repo",
+  "dependencies": null
+}

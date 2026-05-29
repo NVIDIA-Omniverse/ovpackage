@@ -1,0 +1,39 @@
+{
+  "root": "omniverse://localhost/Tests/omniverse/OM-92309/tests/20240905_122836_499155_vs/ayiazxls/source_package/",
+  "format_version": "1",
+  "items": [
+    {
+      "source_path": "omniverse://localhost/Tests/omniverse/OM-92309/tests/20240905_122836_499155_vs/ayiazxls/source_package/subfolder",
+      "relative_path": "subfolder",
+      "type": "folder",
+      "hash": null,
+      "size": null,
+      "tags": null
+    },
+    {
+      "source_path": "omniverse://localhost/Tests/omniverse/OM-92309/tests/20240905_122836_499155_vs/ayiazxls/source_package/subfolder/file_in_folder.txt?&1",
+      "relative_path": "subfolder/file_in_folder.txt",
+      "type": "file",
+      "hash": "sha-256-flat;1048576;f3401f68d07827890dc7f6c3abcc2a675a76340c2eeaa26a33ac0d9f46054c9a",
+      "size": 8,
+      "tags": null
+    },
+    {
+      "source_path": "omniverse://localhost/Tests/omniverse/OM-92309/tests/20240905_122836_499155_vs/ayiazxls/source_package/subfolder/subsubfolder",
+      "relative_path": "subfolder/subsubfolder",
+      "type": "folder",
+      "hash": null,
+      "size": null,
+      "tags": null
+    },
+    {
+      "source_path": "omniverse://localhost/Tests/omniverse/OM-92309/tests/20240905_122836_499155_vs/ayiazxls/source_package/testfile.txt?&1",
+      "relative_path": "testfile.txt",
+      "type": "file",
+      "hash": "sha-256-flat;1048576;7304a2cafffa261695552d4271a47709ed8e7fe3d73e201ba8e5eae3ce20fe99",
+      "size": 8,
+      "tags": null
+    }
+  ],
+  "storage_map": null
+}

@@ -1,0 +1,230 @@
+{
+    "$defs": {
+        "ItemType": {
+            "enum": [
+                "file",
+                "folder"
+            ],
+            "type": "string"
+        },
+        "PatchOpAddTag": {
+            "properties": {
+                "explanation": {
+                    "anyOf": [
+                        {
+                            "type": "string"
+                        },
+                        {
+                            "type": "null"
+                        }
+                    ],
+                    "default": null
+                },
+                "operation_type": {
+                    "const": "add_tag",
+                    "default": "add_tag",
+                    "type": "string"
+                },
+                "tag": {
+                    "type": "string"
+                },
+                "url": {
+                    "type": "string"
+                }
+            },
+            "required": [
+                "url",
+                "tag"
+            ],
+            "type": "object"
+        },
+        "PatchOpCopy": {
+            "properties": {
+                "dst": {
+                    "type": "string"
+                },
+                "explanation": {
+                    "anyOf": [
+                        {
+                            "type": "string"
+                        },
+                        {
+                            "type": "null"
+                        }
+                    ],
+                    "default": null
+                },
+                "hash": {
+                    "anyOf": [
+                        {
+                            "type": "string"
+                        },
+                        {
+                            "type": "null"
+                        }
+                    ],
+                    "default": null
+                },
+                "item_type": {
+                    "$ref": "#/$defs/ItemType"
+                },
+                "operation_type": {
+                    "const": "copy",
+                    "default": "copy",
+                    "type": "string"
+                },
+                "src": {
+                    "type": "string"
+                }
+            },
+            "required": [
+                "src",
+                "dst",
+                "item_type"
+            ],
+            "type": "object"
+        },
+        "PatchOpCreateFolder": {
+            "properties": {
+                "explanation": {
+                    "anyOf": [
+                        {
+                            "type": "string"
+                        },
+                        {
+                            "type": "null"
+                        }
+                    ],
+                    "default": null
+                },
+                "operation_type": {
+                    "const": "create_folder",
+                    "default": "create_folder",
+                    "type": "string"
+                },
+                "url": {
+                    "type": "string"
+                }
+            },
+            "required": [
+                "url"
+            ],
+            "type": "object"
+        },
+        "PatchOpDelete": {
+            "properties": {
+                "explanation": {
+                    "anyOf": [
+                        {
+                            "type": "string"
+                        },
+                        {
+                            "type": "null"
+                        }
+                    ],
+                    "default": null
+                },
+                "operation_type": {
+                    "const": "delete",
+                    "default": "delete",
+                    "type": "string"
+                },
+                "url": {
+                    "type": "string"
+                }
+            },
+            "required": [
+                "url"
+            ],
+            "type": "object"
+        },
+        "PatchOpDeleteTag": {
+            "properties": {
+                "explanation": {
+                    "anyOf": [
+                        {
+                            "type": "string"
+                        },
+                        {
+                            "type": "null"
+                        }
+                    ],
+                    "default": null
+                },
+                "operation_type": {
+                    "const": "delete_tag",
+                    "default": "delete_tag",
+                    "type": "string"
+                },
+                "tag": {
+                    "type": "string"
+                },
+                "url": {
+                    "type": "string"
+                }
+            },
+            "required": [
+                "url",
+                "tag"
+            ],
+            "type": "object"
+        },
+        "WRAPPModelVersion": {
+            "properties": {
+                "version_string": {
+                    "pattern": "[0-9]+(\\.[0-9]+)?",
+                    "type": "string"
+                }
+            },
+            "required": [
+                "version_string"
+            ],
+            "type": "object"
+        }
+    },
+    "additionalProperties": true,
+    "properties": {
+        "format_version": {
+            "$ref": "#/$defs/WRAPPModelVersion",
+            "default": {
+                "version_string": "2.0"
+            }
+        },
+        "operations": {
+            "items": {
+                "discriminator": {
+                    "mapping": {
+                        "add_tag": "#/$defs/PatchOpAddTag",
+                        "copy": "#/$defs/PatchOpCopy",
+                        "create_folder": "#/$defs/PatchOpCreateFolder",
+                        "delete": "#/$defs/PatchOpDelete",
+                        "delete_tag": "#/$defs/PatchOpDeleteTag"
+                    },
+                    "propertyName": "operation_type"
+                },
+                "oneOf": [
+                    {
+                        "$ref": "#/$defs/PatchOpCopy"
+                    },
+                    {
+                        "$ref": "#/$defs/PatchOpDelete"
+                    },
+                    {
+                        "$ref": "#/$defs/PatchOpCreateFolder"
+                    },
+                    {
+                        "$ref": "#/$defs/PatchOpAddTag"
+                    },
+                    {
+                        "$ref": "#/$defs/PatchOpDeleteTag"
+                    }
+                ]
+            },
+            "type": "array"
+        }
+    },
+    "required": [
+        "operations"
+    ],
+    "type": "object"
+}

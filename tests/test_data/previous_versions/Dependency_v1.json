@@ -1,0 +1,7 @@
+{
+  "format_version": "1",
+  "package": "cats",
+  "version": "1.0",
+  "relative_destination": "cat_folder",
+  "remote": "omniverse://cat_host/"
+}

@@ -1,0 +1,524 @@
+{
+  "format_version": "2",
+  "name": "cats",
+  "version": "1.0",
+  "catalog": {
+    "root": "omniverse://localhost/.packages/cats/1.0",
+    "format_version": "1",
+    "items": [
+      {
+        "source_path": "omniverse://localhost/.packages/cats/1.0/common_assets",
+        "relative_path": "common_assets",
+        "type": "folder",
+        "hash": null,
+        "size": null,
+        "tags": null
+      },
+      {
+        "source_path": "omniverse://localhost/.packages/cats/1.0/common_assets/animals",
+        "relative_path": "common_assets/animals",
+        "type": "folder",
+        "hash": null,
+        "size": null,
+        "tags": null
+      },
+      {
+        "source_path": "omniverse://localhost/.packages/cats/1.0/common_assets/animals/cat_dead_01",
+        "relative_path": "common_assets/animals/cat_dead_01",
+        "type": "folder",
+        "hash": null,
+        "size": null,
+        "tags": null
+      },
+      {
+        "source_path": "omniverse://localhost/.packages/cats/1.0/common_assets/animals/cat_dead_01/cat_dead_01.usd?&1",
+        "relative_path": "common_assets/animals/cat_dead_01/cat_dead_01.usd",
+        "type": "file",
+        "hash": "sha-256-flat;1048576;e9e1b2d01987f8abb5003a0b0cf4c4c5c2e06ef9a600a28d837c17c37a438924",
+        "size": 1340,
+        "tags": null
+      },
+      {
+        "source_path": "omniverse://localhost/.packages/cats/1.0/common_assets/animals/cat_dead_01/cat_dead_01_base.usd?&1",
+        "relative_path": "common_assets/animals/cat_dead_01/cat_dead_01_base.usd",
+        "type": "file",
+        "hash": "sha-256-flat;1048576;0fdcaa8e526badced95a74304ca1bd8d61e1e5baeca010078525dc66bda80c1e",
+        "size": 6567,
+        "tags": null
+      },
+      {
+        "source_path": "omniverse://localhost/.packages/cats/1.0/common_assets/animals/cat_dead_01/cat_dead_01_inst.usd?&1",
+        "relative_path": "common_assets/animals/cat_dead_01/cat_dead_01_inst.usd",
+        "type": "file",
+        "hash": "sha-256-flat;1048576;2f30f390163f7de9133a829d9f7bd7da48206ef8875e3bb1eee9e3d969ed5840",
+        "size": 672,
+        "tags": null
+      },
+      {
+        "source_path": "omniverse://localhost/.packages/cats/1.0/common_assets/animals/cat_dead_01/cat_dead_01_inst_base.usd?&1",
+        "relative_path": "common_assets/animals/cat_dead_01/cat_dead_01_inst_base.usd",
+        "type": "file",
+        "hash": "sha-256-flat;1048576;269aeaef2510b2a0a9c02dd61795b57dfbc6f75e4bf4cd50cdd4f0d7d006035b",
+        "size": 1074519,
+        "tags": null
+      },
+      {
+        "source_path": "omniverse://localhost/.packages/cats/1.0/common_assets/animals/cat_dead_01/cat_dead_01_tagged.usd?&1",
+        "relative_path": "common_assets/animals/cat_dead_01/cat_dead_01_tagged.usd",
+        "type": "file",
+        "hash": "sha-256-flat;1048576;ca2bc37c003e8fff20683bc0176803c1a5622b3c868708797cd1cf88c6c3e862",
+        "size": 5423,
+        "tags": null
+      },
+      {
+        "source_path": "omniverse://localhost/.packages/cats/1.0/common_assets/animals/cat_dead_01/materials",
+        "relative_path": "common_assets/animals/cat_dead_01/materials",
+        "type": "folder",
+        "hash": null,
+        "size": null,
+        "tags": null
+      },
+      {
+        "source_path": "omniverse://localhost/.packages/cats/1.0/common_assets/animals/cat_dead_01/materials/textures",
+        "relative_path": "common_assets/animals/cat_dead_01/materials/textures",
+        "type": "folder",
+        "hash": null,
+        "size": null,
+        "tags": null
+      },
+      {
+        "source_path": "omniverse://localhost/.packages/cats/1.0/common_assets/animals/cat_dead_01/materials/textures/cat_dead_01_basecolor.png?&1",
+        "relative_path": "common_assets/animals/cat_dead_01/materials/textures/cat_dead_01_basecolor.png",
+        "type": "file",
+        "hash": "sha-256-flat;1048576;767c1e1eb169de6995dacee9b4bb55dd94db8efd904686ec3f299580a66e94cd",
+        "size": 5939619,
+        "tags": null
+      },
+      {
+        "source_path": "omniverse://localhost/.packages/cats/1.0/common_assets/animals/cat_dead_01/materials/textures/cat_dead_01_normal.png?&1",
+        "relative_path": "common_assets/animals/cat_dead_01/materials/textures/cat_dead_01_normal.png",
+        "type": "file",
+        "hash": "sha-256-flat;1048576;0e1b70398d58d4e0f528bbf8665a9b717e60e8f69226a6564d55a44e0dda3ecb",
+        "size": 7451342,
+        "tags": null
+      },
+      {
+        "source_path": "omniverse://localhost/.packages/cats/1.0/common_assets/animals/cat_dead_01/materials/textures/cat_dead_01_orm.png?&1",
+        "relative_path": "common_assets/animals/cat_dead_01/materials/textures/cat_dead_01_orm.png",
+        "type": "file",
+        "hash": "sha-256-flat;1048576;f13479f47b70131b0f488568b9b45ec70d6693140575db48a44195e677c96a20",
+        "size": 2521498,
+        "tags": null
+      },
+      {
+        "source_path": "omniverse://localhost/.packages/cats/1.0/common_assets/animals/cat_static_pose_01",
+        "relative_path": "common_assets/animals/cat_static_pose_01",
+        "type": "folder",
+        "hash": null,
+        "size": null,
+        "tags": null
+      },
+      {
+        "source_path": "omniverse://localhost/.packages/cats/1.0/common_assets/animals/cat_static_pose_01/cat_static_pose_01.usd?&1",
+        "relative_path": "common_assets/animals/cat_static_pose_01/cat_static_pose_01.usd",
+        "type": "file",
+        "hash": "sha-256-flat;1048576;ed575fa28571c950a2b3f4604f9265e8c03b7382f2907784290d92eb23cc6a0a",
+        "size": 1344,
+        "tags": null
+      },
+      {
+        "source_path": "omniverse://localhost/.packages/cats/1.0/common_assets/animals/cat_static_pose_01/cat_static_pose_01_base.usd?&1",
+        "relative_path": "common_assets/animals/cat_static_pose_01/cat_static_pose_01_base.usd",
+        "type": "file",
+        "hash": "sha-256-flat;1048576;8750a93e7341781e2934f2b0e0d96c0b2461457b9bd815d486881eb83c481b5a",
+        "size": 6808,
+        "tags": null
+      },
+      {
+        "source_path": "omniverse://localhost/.packages/cats/1.0/common_assets/animals/cat_static_pose_01/cat_static_pose_01_inst.usd?&1",
+        "relative_path": "common_assets/animals/cat_static_pose_01/cat_static_pose_01_inst.usd",
+        "type": "file",
+        "hash": "sha-256-flat;1048576;76e1d442f532474c313c9ed4c34f37de9fe85e30f4489b8e4e23f5500c111a81",
+        "size": 679,
+        "tags": null
+      },
+      {
+        "source_path": "omniverse://localhost/.packages/cats/1.0/common_assets/animals/cat_static_pose_01/cat_static_pose_01_inst_base.usd?&1",
+        "relative_path": "common_assets/animals/cat_static_pose_01/cat_static_pose_01_inst_base.usd",
+        "type": "file",
+        "hash": "sha-256-flat;1048576;b1d3f1d1fc097ecea8268b8623a089ba80d9ceefb7ed77ed29e071c2d81c9fc0",
+        "size": 1074569,
+        "tags": null
+      },
+      {
+        "source_path": "omniverse://localhost/.packages/cats/1.0/common_assets/animals/cat_static_pose_01/cat_static_pose_01_tagged.usd?&1",
+        "relative_path": "common_assets/animals/cat_static_pose_01/cat_static_pose_01_tagged.usd",
+        "type": "file",
+        "hash": "sha-256-flat;1048576;f7833ba2dfc5d6101f4ffefd49506833160a0a6530231c5e6cdf75cbf5683301",
+        "size": 6260,
+        "tags": null
+      },
+      {
+        "source_path": "omniverse://localhost/.packages/cats/1.0/common_assets/animals/cat_static_pose_01/materials",
+        "relative_path": "common_assets/animals/cat_static_pose_01/materials",
+        "type": "folder",
+        "hash": null,
+        "size": null,
+        "tags": null
+      },
+      {
+        "source_path": "omniverse://localhost/.packages/cats/1.0/common_assets/animals/cat_static_pose_01/materials/textures",
+        "relative_path": "common_assets/animals/cat_static_pose_01/materials/textures",
+        "type": "folder",
+        "hash": null,
+        "size": null,
+        "tags": null
+      },
+      {
+        "source_path": "omniverse://localhost/.packages/cats/1.0/common_assets/animals/cat_static_pose_01/materials/textures/cat_static_pose_01_a.png?&1",
+        "relative_path": "common_assets/animals/cat_static_pose_01/materials/textures/cat_static_pose_01_a.png",
+        "type": "file",
+        "hash": "sha-256-flat;1048576;86f086522382e01922305b9b428bb58379ed78b5eefedb7ada60cea136cbee6b",
+        "size": 1669993,
+        "tags": null
+      },
+      {
+        "source_path": "omniverse://localhost/.packages/cats/1.0/common_assets/animals/cat_static_pose_01/materials/textures/cat_static_pose_01_n.png?&1",
+        "relative_path": "common_assets/animals/cat_static_pose_01/materials/textures/cat_static_pose_01_n.png",
+        "type": "file",
+        "hash": "sha-256-flat;1048576;5924f4265c4ca79f9508353a864bcd3fa2703cd12d7e0c792dd8ace678801192",
+        "size": 1806797,
+        "tags": null
+      },
+      {
+        "source_path": "omniverse://localhost/.packages/cats/1.0/common_assets/animals/cat_static_pose_01/materials/textures/cat_static_pose_01_orm.png?&1",
+        "relative_path": "common_assets/animals/cat_static_pose_01/materials/textures/cat_static_pose_01_orm.png",
+        "type": "file",
+        "hash": "sha-256-flat;1048576;692664c0daf79455592482b32a0260f3a4b7fb316b7a617b46371cb1f0749b9e",
+        "size": 883245,
+        "tags": null
+      },
+      {
+        "source_path": "omniverse://localhost/.packages/cats/1.0/common_assets/animals/cat_static_pose_02",
+        "relative_path": "common_assets/animals/cat_static_pose_02",
+        "type": "folder",
+        "hash": null,
+        "size": null,
+        "tags": null
+      },
+      {
+        "source_path": "omniverse://localhost/.packages/cats/1.0/common_assets/animals/cat_static_pose_02/cat_static_pose_02.usd?&1",
+        "relative_path": "common_assets/animals/cat_static_pose_02/cat_static_pose_02.usd",
+        "type": "file",
+        "hash": "sha-256-flat;1048576;a27a2b840a04b4104934758df14e4c1b7469fa2122a98356021d58e0c515ed6d",
+        "size": 1344,
+        "tags": null
+      },
+      {
+        "source_path": "omniverse://localhost/.packages/cats/1.0/common_assets/animals/cat_static_pose_02/cat_static_pose_02_base.usd?&1",
+        "relative_path": "common_assets/animals/cat_static_pose_02/cat_static_pose_02_base.usd",
+        "type": "file",
+        "hash": "sha-256-flat;1048576;a2c460eb78d8c3f11df6145ec64d6d31dc264d30db81080be360d1c49ea267a2",
+        "size": 1077593,
+        "tags": null
+      },
+      {
+        "source_path": "omniverse://localhost/.packages/cats/1.0/common_assets/animals/cat_static_pose_02/cat_static_pose_02_inst.usd?&1",
+        "relative_path": "common_assets/animals/cat_static_pose_02/cat_static_pose_02_inst.usd",
+        "type": "file",
+        "hash": "sha-256-flat;1048576;ddbeb8092665ec0a0184d9862cfeb20d3ef025e50f0eaa3589b3cea593cbf0ac",
+        "size": 679,
+        "tags": null
+      },
+      {
+        "source_path": "omniverse://localhost/.packages/cats/1.0/common_assets/animals/cat_static_pose_02/cat_static_pose_02_inst_base.usd?&1",
+        "relative_path": "common_assets/animals/cat_static_pose_02/cat_static_pose_02_inst_base.usd",
+        "type": "file",
+        "hash": "sha-256-flat;1048576;9bd694fe69a3646b92f90181cac3c08e84e2b64c068c65bffd7ea9558c77ef4f",
+        "size": 1074527,
+        "tags": null
+      },
+      {
+        "source_path": "omniverse://localhost/.packages/cats/1.0/common_assets/animals/cat_static_pose_02/cat_static_pose_02_tagged.usd?&1",
+        "relative_path": "common_assets/animals/cat_static_pose_02/cat_static_pose_02_tagged.usd",
+        "type": "file",
+        "hash": "sha-256-flat;1048576;bb03b7f703d6dcbe6fa47490b2709a0c08d71f3d43d12b509a13e20b01e1b289",
+        "size": 3730,
+        "tags": null
+      },
+      {
+        "source_path": "omniverse://localhost/.packages/cats/1.0/common_assets/animals/cat_static_pose_02/materials",
+        "relative_path": "common_assets/animals/cat_static_pose_02/materials",
+        "type": "folder",
+        "hash": null,
+        "size": null,
+        "tags": null
+      },
+      {
+        "source_path": "omniverse://localhost/.packages/cats/1.0/common_assets/animals/cat_static_pose_02/materials/textures",
+        "relative_path": "common_assets/animals/cat_static_pose_02/materials/textures",
+        "type": "folder",
+        "hash": null,
+        "size": null,
+        "tags": null
+      },
+      {
+        "source_path": "omniverse://localhost/.packages/cats/1.0/common_assets/animals/cat_static_pose_02/materials/textures/cat_static_pose_02_a.png?&1",
+        "relative_path": "common_assets/animals/cat_static_pose_02/materials/textures/cat_static_pose_02_a.png",
+        "type": "file",
+        "hash": "sha-256-flat;1048576;52a5ba769361f1407c6869f6d1f9e8ba1b6e6fcdebe502bf9e2e5134e2eb7d2b",
+        "size": 1585433,
+        "tags": null
+      },
+      {
+        "source_path": "omniverse://localhost/.packages/cats/1.0/common_assets/animals/cat_static_pose_02/materials/textures/cat_static_pose_02_n.png?&1",
+        "relative_path": "common_assets/animals/cat_static_pose_02/materials/textures/cat_static_pose_02_n.png",
+        "type": "file",
+        "hash": "sha-256-flat;1048576;98fefe9b630d3edcce55e5b7cd2e0b49a5d3cb7024d8112d349ffa985d0ed855",
+        "size": 1804685,
+        "tags": null
+      },
+      {
+        "source_path": "omniverse://localhost/.packages/cats/1.0/common_assets/animals/cat_static_pose_02/materials/textures/cat_static_pose_02_orm.png?&1",
+        "relative_path": "common_assets/animals/cat_static_pose_02/materials/textures/cat_static_pose_02_orm.png",
+        "type": "file",
+        "hash": "sha-256-flat;1048576;40f9c344c0ec908bfb82fa083177c0ff8b2bb0fbc09a4ad31ec5496fec1b7874",
+        "size": 782729,
+        "tags": null
+      },
+      {
+        "source_path": "omniverse://localhost/.packages/cats/1.0/common_assets/animals/cat_static_pose_03",
+        "relative_path": "common_assets/animals/cat_static_pose_03",
+        "type": "folder",
+        "hash": null,
+        "size": null,
+        "tags": null
+      },
+      {
+        "source_path": "omniverse://localhost/.packages/cats/1.0/common_assets/animals/cat_static_pose_03/cat_static_pose_03.usd?&1",
+        "relative_path": "common_assets/animals/cat_static_pose_03/cat_static_pose_03.usd",
+        "type": "file",
+        "hash": "sha-256-flat;1048576;4d2415c28304dbbd8b55ecd6fc831850633111a4ea7d4a3fb2aa59d6f7c5c771",
+        "size": 1344,
+        "tags": null
+      },
+      {
+        "source_path": "omniverse://localhost/.packages/cats/1.0/common_assets/animals/cat_static_pose_03/cat_static_pose_03_base.usd?&1",
+        "relative_path": "common_assets/animals/cat_static_pose_03/cat_static_pose_03_base.usd",
+        "type": "file",
+        "hash": "sha-256-flat;1048576;2dd71df22fb517e31e3f5daf3df464276847df85ac0acf21a6aed59b618b7249",
+        "size": 1079633,
+        "tags": null
+      },
+      {
+        "source_path": "omniverse://localhost/.packages/cats/1.0/common_assets/animals/cat_static_pose_03/cat_static_pose_03_inst.usd?&1",
+        "relative_path": "common_assets/animals/cat_static_pose_03/cat_static_pose_03_inst.usd",
+        "type": "file",
+        "hash": "sha-256-flat;1048576;0c5b845929b8948bb2469a2f8af35eddd987f29899683964571bb9308162ea5e",
+        "size": 679,
+        "tags": null
+      },
+      {
+        "source_path": "omniverse://localhost/.packages/cats/1.0/common_assets/animals/cat_static_pose_03/cat_static_pose_03_inst_base.usd?&1",
+        "relative_path": "common_assets/animals/cat_static_pose_03/cat_static_pose_03_inst_base.usd",
+        "type": "file",
+        "hash": "sha-256-flat;1048576;2c1e4feec7ceb6dbc6d6400943add2eb8568c1b64f68c1a9956ed57f4cfc28d6",
+        "size": 1074527,
+        "tags": null
+      },
+      {
+        "source_path": "omniverse://localhost/.packages/cats/1.0/common_assets/animals/cat_static_pose_03/cat_static_pose_03_tagged.usd?&1",
+        "relative_path": "common_assets/animals/cat_static_pose_03/cat_static_pose_03_tagged.usd",
+        "type": "file",
+        "hash": "sha-256-flat;1048576;d14d3713ad07e7056bf5dc2bd88a2b7557e6561b059deea84b67f3ac76f67904",
+        "size": 3788,
+        "tags": null
+      },
+      {
+        "source_path": "omniverse://localhost/.packages/cats/1.0/common_assets/animals/cat_static_pose_03/materials",
+        "relative_path": "common_assets/animals/cat_static_pose_03/materials",
+        "type": "folder",
+        "hash": null,
+        "size": null,
+        "tags": null
+      },
+      {
+        "source_path": "omniverse://localhost/.packages/cats/1.0/common_assets/animals/cat_static_pose_03/materials/textures",
+        "relative_path": "common_assets/animals/cat_static_pose_03/materials/textures",
+        "type": "folder",
+        "hash": null,
+        "size": null,
+        "tags": null
+      },
+      {
+        "source_path": "omniverse://localhost/.packages/cats/1.0/common_assets/animals/cat_static_pose_03/materials/textures/cat_static_pose_03_a.png?&1",
+        "relative_path": "common_assets/animals/cat_static_pose_03/materials/textures/cat_static_pose_03_a.png",
+        "type": "file",
+        "hash": "sha-256-flat;1048576;6f079e9cbda0b2a2b3e66046bfe2a565f5ed99e2263e16121d75ae652f83f0ae",
+        "size": 1624945,
+        "tags": null
+      },
+      {
+        "source_path": "omniverse://localhost/.packages/cats/1.0/common_assets/animals/cat_static_pose_03/materials/textures/cat_static_pose_03_n.png?&1",
+        "relative_path": "common_assets/animals/cat_static_pose_03/materials/textures/cat_static_pose_03_n.png",
+        "type": "file",
+        "hash": "sha-256-flat;1048576;97ed2570cc891150ed74cd618b10bca1f23b5dba594631e59e678332a11f3649",
+        "size": 1804873,
+        "tags": null
+      },
+      {
+        "source_path": "omniverse://localhost/.packages/cats/1.0/common_assets/animals/cat_static_pose_03/materials/textures/cat_static_pose_03_orm.png?&1",
+        "relative_path": "common_assets/animals/cat_static_pose_03/materials/textures/cat_static_pose_03_orm.png",
+        "type": "file",
+        "hash": "sha-256-flat;1048576;260dad836e7037ec7866d69fdb63fb3a178909bc5af95c3a29911da10650fd28",
+        "size": 829447,
+        "tags": null
+      },
+      {
+        "source_path": "omniverse://localhost/.packages/cats/1.0/common_tools",
+        "relative_path": "common_tools",
+        "type": "folder",
+        "hash": null,
+        "size": null,
+        "tags": null
+      },
+      {
+        "source_path": "omniverse://localhost/.packages/cats/1.0/common_tools/content_tagging",
+        "relative_path": "common_tools/content_tagging",
+        "type": "folder",
+        "hash": null,
+        "size": null,
+        "tags": null
+      },
+      {
+        "source_path": "omniverse://localhost/.packages/cats/1.0/common_tools/content_tagging/icons",
+        "relative_path": "common_tools/content_tagging/icons",
+        "type": "folder",
+        "hash": null,
+        "size": null,
+        "tags": null
+      },
+      {
+        "source_path": "omniverse://localhost/.packages/cats/1.0/common_tools/content_tagging/icons/camera_frame_alpha.png?&1",
+        "relative_path": "common_tools/content_tagging/icons/camera_frame_alpha.png",
+        "type": "file",
+        "hash": "sha-256-flat;1048576;cc451c7186f87543d2d104fab64f53d16297fba21c3cbd010b83d133a0e08365",
+        "size": 880,
+        "tags": null
+      },
+      {
+        "source_path": "omniverse://localhost/.packages/cats/1.0/common_tools/content_tagging/icons/srs_logo.png?&1",
+        "relative_path": "common_tools/content_tagging/icons/srs_logo.png",
+        "type": "file",
+        "hash": "sha-256-flat;1048576;17a88f2974577b47776e0ec47b65aa8540c1e9b2930442bf5cc86ea32f1f23a7",
+        "size": 26928,
+        "tags": null
+      },
+      {
+        "source_path": "omniverse://localhost/.packages/cats/1.0/common_tools/content_tagging/icons/srs_logo_alpha.png?&1",
+        "relative_path": "common_tools/content_tagging/icons/srs_logo_alpha.png",
+        "type": "file",
+        "hash": "sha-256-flat;1048576;135ab299c52f8a4c11f82c9bfb9932b6e38f7cc30767ceb44731cae0ac569058",
+        "size": 3206,
+        "tags": null
+      },
+      {
+        "source_path": "omniverse://localhost/.packages/cats/1.0/common_tools/content_tagging/studio_lights",
+        "relative_path": "common_tools/content_tagging/studio_lights",
+        "type": "folder",
+        "hash": null,
+        "size": null,
+        "tags": null
+      },
+      {
+        "source_path": "omniverse://localhost/.packages/cats/1.0/common_tools/content_tagging/studio_lights/Materials",
+        "relative_path": "common_tools/content_tagging/studio_lights/Materials",
+        "type": "folder",
+        "hash": null,
+        "size": null,
+        "tags": null
+      },
+      {
+        "source_path": "omniverse://localhost/.packages/cats/1.0/common_tools/content_tagging/studio_lights/Materials/Backdrop_MDL",
+        "relative_path": "common_tools/content_tagging/studio_lights/Materials/Backdrop_MDL",
+        "type": "folder",
+        "hash": null,
+        "size": null,
+        "tags": null
+      },
+      {
+        "source_path": "omniverse://localhost/.packages/cats/1.0/common_tools/content_tagging/studio_lights/Materials/Backdrop_MDL/cotton_roughly_woven_rough.jpg?&1",
+        "relative_path": "common_tools/content_tagging/studio_lights/Materials/Backdrop_MDL/cotton_roughly_woven_rough.jpg",
+        "type": "file",
+        "hash": "sha-256-flat;1048576;a3453db8f278c6adc34a879109efa1f678fab581cbacf06de568699911f0e071",
+        "size": 3727699,
+        "tags": null
+      },
+      {
+        "source_path": "omniverse://localhost/.packages/cats/1.0/common_tools/content_tagging/studio_lights/Materials/studio_hdri.jpeg?&1",
+        "relative_path": "common_tools/content_tagging/studio_lights/Materials/studio_hdri.jpeg",
+        "type": "file",
+        "hash": "sha-256-flat;1048576;15811d388be731ec1884f62d03ad9a5e74ac3e6cf0784c62bc35c8a3511061bc",
+        "size": 667556,
+        "tags": null
+      },
+      {
+        "source_path": "omniverse://localhost/.packages/cats/1.0/common_tools/content_tagging/studio_lights/studio_lights.usd?&1",
+        "relative_path": "common_tools/content_tagging/studio_lights/studio_lights.usd",
+        "type": "file",
+        "hash": "sha-256-flat;1048576;2046e830b3874e75e360a90d33abf16c40093192dbe180be680fcff8938d955b",
+        "size": 1379850,
+        "tags": null
+      },
+      {
+        "source_path": "omniverse://localhost/.packages/cats/1.0/common_tools/content_tagging/thumbnail_rigs",
+        "relative_path": "common_tools/content_tagging/thumbnail_rigs",
+        "type": "folder",
+        "hash": null,
+        "size": null,
+        "tags": null
+      },
+      {
+        "source_path": "omniverse://localhost/.packages/cats/1.0/common_tools/content_tagging/thumbnail_rigs/thumb_rig_prop.usd?&1",
+        "relative_path": "common_tools/content_tagging/thumbnail_rigs/thumb_rig_prop.usd",
+        "type": "file",
+        "hash": "sha-256-flat;1048576;af565aef45b211a568232bcc72536666e3e501a78d62dc67383d3e1d5fe21a83",
+        "size": 14539,
+        "tags": null
+      },
+      {
+        "source_path": "omniverse://localhost/.packages/cats/1.0/materials",
+        "relative_path": "materials",
+        "type": "folder",
+        "hash": null,
+        "size": null,
+        "tags": null
+      },
+      {
+        "source_path": "omniverse://localhost/.packages/cats/1.0/materials/SimPBR.mdl?&1",
+        "relative_path": "materials/SimPBR.mdl",
+        "type": "file",
+        "hash": "sha-256-flat;1048576;1f3e79d809c51cdd94b21483fe2178d8da5576fb8a08e59ad13583e95eaea5d3",
+        "size": 22832,
+        "tags": null
+      }
+    ],
+    "storage_map": null
+  },
+  "repository": "omniverse://localhost",
+  "dependencies": [
+    {
+      "format_version": "2",
+      "package": "mice",
+      "version": "1.0",
+      "relative_destination": "mice_folder",
+      "repository": "omniverse://mice_host/"
+    },
+    {
+      "format_version": "2",
+      "package": "birds",
+      "version": "1.0",
+      "relative_destination": "bird_folder",
+      "repository": "omniverse://bird_host/"
+    }
+  ]}
