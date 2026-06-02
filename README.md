@@ -1,8 +1,11 @@
-# ovpackage
+# NVIDIA ovpackage
 
 ovpackage is a command-line and Python API tool for reproducible asset packaging and publishing.
 
 Use it when a project needs to snapshot a directory of assets, publish that snapshot as an immutable package version, install that version into another workspace, and later prove what was installed. It is designed for asset-heavy build pipelines, shared content libraries, CI/CD promotion, offline delivery, and agents that need deterministic package operations.
+
+> [!NOTE]
+> ovpackage is **pre-release** software  and is not enterprise-supported.
 
 The first public source release intentionally keeps the documentation small. The most useful references in this repository are:
 
