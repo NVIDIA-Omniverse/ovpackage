@@ -1,18 +1,33 @@
 # NVIDIA ovpackage
 
-ovpackage is a command-line and Python API tool for reproducible asset packaging and publishing.
-
-Use it when a project needs to snapshot a directory of assets, publish that snapshot as an immutable package version, install that version into another workspace, and later prove what was installed. It is designed for asset-heavy build pipelines, shared content libraries, CI/CD promotion, offline delivery, and agents that need deterministic package operations.
+`ovpackage` is a command-line tool and async Python API for reproducible asset packaging and publishing. It snapshots a directory of assets into an immutable, named **package version**, publishes that version to a **repository** on local disk, Amazon S3, Azure Blob, Google Cloud Storage, an Omniverse Storage API endpoint, installs a chosen version into a workspace, and later proves exactly what was installed — using content-hash **catalogs**, gitignore-style `.wrappignore` rules, `.wrapp` dependency metadata, and commands for diffing, mirroring, patching, freezing, and offline export/import. It is built for asset-heavy build pipelines, shared content libraries, CI/CD promotion, offline delivery, and agents that need deterministic, verifiable package operations across storage backends.
 
 > [!NOTE]
-> ovpackage is **pre-release** software  and is not enterprise-supported.
+> ovpackage is **pre-release** software and is not enterprise-supported. This project is currently not accepting contributions.
 
-The first public source release intentionally keeps the documentation small. The most useful references in this repository are:
+## Layout
 
-- this README for the concepts and common workflows
-- `ovpackage --help` and `ovpackage COMMAND --help` for exact CLI syntax
-- `.agents/skills/ovpackage-cli/` for agent-oriented command guidance
-- `tests/` for runnable examples of the public behavior
+| Path | Purpose |
+|---|---|
+| [`src/ovpackage/`](src/ovpackage/) | Public `ovpackage` import namespace and CLI entry point; lazily aliases onto the `wrapp` implementation |
+| [`src/wrapp/`](src/wrapp/) | Core implementation: CLI app, async package/repo engine, data structures, and storage backends |
+| [`src/wrapp/commands/`](src/wrapp/commands/) | One module per CLI command (create, install, mirror, export, diff, freeze, …) |
+| [`src/wrapp/utils/storage_impls/`](src/wrapp/utils/storage_impls/) | Backend implementations: local, S3, Azure, GCS, and Omniverse Storage API |
+| [`src/nvidia/omniverse/storage/`](src/nvidia/omniverse/storage/) | Generated gRPC/protobuf stubs for the Omniverse Storage API backend |
+| [`docs/public/`](docs/public/) | User docs: manual, tutorial, CLI and per-command reference, storage and API guides |
+| [`.agents/skills/`](.agents/skills/) | ovpackage specific skills |
+| [`tests/`](tests/) | Pytest suite and BDD features; runnable examples of public behavior |
+
+## Start Here
+
+| Goal | Entry |
+|---|---|
+| Install and run the CLI | This README, [Install from source](#install-from-source) |
+| Learn the concepts and workflows | [`docs/public/manual.md`](docs/public/manual.md), [`docs/public/tutorial.md`](docs/public/tutorial.md) |
+| Look up a command | [`docs/public/commands/index.md`](docs/public/commands/index.md), or `ovpackage COMMAND --help` |
+| Configure a storage backend | [`docs/public/storage.md`](docs/public/storage.md), [Storage Backends](#storage-backends) below |
+| Use the Python API | [`docs/public/api.md`](docs/public/api.md), [`src/wrapp_examples/example_simple.py`](src/wrapp_examples/example_simple.py), [`src/wrapp_examples/example_complex.py`](src/wrapp_examples/example_complex.py) |
+| Drive ovpackage CLI/API from an agent | [`.agents/skills/ovpackage-cli/`](.agents/skills/ovpackage-cli/), [`.agents/skills/ovpackage-api/`](.agents/skills/ovpackage-api/) |
 
 ## Install from source
 
