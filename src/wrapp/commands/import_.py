@@ -20,6 +20,7 @@ import shutil
 import tarfile
 from copy import deepcopy
 from typing import (
+    Dict,
     List,
     Optional,
     Tuple,
@@ -51,6 +52,15 @@ from wrapp.datastructures.command_context import (
 from wrapp.datastructures.package import (
     PackageInfo,
     is_package_file_name,
+    write_package_info,
+)
+from wrapp.datastructures.package_standard import (
+    PACKAGE_STANDARD_DEFINITION_FILENAME,
+    PACKAGE_STANDARD_METADATA_FOLDER,
+    guard_package_standard_metadata_relative_path,
+    is_package_standard_sidecar_path,
+    package_standard_metadata_folder_url,
+    package_standard_sidecar_paths,
 )
 from wrapp.options import (
     AuthOption,
@@ -78,13 +88,14 @@ from wrapp.utils.storage import (
     Result,
     wrapp_copy_item_optimized,
     wrapp_url_exists,
-    wrapp_write_file_content,
+    wrapp_write_file_bytes,
 )
 from wrapp.utils.temp_file_manager import TempFileManager
 from wrapp.utils.utils import (
     FailedCommand,
     StorageOperationError,
     join_paths,
+    validate_non_empty_string,
 )
 from wrapp.utils.wrapp_init_for_cmd import wrapp_init_for_cmd
 
@@ -165,6 +176,48 @@ def read_package_info_from_package(tar: tarfile.TarFile) -> Tuple[PackageInfo, t
     return package_setup, package_catalog
 
 
+def _read_archived_member(tar: tarfile.TarFile, name: str) -> Optional[bytes]:
+    members = [member for member in tar.getmembers() if member.name == name]
+    if not members:
+        return None
+    content = tar.extractfile(members[0].path)
+    if content is None:
+        return None
+    return content.read()
+
+
+def read_package_standard_definition_from_package(tar: tarfile.TarFile) -> Optional[bytes]:
+    return _read_archived_member(tar, PACKAGE_STANDARD_DEFINITION_FILENAME)
+
+
+def read_package_standard_metadata_from_package(tar: tarfile.TarFile) -> Dict[str, bytes]:
+    """Read every archived ``.metadata`` sidecar, keyed by path relative to the ``.metadata`` folder."""
+    prefix = f"{PACKAGE_STANDARD_METADATA_FOLDER}/"
+    contents: Dict[str, bytes] = {}
+    for member in tar.getmembers():
+        if not member.isfile() or not member.name.startswith(prefix):
+            continue
+        # Tar member names are archive/attacker-controlled, so reject any ".." traversal or absolute
+        # escape before the suffix is used to build a write URL (join_paths does not collapse "..").
+        try:
+            rel_path = guard_package_standard_metadata_relative_path(member.name[len(prefix) :])
+        except ValueError as e:
+            raise FailedCommand(str(e)) from e
+        extracted = tar.extractfile(member.path)
+        if extracted is None:
+            continue
+        contents[rel_path] = extracted.read()
+    return contents
+
+
+async def _write_imported_sidecar(context: CommandParameters, url: str, content: bytes, *, overwrite: bool) -> None:
+    if not overwrite and await wrapp_url_exists(url):
+        return
+    result = await wrapp_write_file_bytes(context, url, content)
+    if result != Result.OK:
+        raise StorageOperationError(f"Can't write package-standard sidecar to {url}: {result}")
+
+
 @force_wrapp_thread
 @ensure_scheduler
 @wrapp_public_api
@@ -189,6 +242,8 @@ async def import_package(
     :raises FailedCommand: When prerequisites not matched
     :raises StorageOperationError: Raised when network or file operations fail
     """
+    validate_non_empty_string("repository", repository)
+
     if scheduler is None:
         raise RuntimeError("No scheduler present and ensure_scheduler malfunctioned, program error!")
     logger.info(f"Opening tar {package_file}...")
@@ -198,6 +253,8 @@ async def import_package(
     scheduler = scheduler.create_sub_context_and_node(f"Import {package_file}", expected_num_sub_jobs=2)
     with tarfile.open(package_file, "r") as tar:
         package_setup, package_catalog_in_tar = read_package_info_from_package(tar)
+        package_standard_definition_seed = read_package_standard_definition_from_package(tar)
+        package_standard_metadata = read_package_standard_metadata_from_package(tar)
 
         repo_object = Repository(repo_url=repository)
         target_url = repo_object.package_url(package_setup.name, package_setup.version)
@@ -210,15 +267,18 @@ async def import_package(
             stripped_package = deepcopy(package_setup)
             if stripped_package.catalog is None:
                 raise RuntimeError("Catalog is None, should be copy of non-none catalog")
+            stripped_package.catalog.items = [
+                item for item in stripped_package.catalog.items if not is_package_standard_sidecar_path(item.relative_path)
+            ]
 
             # Now loop the catalog content.
             # Concurrency is bounded by TempFileManager's capacity limits
             # (max_files / max_bytes), which replace the previous manual semaphore
             # and TemporaryDirectory.
             async with scheduler.parent_task_node().create_task_group_node(
-                f"Uploading {len(package_setup.catalog.items)} files"
+                f"Uploading {len(stripped_package.catalog.items)} files"
             ) as task_group:
-                for item in package_setup.catalog.items:
+                for item in stripped_package.catalog.items:
                     task_group.create_task(
                         upload_task(
                             context,
@@ -247,9 +307,16 @@ async def import_package(
             for item in not_updated:
                 logger.warning(f"Could not update source_path of item '{item.relative_path}', missing in import destination")
         upload_path = join_paths(target_url, package_catalog_in_tar.path)
-        result = await wrapp_write_file_content(context, upload_path, stripped_package.model_dump_json(indent=2))
-        if result != Result.OK:
-            raise StorageOperationError(f"Can't write catalog of imported package to {upload_path}: {result}")
+        # Carry whatever package-standard sidecars the archive contains, verbatim. The import trusts the
+        # archive's .wrapp catalog and content hashes without re-validation, so the sidecars are trusted the
+        # same way: no license, dependency, or schema gating, and no regeneration or re-hashing.
+        sidecar_paths = package_standard_sidecar_paths(upload_path)
+        if package_standard_definition_seed is not None:
+            await _write_imported_sidecar(context, sidecar_paths.definition_url, package_standard_definition_seed, overwrite=overwrite)
+        target_metadata_dir = package_standard_metadata_folder_url(upload_path)
+        for rel_path, metadata_bytes in package_standard_metadata.items():
+            await _write_imported_sidecar(context, join_paths(target_metadata_dir, rel_path), metadata_bytes, overwrite=overwrite)
+        await write_package_info(upload_path, stripped_package, context)
 
 
 async def upload_task(

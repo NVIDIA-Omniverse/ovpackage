@@ -15,6 +15,7 @@
 
 import asyncio
 import logging
+from dataclasses import replace
 from typing import (
     List,
     Optional,
@@ -50,6 +51,7 @@ from wrapp.datastructures.ignore import (
 from wrapp.datastructures.loaded_package import LoadedPackage
 from wrapp.datastructures.package import (
     PackageInfo,
+    _write_package_info,
     add_dependency_to_package,
     is_package_file_name,
     load_package_setup,
@@ -58,6 +60,9 @@ from wrapp.datastructures.package import (
     wrapp_file_name,
     wrapp_file_path,
     write_package_info,
+)
+from wrapp.datastructures.package_standard import (
+    is_package_standard_sidecar_path,
 )
 from wrapp.datastructures.patch import (
     Patch,
@@ -100,9 +105,11 @@ from wrapp.utils.coro import (
     force_wrapp_thread,
 )
 from wrapp.utils.ensure_scheduler import ensure_scheduler
+from wrapp.utils.router import Router
 from wrapp.utils.scheduler_task_node import SchedulerTaskGroupNode
 from wrapp.utils.storage import (
     Result,
+    wrapp_is_case_sensitive,
     wrapp_list_directory,
     wrapp_list_file_tree,
     wrapp_list_file_tree_supported,
@@ -170,6 +177,10 @@ async def install_command(
     Installs or updates a package described by package name and version string from the package cache. This looks in the package cache /.packages on
     the same server as the destination, and copies the package version found into the destination directory. If a package file is specified, the new dependency
     is recorded in there. If the repo is specified, the operations looks in that package cache instead of the default cache.
+
+    WRAPP detects package catalog paths that differ only by letter case. Installs to case-insensitive destinations fail with
+    'Cross platform case insensitive path conflicts found' to prevent overwrites, while installs to case-sensitive destinations
+    are allowed.
     """
     context, scheduler_params = context_from_params()
     try:
@@ -281,6 +292,11 @@ async def install(
     # Need to work with normalized input
     destination_normalized = normalize_url(destination)
 
+    hash_cache_supported_for_destination = _install_hash_cache_enabled_for_destination(context, destination_normalized)
+    destination_context = context
+    if context.hash_cache_file is not None and not hash_cache_supported_for_destination:
+        destination_context = replace(context, hash_cache_file=None)
+
     # Validate package parameter to prevent circular dependencies
     if package is not None:
         package_dir = normalize_url(get_base_directory_from_url(package))
@@ -372,6 +388,13 @@ async def install(
         add_subpackage_wrapp_files=True,
         task_node=scheduler.parent_task_node().create_tree_node("Analysing source package"),
     )
+    if not wrapp_is_case_sensitive(destination_normalized):
+        has_conflicts, conflicting_paths = full_source_catalog.check_case_insensitive_path_conflicts()
+        if has_conflicts:
+            raise FailedCommand(
+                f"Cross platform case insensitive path conflicts found: {conflicting_paths}. Please ensure that the paths are unique on all platforms (Windows, Linux, macOS)."
+            )
+
     source_dict = full_source_catalog._catalog_to_dict()
 
     # Step 2: Calculate ancestor catalog (if available)
@@ -416,7 +439,7 @@ async def install(
     else:
         workspace_package_relative_path = make_relative_url(destination, destination_package_url)
     ignore_packages.append(workspace_package_relative_path)
-    default_ignore = IgnoreEvaluator(None, lambda x: x in ignore_packages)
+    default_ignore = IgnoreEvaluator(None, lambda x: x in ignore_packages or is_package_standard_sidecar_path(x))
     # Add user-specified ignore rules if any
     if ignore_rules is not None:
         default_ignore.add_evaluator(ignore_rules.predicate)
@@ -437,7 +460,7 @@ async def install(
             checkpoints=False,
             tags=tags,
             skip_missing=True,  # Files not in destination are fine - they're new files from source
-            context=context,
+            context=destination_context,
             scheduler=scheduler.create_sub_context(scheduler.parent_task_node().create_tree_node("Analysing target directory")),
         )
     else:
@@ -504,11 +527,30 @@ async def install(
         if force:
             patch_list.extend(conflict_list)
 
+        # Repo-backed subpackage .wrapp files need their "repository" field retargeted to the repo we are
+        # installing from. We write them here, BEFORE applying the patch, and skip their copy ops below so
+        # each is written exactly once instead of being copied by the patch and then rewritten. Running this
+        # first is safe: nothing in the patch overwrites these files, and writing them up front means they
+        # already exist when the patch applies any tag operations to them.
+        #
+        # changed_subpackage_paths are the subpackage .wrapp files the patch would have (re)written (their
+        # content is new or modified); it tells the writer which ones to materialise from the source package
+        # unconditionally versus which already sit unchanged on disk and only need a repository fix-up.
+        changed_subpackage_paths = {key for key, op in patch_list if isinstance(op, PatchOpCopy) and is_package_file_name(key)}
+        # written_subpackage_paths are the catalog-relative paths actually written here, so we can skip the
+        # patch's now-redundant copy of each below.
+        written_subpackage_paths = await _write_subpackage_wrapp_files(
+            context, full_source_catalog, destination_normalized, loaded_subpackages, changed_subpackage_paths, scheduler
+        )
+
         # Build patch and run it
         p = Patch()
         try:
-            for op in patch_list:
-                p.add(op[1])
+            for key, op in patch_list:
+                if isinstance(op, PatchOpCopy) and key in written_subpackage_paths:
+                    # Already written with the retargeted repository above; skip the redundant copy.
+                    continue
+                p.add(op)
             if not await p.execute(context=context, scheduler=scheduler):
                 raise FailedCommand(
                     f"Failed to apply patch to install {package_name} {version} to {destination}. Please check log for details."
@@ -518,7 +560,7 @@ async def install(
 
         # Eager hash cache population: for files we just copied, we know their hash
         # Insert them into the cache so the next re-install gets immediate cache hits
-        if context.hash_cache_file is not None:
+        if context.hash_cache_file is not None and hash_cache_supported_for_destination:
             await _populate_hash_cache_from_copied_files(context, patch_list)
 
         # Write the package file of the new source package version - we cannot copy the file at this point
@@ -526,10 +568,13 @@ async def install(
         # Update the repository to record that we have installed this package from that repo, else we might still be pointing
         # to a mirror source
         source_setup.repository = source_repository.base_url()
-        await write_package_info(join_paths(destination, installee_package_file_name), source_setup, context)
-
-        # Check if we need to retarget the repositories of the sub-wrapp files copied
-        await _retarget_dependencies(context, full_source_catalog, destination_normalized, loaded_subpackages, scheduler)
+        destination_package_file_url = join_paths(destination, installee_package_file_name)
+        await _write_package_info(
+            destination_package_file_url,
+            source_setup,
+            context,
+            package_standard_seed_url=source_package_file_url,
+        )
 
         # Update dependency file if specified
         if package is not None:
@@ -591,51 +636,77 @@ def _replace_wrapp_files_with_fingerprint(
             )
 
 
-async def _retarget_dependencies(
+async def _write_subpackage_wrapp_files(
     context: CommandParameters,
     catalog: Catalog,
     destination_url: str,
     loaded_subpackages: dict[str, LoadedPackage],
+    changed_subpackage_paths: set[str],
     scheduler: SchedulerContext,
-):
+) -> set[str]:
+    """Write each repo-backed subpackage .wrapp file with its repository pointer retargeted to the repo we
+    are installing from.
+
+    Returns the set of catalog-relative paths that were handled here, i.e. the subpackage .wrapp files the
+    caller must NOT also copy via the patch (we write them directly instead).
+    """
+    written_subpackage_paths: set[str] = set()
     async with scheduler.parent_task_node().create_task_group_node("Retarget dependencies") as task_node:
         for sub_wrapp in filter(lambda x: is_package_file_name(x.relative_path), catalog.items):
             sub_wrapp_repo_base = repository_from_wrapp_file_path(sub_wrapp.source_path)
             if sub_wrapp_repo_base:
-                # Load the installed file for this package
+                written_subpackage_paths.add(sub_wrapp.relative_path)
                 task_node.create_task(
-                    _retarget_dependency(
+                    _write_wrapp_with_updated_repo_field(
                         context,
                         sub_wrapp,
                         destination_url,
                         sub_wrapp_repo_base,
                         loaded_subpackages,
+                        changed_subpackage_paths,
                     ),
                     name="Updating repository tracking info",
                 )
             else:
                 logger.warning(f"Encountered wrapp file which is not in a repository as installation source: {sub_wrapp.source_path}")
+    return written_subpackage_paths
 
 
-async def _retarget_dependency(
+async def _write_wrapp_with_updated_repo_field(
     context: CommandParameters,
     sub_wrapp: PackageInfo,
     destination_url: str,
     sub_wrapp_repo_base: str,
     loaded_subpackages: dict[str, LoadedPackage],
+    changed_subpackage_paths: set[str],
 ):
     sub_wrapp_install_path = join_paths(destination_url, sub_wrapp.relative_path)
-    sub_wrapp_package: Optional[PackageInfo]
-    if sub_wrapp_install_path in loaded_subpackages:
-        sub_wrapp_package = loaded_subpackages[sub_wrapp_install_path].package
+    # This runs BEFORE the patch is applied, and the patch skips the copy of every subpackage handled here
+    # (see install()). We use the loaded_subpackages cache filled during the diff/fingerprint phase so we
+    # never have to read the file back from disk.
+    if sub_wrapp.relative_path in changed_subpackage_paths:
+        # The patch would have (re)written this subpackage; instead we materialise it here from the SOURCE
+        # package we would have copied, with the repository retargeted. The destination file may not exist
+        # yet (fresh install) or still hold the previous version, so we always write it. Using the source
+        # cache (not the pre-patch destination snapshot) avoids OMPE-96052, where the stale destination
+        # entry would make us believe no rewrite is needed.
+        cached_subpackage = loaded_subpackages.get(sub_wrapp.source_path)
+        sub_wrapp_package: Optional[PackageInfo] = (
+            cached_subpackage.package if cached_subpackage is not None else await load_package_setup(sub_wrapp.source_path)
+        )
+        if not sub_wrapp_package:
+            raise FailedCommand(f"Failed to load source wrapp file to install: {sub_wrapp.source_path}")
+        logger.info(f"Retargeting repository pointer of subpackage at {sub_wrapp_install_path} to point to {sub_wrapp_repo_base}")
+        sub_wrapp_package.repository = sub_wrapp_repo_base
+        await write_package_info(sub_wrapp_install_path, sub_wrapp_package, context)
     else:
-        # Case when the file was not in the target folder before and is read for the first time.
-        sub_wrapp_package = await load_package_setup(sub_wrapp_install_path)
-    if not sub_wrapp_package:
-        raise FailedCommand(f"Failed to load wrapp file that was successfully cataloged: {sub_wrapp_install_path}")
-    else:
+        # The patch does not touch this subpackage (its content is unchanged). The pre-patch destination
+        # snapshot still matches the file on disk, so we only rewrite when the repository pointer differs.
+        cached_subpackage = loaded_subpackages.get(sub_wrapp_install_path)
+        sub_wrapp_package = cached_subpackage.package if cached_subpackage is not None else await load_package_setup(sub_wrapp_install_path)
+        if not sub_wrapp_package:
+            raise FailedCommand(f"Failed to load wrapp file that was successfully cataloged: {sub_wrapp_install_path}")
         if sub_wrapp_package.repository != sub_wrapp_repo_base:
-            # Need to update
             logger.info(f"Retargeting repository pointer of subpackage at {sub_wrapp_install_path} to point to {sub_wrapp_repo_base}")
             sub_wrapp_package.repository = sub_wrapp_repo_base
             await write_package_info(sub_wrapp_install_path, sub_wrapp_package, context)
@@ -691,7 +762,31 @@ async def _populate_hash_cache_from_copied_files(
 def _local_copy_ops_for_eager_hash_cache(patch_list: List[Tuple[str, PatchOpBase]]) -> List[Tuple[str, PatchOpCopy]]:
     # Eager cache population stats every copied destination. Keep that optimization
     # local-only so WAN installs do not perform thousands of serial remote stats.
-    return [(key, op) for key, op in patch_list if isinstance(op, PatchOpCopy) and op.hash is not None and is_file_url(op.dst)]
+    # As of now (May 2026) all remote backends used in real-world use cases support
+    # storing the content hash as metadata, so the hash cache as currently designed
+    # is only needed for local files.
+    #
+    # Skip subpackage .wrapp files: their op.hash is the package fingerprint (which intentionally
+    # ignores the repository field), not the flat content hash the hash cache stores for files. The
+    # patch also rewrites these files afterwards when their repository is retargeted, so caching the
+    # post-copy stat would both record the wrong hash type and reference a stale version (OMPE-96052).
+    return [
+        (key, op)
+        for key, op in patch_list
+        if isinstance(op, PatchOpCopy) and op.hash is not None and is_file_url(op.dst) and not is_package_file_name(key)
+    ]
+
+
+def _install_hash_cache_enabled_for_destination(context: CommandParameters, destination: str) -> bool:
+    if context.hash_cache_file is None or not Router.me().storage_stores_wrapp_hashes(destination):
+        return True
+
+    logger.warning(
+        f"Ignoring --hash-cache-file for install destination {destination}: "
+        "this storage backend stores WRAPP hashes on files or objects directly, "
+        "so install does not need a separate hash cache file for this target."
+    )
+    return False
 
 
 async def _enumerate_destination_files(destination: str) -> List[str]:

@@ -51,6 +51,10 @@ class StatType(Enum):
     GET_SERVER_INFO = "get_server_info calls"
     GET_SERVER_INFO_ASYNC = "get_server_info_async calls"
     GET_HUB_VERSION = "get_hub_version calls"
+    GET_METADATA_ASYNC = "get_metadata calls"
+    SET_METADATA_ASYNC = "set_metadata calls"
+    DELETE_METADATA_ASYNC = "delete_metadata calls"
+    GRPC_RETRY = "gRPC retries"
     HASH_CACHE_HIT = "hash cache hits"
     HASH_CACHE_MISS = "hash cache misses"
     HASH_CACHE_INSERT = "hash cache inserts"
@@ -77,6 +81,9 @@ g_CLIENTLIB_STATS = {
     StatType.GET_SERVER_INFO,
     StatType.GET_SERVER_INFO_ASYNC,
     StatType.GET_HUB_VERSION,
+    StatType.GET_METADATA_ASYNC,
+    StatType.SET_METADATA_ASYNC,
+    StatType.DELETE_METADATA_ASYNC,
 }
 g_TAGGING_SERVICE_STATS = {StatType.GET_TAGS, StatType.GET_TAGS, StatType.QUERY_TAGS}
 

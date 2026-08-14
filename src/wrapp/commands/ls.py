@@ -130,6 +130,7 @@ async def ls_command(
     """
     Given an url, list - optionally recursively - all content in that subtree matching any of the given patterns or all files if no pattern is given.
     Specify TSV as output format to produce a result suited for catalog --file-list.
+    Specify long-tsv to produce tab-separated output matching the normal output columns.
     """
 
     context, scheduler_params = context_from_params()
@@ -270,17 +271,11 @@ class Lister:
         self.parent_task_group = scheduler.parent_task_node()
         if self.print_to_console:
             self.console = Console()
+            header = ("Modified", "Type", "Size", "URL", "Hash", "Version")
             if output_format == LsOutputFormat.normal:
-                self.console.print(
-                    "Modified",
-                    "Type",
-                    "Size",
-                    "URL",
-                    "Hash",
-                    "Version",
-                    sep="\t",
-                    soft_wrap=True,
-                )
+                self.console.print(*header, sep="\t", soft_wrap=True)
+            elif output_format == LsOutputFormat.long_tsv:
+                print("\t".join(header))
         self.result_list: List[LsResultItem] = []
         # When --with-hash is set we need every metadata fetch to finish before
         # printing, otherwise the Hash column is wrong on backends whose list
@@ -384,20 +379,21 @@ class Lister:
     def _print_item_row(self, item: ListEntry, full_path: str) -> None:
         relative_to_base = make_relative_url(self.base_url, full_path)
         item_type = "folder" if is_folder(item) else "file" if is_regular_file(item) else "special"
+        row = (
+            item.modified_time if item_type == "file" else "",
+            item_type,
+            format_size(item.size) if item_type == "file" else "",
+            full_path,
+            item.nucleus_hash,
+            item.version,
+        )
         if self.output_format == LsOutputFormat.TSV:
             print(f"{self.base_url}\t{relative_to_base}")
+        elif self.output_format == LsOutputFormat.long_tsv:
+            print("\t".join("" if value is None else str(value) for value in row))
         elif self.output_format == LsOutputFormat.short:
             print(full_path)
         elif self.output_format == LsOutputFormat.normal:
-            self.console.print(
-                item.modified_time if item_type == "file" else "",
-                item_type,
-                format_size(item.size) if item_type == "file" else "",
-                full_path,
-                item.nucleus_hash,
-                item.version,
-                sep="\t",
-                soft_wrap=True,
-            )
+            self.console.print(*row, sep="\t", soft_wrap=True)
         else:
             raise Exception(f"Invalid argument to ls: {self.output_format} format is unknown")

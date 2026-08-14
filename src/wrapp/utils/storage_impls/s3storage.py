@@ -24,11 +24,13 @@ from datetime import datetime
 from random import uniform
 from typing import (
     Any,
+    Awaitable,
     BinaryIO,
     Callable,
     Dict,
     List,
     Optional,
+    Protocol,
     Set,
     Tuple,
     Union,
@@ -59,6 +61,8 @@ from wrapp.utils.utils import (
     StorageMissingDependenciesError,
     StorageOperationError,
     get_path_from_url,
+    parse_env_float,
+    parse_env_int,
 )
 
 logger = logging.getLogger("omni.wrapp")
@@ -66,13 +70,13 @@ logger = logging.getLogger("omni.wrapp")
 # Try to import required dependencies
 try:
     import aioboto3
+    import aiohttp
     import boto3
     import botocore.config
     from botocore.exceptions import (
         BaseEndpointResolverError,
         BotoCoreError,
         ClientError,
-        ConnectionClosedError,
         CredentialRetrievalError,
         NoAuthTokenError,
         NoCredentialsError,
@@ -85,7 +89,7 @@ try:
 except ImportError as e:
     # The list of dependencies should be the same as in pyproject.toml
     missing = getattr(e, "name", str(e))
-    error_msg = f"failed to import {missing}. Required dependencies: aioboto3; recommended: botocore[crt]. Install with 'pip install ovpackage[s3]'. Exception: {e}"
+    error_msg = f"failed to import {missing}. Required dependencies: aioboto3, aiohttp>=3.9.2; recommended: botocore[crt]. Install with 'pip install ovpackage[s3]'. Exception: {e}"
     raise StorageMissingDependenciesError(error_msg) from e
 
 
@@ -94,6 +98,44 @@ NUCLEUS_HASH_METADATA_KEY = "nv-omniverse-nucleus-hash"
 # NUCLEUS_HASH_FULL_METADATA_KEY = "x-amz-metadata-" + NUCLEUS_HASH_METADATA_KEY
 CRC32_CHECKSUM_METADATA_KEY = "ChecksumCRC32"
 SHA256_CHECKSUM_METADATA_KEY = "ChecksumSHA256"
+
+# botocore exceptions that indicate a permanent authentication/credential problem.
+# Retrying these is pointless, so reads classify them as terminal access-denied errors.
+S3_AUTH_EXCEPTIONS = (
+    UnknownSignatureVersionError,
+    CredentialRetrievalError,
+    TokenRetrievalError,
+    NoAuthTokenError,
+    NoCredentialsError,
+    PartialCredentialsError,
+)
+# botocore exceptions that indicate a permanent client/endpoint configuration problem.
+S3_CONFIG_EXCEPTIONS = (
+    BaseEndpointResolverError,
+    UnknownServiceError,
+    UnknownRegionError,
+)
+# S3 ClientError codes that mean "the object/bucket does not exist".
+S3_NOT_FOUND_CODES = frozenset({"404", "NoSuchKey", "NoSuchBucket"})
+# S3 ClientError codes that mean "access/permission denied". Any HTTP 403 is also treated
+# as access-denied (see _classify_read_exception), so this set mainly helps when the response
+# metadata carries no HTTP status.
+S3_ACCESS_DENIED_CODES = frozenset(
+    {
+        "403",
+        "AccessDenied",
+        "AccessDeniedException",
+        "InvalidAccessKeyId",
+        "SignatureDoesNotMatch",
+        "InvalidToken",
+        "ExpiredToken",
+        "TokenRefreshRequired",
+    }
+)
+# S3 ClientError codes that are transient and worth retrying.
+S3_RETRYABLE_CLIENT_ERROR_CODES = frozenset(
+    {"SlowDown", "RequestTimeout", "RequestTimeoutException", "ServiceUnavailable", "503", "InternalError", "500"}
+)
 
 
 def is_s3_url(url: str) -> bool:
@@ -206,6 +248,10 @@ class S3ListEntry(ListEntry):
         return self._size
 
     @property
+    def etag(self) -> str:
+        return self._etag
+
+    @property
     def modified_time(self) -> Optional[datetime]:
         return self._last_modified
 
@@ -217,6 +263,69 @@ class S3ServerInfo(ServerInfo):
     @property
     def auth_token(self) -> str:
         return "NOT_IMPLEMENTED_AUTH_TOKEN"
+
+
+class S3ClientProtocol(Protocol):
+    """Structural type for the aioboto3 S3 client surface this backend calls.
+
+    Kept structural (a Protocol) so the real aioboto3/botocore dynamic client
+    satisfies it without any changes. The signatures use ``*args``/``**kwargs``
+    to stay compatible with botocore's dynamically generated methods. ``get_paginator``
+    is synchronous; every other method is awaited by this module.
+    """
+
+    async def get_object(self, *args: Any, **kwargs: Any) -> Any:
+        ...
+
+    async def head_object(self, *args: Any, **kwargs: Any) -> Any:
+        ...
+
+    async def list_objects_v2(self, *args: Any, **kwargs: Any) -> Any:
+        ...
+
+    def get_paginator(self, *args: Any, **kwargs: Any) -> Any:
+        ...
+
+    async def copy_object(self, *args: Any, **kwargs: Any) -> Any:
+        ...
+
+    async def copy(self, *args: Any, **kwargs: Any) -> Any:
+        ...
+
+    async def create_bucket(self, *args: Any, **kwargs: Any) -> Any:
+        ...
+
+    async def delete_object(self, *args: Any, **kwargs: Any) -> Any:
+        ...
+
+    async def delete_objects(self, *args: Any, **kwargs: Any) -> Any:
+        ...
+
+    async def head_bucket(self, *args: Any, **kwargs: Any) -> Any:
+        ...
+
+    async def upload_file(self, *args: Any, **kwargs: Any) -> Any:
+        ...
+
+    async def upload_fileobj(self, *args: Any, **kwargs: Any) -> Any:
+        ...
+
+
+class S3ClientProvider(Protocol):
+    """Structural type for the client-provider seam used by :class:`S3Storage`.
+
+    The real :class:`S3ClientWrapper` already satisfies this; tests inject a
+    lightweight fake so the client surface can be controlled explicitly.
+    """
+
+    async def get_instance(self) -> S3ClientProtocol:
+        ...
+
+    async def close_instance(self) -> None:
+        ...
+
+    def set_new_auth_info(self, auth_info: Optional[StorageAuthInfo]) -> None:
+        ...
 
 
 class S3ClientWrapper:
@@ -334,7 +443,10 @@ class S3ClientWrapper:
                 self._loop = current_loop  # Update the loop reference
 
                 # https://botocore.amazonaws.com/v1/documentation/api/latest/reference/config.html
-                WRAPP_S3_CONNECT_TIMEOUT_S = float(os.getenv("WRAPP_S3_CONNECT_TIMEOUT_S", "5.0"))
+                WRAPP_S3_CONNECT_TIMEOUT_S = parse_env_float("WRAPP_S3_CONNECT_TIMEOUT_S", 5.0)
+                # read_timeout has no botocore env var or ~/.aws/config key, so expose it here.
+                # The default matches botocore's own (60s socket-read inactivity).
+                WRAPP_S3_READ_TIMEOUT_S = parse_env_float("WRAPP_S3_READ_TIMEOUT_S", 60.0)
                 # Configure connection pool size
                 WRAPP_S3_CONCURRENT_CONNECTIONS = int(os.getenv("WRAPP_S3_CONCURRENT_CONNECTIONS", "128"))
                 # Check if S3 Transfer Acceleration should be enabled
@@ -342,6 +454,7 @@ class S3ClientWrapper:
 
                 extra_config_args = {
                     "connect_timeout": WRAPP_S3_CONNECT_TIMEOUT_S,
+                    "read_timeout": WRAPP_S3_READ_TIMEOUT_S,
                     "max_pool_connections": WRAPP_S3_CONCURRENT_CONNECTIONS,
                 }
 
@@ -392,21 +505,48 @@ class S3ClientWrapper:
                 logger.warning(f"Error closing S3 client: {e}")
 
 
+class _ChunkDownloadError(Exception):
+    """Internal: carries the terminal Result of a failed chunk download."""
+
+    def __init__(self, result: Result):
+        super().__init__(f"chunk download failed: {result}")
+        self.result = result
+
+
 class S3Storage(StorageInterface):
     @classmethod
     def version_info(cls) -> str:
         return f"S3 Storage Backend"
 
-    def __init__(self, wrapp_version: str, debug_level: bool, throttling_params: ThrottlingParameters):
-        self._s3_client: S3ClientWrapper | None = None
+    def __init__(
+        self,
+        wrapp_version: str,
+        debug_level: bool,
+        throttling_params: ThrottlingParameters,
+        *,
+        client_provider: "S3ClientProvider | None" = None,
+        sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+    ):
+        # Seam for dependency injection (see OMPE-98951): by default the client is built
+        # lazily as a real S3ClientWrapper and backoff waits use asyncio.sleep, so production
+        # behavior is unchanged. Tests inject a strict fake provider and a recording sleep.
+        self._sleep = sleep
+        self._s3_client: "S3ClientProvider | None" = client_provider
         self._auth_info: Optional[StorageAuthInfo] = None
         self._last_connection_status: ConnectionStatus = ConnectionStatus.DISCONNECTED
-        # Initialize upload config from environment variables once
-        self._multipart_threshold = int(os.getenv("WRAPP_S3_MULTIPART_THRESHOLD", str(5 * 1024 * 1024)))
-        self._multipart_chunksize = int(os.getenv("WRAPP_S3_MULTIPART_CHUNKSIZE", str(5 * 1024 * 1024)))
-        self._max_concurrency = int(os.getenv("WRAPP_S3_MAX_CONCURRENCY", "50"))
-        self._retry_count = int(os.getenv("WRAPP_S3_EXTRA_RETRIES", "3"))
-        self._retry_delay = float(os.getenv("WRAPP_S3_RETRY_WAIT_SECONDS", "1.0"))
+        # Initialize upload/download config from environment variables once. The size/count
+        # settings must be positive (minimum=1): a misconfiguration (e.g. a negative
+        # WRAPP_S3_MULTIPART_CHUNKSIZE) warns and falls back to the default, so it cannot
+        # make a download silently produce a zero-filled file of the correct size that still
+        # reports success. See OMPE-98951.
+        self._multipart_threshold = parse_env_int("WRAPP_S3_MULTIPART_THRESHOLD", 5 * 1024 * 1024, minimum=1)
+        self._multipart_chunksize = parse_env_int("WRAPP_S3_MULTIPART_CHUNKSIZE", 5 * 1024 * 1024, minimum=1)
+        self._max_concurrency = parse_env_int("WRAPP_S3_MAX_CONCURRENCY", 50, minimum=1)
+        # EXTRA_RETRIES may legitimately be 0 (disables extra retries), so validate with minimum=0.
+        self._retry_count = parse_env_int("WRAPP_S3_EXTRA_RETRIES", 3, minimum=0)
+        # RETRY_WAIT_SECONDS falls back to the default on a non-numeric value. A float default
+        # selects parse_env_float's float-returning overload, so the result is never None here.
+        self._retry_delay = parse_env_float("WRAPP_S3_RETRY_WAIT_SECONDS", 1.0)
         # Configure boto3 logging - overwrite the debug level unless it has been overwritten already explicitly.
         boto3_log_level_name = os.getenv("WRAPP_S3_LOG_LEVEL", "NOTSET")
         try:
@@ -621,21 +761,133 @@ class S3Storage(StorageInterface):
         raise NotImplementedError()
 
     async def read_file_content(self, file_url: str) -> Tuple[Result, bytes]:
-        try:
-            bucket_name, key, region = parse_s3_bucket_key(file_url)
-            if key.endswith("/"):
-                return Result.ERROR_WRONG_TYPE, bytes()
+        bucket_name, key, region = parse_s3_bucket_key(file_url)
+        if key.endswith("/"):
+            return Result.ERROR_WRONG_TYPE, bytes()
+        # Exactly one NetworkDataTransfer slot per read (mirrors _upload's single-slot-per-file
+        # accounting). The low-level fetch must NOT re-acquire networkdata, or a chunked download
+        # holding this slot would deadlock/starve when its workers wait for another slot.
+        return await self._throttler_networkdata.run(self._read_file_ranged_content(file_url))
 
-            client = await self.s3_client().get_instance()
-            response = await self._throttler_roundtrip.run(client.get_object(Bucket=bucket_name, Key=key))
-            async with response["Body"] as stream:
-                file_content = await self._throttler_networkdata.run(stream.read())
-            return Result.OK, file_content
-        except (BotoCoreError, ClientError) as e:
-            if isinstance(e, ClientError) and e.response["Error"]["Code"] == "404":
-                return Result.ERROR_NOT_FOUND, bytes()
-            logger.error(f"aioboto3 error during read {file_url}: {e}")
-            return Result.ERROR, bytes()
+    async def _read_file_ranged_content(
+        self,
+        file_url: str,
+        byte_range: Optional[Tuple[int, int]] = None,
+        expected_etag: Optional[str] = None,
+    ) -> Tuple[Result, bytes]:
+        """Read an object's content, optionally restricted to an inclusive (start, end) byte range.
+
+        When expected_etag is set it is sent as IfMatch so that a concurrently modified object
+        fails the request (412) instead of silently mixing bytes from two object versions.
+
+        This is the low-level byte fetch: it does get_object under the roundtrip throttler and
+        reads the whole body stream IMMEDIATELY afterwards, so the opened response is never parked
+        waiting for another throttler slot (which S3 would idle-reset). It must NOT acquire the
+        NetworkDataTransfer throttler itself: the top-level callers each hold exactly one such slot
+        (read_file_content wraps this call in one; download_file holds one while its chunk workers
+        call this directly), and re-acquiring here would either double-count or deadlock a chunked
+        download whose parent already holds the only slots (see OMPE-98951).
+
+        boto3's built-in retry only covers establishing the request; it cannot replay a partially
+        consumed stream, so a mid-stream connection drop fails immediately. Retry the whole
+        get_object + read here (mirroring the upload retry loop in _upload), re-issuing a fresh
+        get_object on every attempt since a broken stream cannot be resumed. See OMPE-98588.
+        Always make at least one attempt even if retries are disabled (WRAPP_S3_EXTRA_RETRIES=0).
+        """
+        bucket_name, key, _region = parse_s3_bucket_key(file_url)
+        # boto3 distinguishes between passing a parameter as None and not passing it at all:
+        # get_object(Range=None) fails parameter validation instead of omitting the header,
+        # so the optional parameters have to be collected in a dict.
+        get_object_kwargs: Dict[str, Any] = {"Bucket": bucket_name, "Key": key}
+        if byte_range is not None:
+            get_object_kwargs["Range"] = f"bytes={byte_range[0]}-{byte_range[1]}"
+        if expected_etag is not None:
+            get_object_kwargs["IfMatch"] = expected_etag
+        max_attempts = max(1, self._retry_count)
+        base_delay = self._retry_delay
+        for attempt in range(1, max_attempts + 1):
+            try:
+                client = await self.s3_client().get_instance()
+                response = await self._throttler_roundtrip.run(client.get_object(**get_object_kwargs))
+                async with response["Body"] as stream:
+                    # Read the body immediately (no networkdata acquisition here) so the opened
+                    # response is not parked waiting for a slot -- S3 idle-resets a parked stream,
+                    # which surfaces as an aiohttp.ClientPayloadError (caught below).
+                    file_content = await stream.read()
+                if byte_range is not None:
+                    # Guard against a server/proxy that ignores the Range header (returns the whole
+                    # 200 body) or otherwise delivers a wrong-sized payload without raising: writing
+                    # it at the chunk offset would silently corrupt the file. Fail terminally rather
+                    # than retry -- a Range-ignoring endpoint is persistent, and retrying would just
+                    # re-download the full body each time.
+                    expected_len = byte_range[1] - byte_range[0] + 1
+                    if len(file_content) != expected_len:
+                        logger.error(
+                            f"[{file_url}] ranged GET bytes={byte_range[0]}-{byte_range[1]} returned "
+                            f"{len(file_content)} bytes, expected {expected_len} (the endpoint may be "
+                            f"ignoring the Range header); failing to avoid writing corrupt data."
+                        )
+                        return Result.ERROR, bytes()
+                return Result.OK, file_content
+            except (BotoCoreError, ClientError, aiohttp.ClientError) as e:
+                retryable, terminal_result, _ = self._classify_read_exception(e)
+                if not retryable:
+                    if terminal_result != Result.ERROR_NOT_FOUND:
+                        logger.error(f"aioboto3 error during read {file_url}: {e}")
+                    return terminal_result, bytes()
+                if attempt == max_attempts:
+                    logger.error(f"[{file_url}] read failed on attempt {attempt}/{max_attempts}: {e}. No more retries left.")
+                    return terminal_result, bytes()
+                # compute exponential backoff + jitter, identical to _upload
+                delay = base_delay * (2 ** (attempt - 1))
+                jitter = uniform(0, delay * 0.1)
+                total_sleep = delay + jitter
+                logger.warning(f"[{file_url}] read attempt {attempt}/{max_attempts} failed: {e}. Retrying in {total_sleep:.1f}s…")
+                await self._sleep(total_sleep)
+        # The loop always returns inside its body; this satisfies the type checker.
+        return Result.ERROR, bytes()
+
+    def _classify_read_exception(self, e: Exception) -> Tuple[bool, Result, Optional[ConnectionStatus]]:
+        """Classify a boto3 failure as (is_retryable, terminal_result, connection_status).
+
+        terminal_result is the Result to return when we stop retrying (either because the
+        error is permanent or because retries are exhausted). connection_status is the status
+        the failure implies; it is consumed by _update_connection_status_from_exception (read
+        operations themselves do not record connection status, matching the rest of this backend).
+        """
+        if isinstance(e, S3_AUTH_EXCEPTIONS):
+            return False, Result.ERROR_ACCESS_DENIED, ConnectionStatus.AUTH_ERROR
+        if isinstance(e, ClientError):
+            code = str(e.response.get("Error", {}).get("Code", ""))
+            http_status = str(e.response.get("ResponseMetadata", {}).get("HTTPStatusCode", ""))
+            if code in S3_NOT_FOUND_CODES:
+                return False, Result.ERROR_NOT_FOUND, None
+            # Any 403 is an access/permission failure, regardless of the specific S3 error code
+            # (InvalidAccessKeyId, SignatureDoesNotMatch, ...), so retrying it is pointless.
+            if code in S3_ACCESS_DENIED_CODES or http_status == "403":
+                return False, Result.ERROR_ACCESS_DENIED, ConnectionStatus.AUTH_ERROR
+            if code in S3_RETRYABLE_CLIENT_ERROR_CODES:
+                return True, Result.ERROR, ConnectionStatus.CONNECT_ERROR
+            # Other client errors are permanent client-side mistakes (e.g. bad request); don't retry.
+            return False, Result.ERROR, None
+        if isinstance(e, S3_CONFIG_EXCEPTIONS):
+            return False, Result.ERROR, ConnectionStatus.CONNECT_ERROR
+        # aiohttp raises ClientError (e.g. ClientPayloadError when the connection is reset while
+        # the body is being read) rather than a BotoCoreError; these are transient -- retry them.
+        if isinstance(e, aiohttp.ClientError):
+            return True, Result.ERROR, ConnectionStatus.CONNECT_ERROR
+        # Any remaining BotoCoreError is a connection/transient failure (ConnectionClosedError,
+        # connection errors, read timeouts, incomplete stream reads, ...) -- retry it.
+        return True, Result.ERROR, ConnectionStatus.CONNECT_ERROR
+
+    # Update connection status based on exceptions.
+    # Currently unused in this backend; kept for parity with the other storage backends.
+    # Coordinated removal across all backends is tracked in OMPE-98594. The exception
+    # groupings are delegated to _classify_read_exception so they live in a single place.
+    def _update_connection_status_from_exception(self, e: Exception) -> None:
+        _, _, connection_status = self._classify_read_exception(e)
+        if connection_status is not None:
+            self._last_connection_status = connection_status
 
     async def get_cached_file_async(self, file_url: str, download: bool = True) -> Tuple[Result, Optional[LocalReadOnlyFile]]:
         raise NotImplementedError()
@@ -838,34 +1090,186 @@ class S3Storage(StorageInterface):
 
     async def download_file(self, src_url: str, dst_url: str, overwrite: bool) -> Result:
         src_bucket_name, src_key, src_region = parse_s3_bucket_key(src_url)
-        try:
-            # make sure any parent directories exist
-            async def _throttled_download():
-                dst_path = get_path_from_url(dst_url)
-                dst_dir = os.path.dirname(dst_path)
-                os.makedirs(dst_dir, exist_ok=True)
-                with open(dst_path, "wb" if overwrite else "xb") as f_dst:
-                    try:
-                        client = await self.s3_client().get_instance()
-                        await client.download_fileobj(src_bucket_name, src_key, f_dst)
-                        return Result.OK
-                    except (BotoCoreError, ClientError) as e:
-                        if isinstance(e, ClientError) and e.response["Error"]["Code"] == "404":
-                            return Result.ERROR_NOT_FOUND
-                        logger.error(f"aioboto3 error during download from {src_url} to {dst_url}: {e}")
-                        return Result.ERROR
+        if src_key.endswith("/"):
+            return Result.ERROR_WRONG_TYPE
+        dst_path = ""
+        should_remove_partial = False
 
-            return await self._throttler_networkdata.run(_throttled_download())
+        def _remove_partial_download() -> None:
+            # Best-effort cleanup of a partial download. Only called after the destination file
+            # has been closed (deleting an open file fails on Windows). This must never raise:
+            # it runs on the failure and cancellation paths, and a propagating OSError -- e.g. a
+            # Windows PermissionError while an AV/indexer briefly holds the file -- would escape
+            # download_file as an exception instead of a Result, aborting the caller's task group.
+            # FileNotFoundError is the expected "nothing to remove" case; any other OSError is
+            # logged and swallowed so the true download Result is still returned.
+            if should_remove_partial:
+                try:
+                    os.remove(dst_path)
+                except FileNotFoundError:
+                    pass
+                except OSError as e:
+                    logger.warning(f"Could not remove partial download {dst_path}: {e}")
+
+        try:
+            dst_path = get_path_from_url(dst_url)
+            # make sure any parent directories exist
+            os.makedirs(os.path.dirname(dst_path), exist_ok=True)
+
+            async def _throttled_download() -> Result:
+                nonlocal should_remove_partial
+                # Acquire exactly ONE NetworkDataTransfer slot for the whole file (mirrors
+                # _upload's single-slot-per-file pattern) and open the destination FD inside it,
+                # so at most file_transfer_jobs destination files are open at once (bounds open
+                # FDs, avoids EMFILE under wide copy-op fan-out). Opening here also keeps
+                # ERROR_ALREADY_EXISTS taking precedence over ERROR_NOT_FOUND, since the open
+                # still happens before any network call. _download_file_content's chunk workers
+                # run under this single slot and must NOT re-acquire networkdata.
+                with open(dst_path, "wb" if overwrite else "xb") as f_dst:
+                    should_remove_partial = True
+                    return await self._download_file_content(src_url, f_dst)
+
+            result = await self._throttler_networkdata.run(_throttled_download())
+            if result == Result.OK:
+                should_remove_partial = False
+            else:
+                _remove_partial_download()
+            return result
         except FileExistsError:
             return Result.ERROR_ALREADY_EXISTS
         except FileNotFoundError:
             return Result.ERROR_NOT_FOUND
         except PermissionError as e:
-            logger.error(f"Downloading error, access denied to file {src_url}: {e}")
+            # Reached when creating/opening the local destination is denied (makedirs/open);
+            # the denied path is the destination, not src_url.
+            logger.error(f"Downloading {src_url}: access denied writing to {dst_url}: {e}")
+            _remove_partial_download()
             return Result.ERROR_ACCESS_DENIED
-        except BaseException as e:
+        except asyncio.CancelledError:
+            _remove_partial_download()
+            raise
+        except Exception as e:
             logger.error(f"Error while downloading file {src_url} to {dst_url}: {e}")
+            _remove_partial_download()
             return Result.ERROR
+
+    async def _head_object_entry(self, url: str) -> Tuple[Result, Optional[S3ListEntry]]:
+        """Fetch object metadata for the download path with a SINGLE head_object.
+
+        Unlike the general-purpose stat(), this issues NO list_objects_v2 folder-prefix probe:
+        the download path only needs the object's size/etag, and that extra LIST per file is
+        costly on large syncs (~12.5x a GET, plus one extra roundtrip slot per file). A
+        non-slash folder-prefix key with no underlying object surfaces as a head_object 404 ->
+        ERROR_NOT_FOUND.
+
+        Uses ONLY the roundtrip throttler (matching stat()); it must NOT acquire the
+        NetworkDataTransfer throttler because download_file already holds the single slot for
+        the whole file and re-acquiring here would deadlock (see OMPE-98951).
+        """
+        bucket_name, key, _region = parse_s3_bucket_key(url)
+        try:
+            client = await self.s3_client().get_instance()
+            data = await self._throttler_roundtrip.run(client.head_object(Bucket=bucket_name, Key=key))
+            return Result.OK, S3ListEntry.file_from_head_object(key=key, data=data)
+        except (BotoCoreError, ClientError, aiohttp.ClientError) as e:
+            _, terminal_result, _ = self._classify_read_exception(e)
+            if terminal_result != Result.ERROR_NOT_FOUND:
+                logger.error(f"boto3 error during head_object {url}: {e}")
+            return terminal_result, None
+
+    async def _download_file_content(self, src_url: str, f_dst: BinaryIO) -> Result:
+        """Download the object at src_url into the open file f_dst.
+
+        Mimics the chunking that aioboto3's download_fileobj performs (concurrent ranged GETs),
+        but retries each chunk via _read_file_ranged_content: aioboto3 has no retry for a failed
+        response-body read, so a single mid-stream connection drop would fail the whole download
+        (see OMPE-98951). A bounded worker pool (instead of one task per chunk) keeps the task
+        count independent of the file size; WRAPP_S3_MAX_CONCURRENCY bounds the workers and the
+        roundtrip throttler inside _read_file_ranged_content bounds the per-chunk GETs.
+
+        The caller (download_file) already holds the single NetworkDataTransfer slot for this
+        whole file, so neither the small-file path nor the chunk workers acquire networkdata:
+        they call the low-level _read_file_ranged_content directly. Each worker is its own asyncio
+        task, satisfying the TaskThrottler rule that a throttled task must not re-enter the same
+        throttler.
+        """
+        stat_result, entry = await self._head_object_entry(src_url)
+        if stat_result != Result.OK:
+            return stat_result
+        assert isinstance(entry, S3ListEntry)
+        if entry.is_folder:
+            # head_object never yields is_folder=True, so this is unreachable; kept as a
+            # defensive guard. A folder-like prefix with no object surfaces as a head_object
+            # 404 -> ERROR_NOT_FOUND above.
+            return Result.ERROR_NOT_FOUND
+        size = entry.size
+        assert size is not None
+        # Pin the object version seen by stat: if the object is overwritten while we download,
+        # the GET(s) fail with 412 instead of silently returning bytes of a different (possibly
+        # much larger) version. S3 returns the ETag quoted and S3ListEntry strips the quotes;
+        # If-Match needs them back. Shared by both the small-file and the multipart branches.
+        if_match_etag = f'"{entry.etag}"'
+        if size == 0:
+            # The open() call already created the empty destination file.
+            return Result.OK
+        if size <= self._multipart_threshold:
+            # Pin the small-file GET too: without If-Match a concurrent overwrite between the
+            # head above and this GET would silently hand back the new object (wrong content,
+            # and stream.read() would buffer the whole new size into RAM). With the pin a
+            # replaced object -> different ETag -> 412 before any body is read -> clean failure.
+            result, data = await self._read_file_ranged_content(src_url, expected_etag=if_match_etag)
+            if result != Result.OK:
+                return result
+            f_dst.write(data)
+            return Result.OK
+
+        # Pre-size the file to its final length so each chunk worker can seek to its own
+        # offset and write its slice regardless of the order in which the chunks complete.
+        # On POSIX this is a sparse resize that reserves NO disk blocks, so it does NOT fail
+        # fast on a full disk: an out-of-space condition instead surfaces as an OSError
+        # (ENOSPC) on a later chunk's f_dst.write, which fails the download and triggers
+        # partial-file cleanup.
+        f_dst.truncate(size)
+        chunk_size = self._multipart_chunksize
+        n_chunks = (size + chunk_size - 1) // chunk_size
+        # Each worker claims the next unprocessed chunk from this shared counter until all
+        # chunks are done, so the pool downloads all n_chunks with a bounded number of tasks.
+        next_chunk_index = 0
+
+        async def _chunk_worker() -> None:
+            nonlocal next_chunk_index
+            while next_chunk_index < n_chunks:
+                # Claiming the index and advancing the counter involves no await, so no other
+                # worker can interleave here on the single-threaded event loop; every chunk is
+                # claimed exactly once without a lock.
+                i = next_chunk_index
+                next_chunk_index += 1
+                start = i * chunk_size
+                end = min(start + chunk_size, size) - 1  # Range headers use inclusive ends
+                result, data = await self._read_file_ranged_content(src_url, byte_range=(start, end), expected_etag=if_match_etag)
+                if result != Result.OK:
+                    raise _ChunkDownloadError(result)
+                # A synchronous seek+write pair with no await in between cannot interleave
+                # with another worker's writes, so no lock is needed.
+                f_dst.seek(start)
+                f_dst.write(data)
+
+        chunk_result = Result.OK
+        try:
+            # The first _ChunkDownloadError cancels the remaining workers.
+            num_workers = max(1, min(n_chunks, self._max_concurrency))
+            # Accepted internal SC-1 exception: this raw asyncio.TaskGroup worker pool is
+            # deliberate because download_file has no task_node, so a SchedulerTaskGroupNode
+            # is not available here. The prior aioboto3 download path was likewise untracked
+            # for progress reporting, so this does not regress observability.
+            async with asyncio.TaskGroup() as tg:
+                for _ in range(num_workers):
+                    tg.create_task(_chunk_worker())
+        except* _ChunkDownloadError as eg:
+            first = eg.exceptions[0]
+            assert isinstance(first, _ChunkDownloadError)
+            chunk_result = first.result
+        return chunk_result
 
     async def upload_file(self, src_url: str, dst_url: str, overwrite: bool, message: Optional[str] = None) -> Result:
         try:
@@ -952,7 +1356,9 @@ class S3Storage(StorageInterface):
 
         client = await self.s3_client().get_instance()
 
-        max_attempts = self._retry_count
+        # Always make at least one attempt even if extra retries are disabled
+        # (WRAPP_S3_EXTRA_RETRIES=0), mirroring the read path in _read_file_ranged_content.
+        max_attempts = max(1, self._retry_count)
         base_delay = self._retry_delay
 
         extra_args = {"Metadata": {NUCLEUS_HASH_METADATA_KEY: nucleus_hash}}
@@ -1042,37 +1448,7 @@ class S3Storage(StorageInterface):
                 total_sleep = delay + jitter
 
                 logger.warning(f"[{dst_url}] upload attempt {attempt}/{max_attempts} failed: {e}. Retrying in {total_sleep:.1f}s…")
-                await asyncio.sleep(total_sleep)
+                await self._sleep(total_sleep)
                 needed_retry = True
 
         return Result.ERROR
-
-    # Update connection status based on exceptions
-    def _update_connection_status_from_exception(self, e: Exception) -> None:
-        if isinstance(
-            e,
-            (
-                UnknownSignatureVersionError,
-                CredentialRetrievalError,
-                TokenRetrievalError,
-                NoAuthTokenError,
-                NoCredentialsError,
-                PartialCredentialsError,
-            ),
-        ):
-            logger.error(f"S3 call failed with authentication exception {e}")
-            self._last_connection_status = ConnectionStatus.AUTH_ERROR
-        elif isinstance(
-            e,
-            (
-                BaseEndpointResolverError,
-                UnknownServiceError,
-                UnknownRegionError,
-                botocore.exceptions.ConnectionError,
-                ConnectionClosedError,
-            ),
-        ):
-            logger.error(f"S3 call failed with connection exception {e}")
-            self._last_connection_status = ConnectionStatus.CONNECT_ERROR
-        else:
-            logger.error(f"S3 call failed with exception {e}")

@@ -33,9 +33,11 @@ from pydantic import (
 from wrapp.datastructures.catalog import Catalog
 from wrapp.datastructures.command_context import CommandParameters
 from wrapp.datastructures.wrapp_file_model import (
+    VersionedFileModelBase,
+    VersionedFileModelVersion,
     WRAPPFileModel,
     WRAPPModelVersion,
-    all_old_wrapp_file_model_classes,
+    all_old_file_model_classes,
 )
 from wrapp.utils.utils import FailedCommand
 
@@ -43,7 +45,15 @@ previous_version_class_name_regex_str = r"([a-zA-Z_][a-zA-Z0-9_]*)_[vV][0-9]+_[0
 _previous_version_class_name_regex = re.compile(r"\"(#/\$defs/)?" + previous_version_class_name_regex_str + '"')
 
 
-def _get_model_schema(t: type[WRAPPFileModel]) -> str:
+def _format_version_string(model_class: type[VersionedFileModelBase], version: VersionedFileModelVersion) -> str:
+    return model_class._format_version_to_string(version)
+
+
+def _format_version_path(model_class: type[VersionedFileModelBase], version: VersionedFileModelVersion) -> str:
+    return _format_version_string(model_class, version)
+
+
+def _get_model_schema(t: type[VersionedFileModelBase]) -> str:
     """
     Return the model JSON schema as it is relevant for ensuring compatibility of the files.
     """
@@ -67,14 +77,18 @@ def _get_model_schema(t: type[WRAPPFileModel]) -> str:
 
 
 async def _save_schema_dev_files(
-    test_class: type[WRAPPFileModel], current_version: WRAPPModelVersion, dir_path: pathlib.Path, emit_dev_warnings: bool
+    test_class: type[VersionedFileModelBase],
+    current_version: VersionedFileModelVersion,
+    dir_path: pathlib.Path,
+    emit_dev_warnings: bool,
 ) -> str:
     """
     Save the schema _dev files. Called if any of the type checking fails and we are not on CI, to make it easy to update those files.
     """
     # Save schema file if necessary.
-    current_version_schema_dev_path = str(dir_path / f"{test_class.__name__}_v{current_version.version_string}_schema_dev.json")
-    if not current_version.is_dev_version():
+    current_version_path = _format_version_path(test_class, current_version)
+    current_version_schema_dev_path = str(dir_path / f"{test_class.__name__}_v{current_version_path}_schema_dev.json")
+    if not test_class._format_version_is_dev(current_version):
         schema_json = _get_model_schema(test_class)
         os.makedirs(str(dir_path), exist_ok=True)
         if emit_dev_warnings:
@@ -88,32 +102,33 @@ async def _save_schema_dev_files(
 
 
 async def _save_data_dev_files(
-    test_class: type[WRAPPFileModel],
-    current_version: WRAPPModelVersion,
+    test_class: type[VersionedFileModelBase],
+    current_version: VersionedFileModelVersion,
     dir_path: pathlib.Path,
-    data_file_paths: dict[WRAPPModelVersion, str],
+    data_file_paths: dict[VersionedFileModelVersion, str],
     emit_dev_warnings: bool,
     run_ci_checks: bool,
 ) -> str:
     """
     Save the data _dev files. Called if any of the type checking fails and we are not on CI, to make it easy to update those files.
     """
-    current_version_data_path = str(dir_path / f"{test_class.__name__}_v{current_version.version_string}.json")
+    current_version_path = _format_version_path(test_class, current_version)
+    current_version_data_path = str(dir_path / f"{test_class.__name__}_v{current_version_path}.json")
     current_version_data_dev_path = (
-        str(dir_path / f"{test_class.__name__}_v{current_version.version_string}_dev.json")
-        if not current_version.is_dev_version()
+        str(dir_path / f"{test_class.__name__}_v{current_version_path}_dev.json")
+        if not test_class._format_version_is_dev(current_version)
         else current_version_data_path
     )
 
     # So let's produce the data file by reading the
     # previous current version and writing it with a temp name. The user
     # has to rename to make it part of the set.
-    source_version: WRAPPModelVersion | None = None
+    source_version: VersionedFileModelVersion | None = None
     for v in data_file_paths.keys():
-        if not source_version or source_version.version_tuple() < v.version_tuple():
+        if not source_version or test_class._format_version_tuple(source_version) < test_class._format_version_tuple(v):
             source_version = v
     if not source_version:
-        if current_version.is_dev_version():
+        if test_class._format_version_is_dev(current_version):
             warnings.warn(
                 f"There are no test files yet for class {test_class.__name__} - but the file version {current_version} is a dev version, so ignoring this until a proper version is used for the class.",
                 UserWarning,
@@ -134,7 +149,7 @@ async def _save_data_dev_files(
                 f"There do not seem to be any files with test data for {test_class.__name__}. Cannot automatically create a test file. Please create a suitable non-trivial test file in {current_version_data_path}."
             )
 
-    source_version_data_path = str(dir_path / f"{test_class.__name__}_v{source_version.version_string}.json")
+    source_version_data_path = str(dir_path / f"{test_class.__name__}_v{_format_version_path(test_class, source_version)}.json")
     try:
         source_data = await test_class.load(source_version_data_path)
     except FailedCommand as e:
@@ -143,7 +158,7 @@ async def _save_data_dev_files(
                 f"Cannot read file {source_version_data_path} for class {test_class.__name__} version {current_version}: {e.__cause__}"
             )
         raise
-    if not current_version.is_dev_version():
+    if not test_class._format_version_is_dev(current_version):
         # Write a new version of class_vX.Y_dev.json. If we would overwrite class_v.X.Y.json, it gets confusing quickly
         # because re-running the test leads to different results.
         # Writing the "_dev" version has the disadvantage that the developer must remember to rename the file,
@@ -169,17 +184,19 @@ async def _save_data_dev_files(
 
 
 async def assert_backwards_forwards_compatibility(
-    test_class: type[WRAPPFileModel],
+    test_class: type[VersionedFileModelBase],
     local_tmp_folder: str,
     use_tmp_data_dir: bool = False,
     emit_dev_warnings: bool = True,
     run_ci_checks: bool = True,
-    old_file_model_classes: dict[tuple[str, WRAPPModelVersion], type[BaseModel]] | None = None,
+    old_file_model_classes: dict[tuple[str, VersionedFileModelVersion], type[BaseModel]] | None = None,
+    old_file_model_classes_name: str = "all_old_file_model_classes",
 ):
     if old_file_model_classes is None:
-        old_file_model_classes = all_old_wrapp_file_model_classes
+        old_file_model_classes = all_old_file_model_classes
     # Find the test file and the persisted JSON schema for this model
-    current_version: WRAPPModelVersion = test_class.model_fields["format_version"].default
+    current_version = test_class.model_fields["format_version"].default
+    current_version_path = _format_version_path(test_class, current_version)
     # We use the normal directory for testing production classes,
     # and the tmp folder for testing this function
     if not use_tmp_data_dir:
@@ -187,33 +204,33 @@ async def assert_backwards_forwards_compatibility(
     else:
         test_data_dir = Path(local_tmp_folder) / "test_data" / "previous_versions"
     data_regex = re.compile(test_class.__name__ + r"_v([0-9]+\.[0-9]+)\.json")
-    data_file_paths: dict[WRAPPModelVersion, str] = {}
+    data_file_paths: dict[VersionedFileModelVersion, str] = {}
     schema_regex = re.compile(test_class.__name__ + r"_v([0-9]+\.[0-9]+)_schema\.json")
-    schema_file_paths: dict[WRAPPModelVersion, str] = {}
+    schema_file_paths: dict[VersionedFileModelVersion, str] = {}
     if test_data_dir.exists():
         for file in test_data_dir.iterdir():
             if file.is_file():
                 data_match = data_regex.match(file.name)
                 if data_match:
-                    data_file_paths[WRAPPModelVersion(version_string=f"{data_match.group(1)}")] = str(file.resolve())
+                    data_file_paths[test_class._format_version_from_string(f"{data_match.group(1)}")] = str(file.resolve())
                 # Pre-WRAPPFileModel versions
-                elif file.name == f"{test_class.__name__}_v0.json":
-                    data_file_paths[WRAPPModelVersion(version_string=f"0")] = str(file.resolve())
-                elif file.name == f"{test_class.__name__}_v1.json":
-                    data_file_paths[WRAPPModelVersion(version_string=f"1")] = str(file.resolve())
+                elif issubclass(test_class, WRAPPFileModel) and file.name == f"{test_class.__name__}_v0.json":
+                    data_file_paths[WRAPPModelVersion(version_string="0")] = str(file.resolve())
+                elif issubclass(test_class, WRAPPFileModel) and file.name == f"{test_class.__name__}_v1.json":
+                    data_file_paths[WRAPPModelVersion(version_string="1")] = str(file.resolve())
                 else:
                     schema_match = schema_regex.match(file.name)
                     if schema_match:
-                        schema_file_paths[WRAPPModelVersion(version_string=f"{schema_match.group(1)}")] = str(file.resolve())
+                        schema_file_paths[test_class._format_version_from_string(f"{schema_match.group(1)}")] = str(file.resolve())
 
     try:
         if current_version not in schema_file_paths or current_version not in data_file_paths:
             error_msg = ""
             if current_version not in schema_file_paths:
-                error_msg = f"Missing schema file '{test_class.__name__}_v{current_version.version_string}_schema.json'"
+                error_msg = f"Missing schema file '{test_class.__name__}_v{current_version_path}_schema.json'"
             if current_version not in data_file_paths:
                 error_msg += " and missing " if error_msg else "Missing "
-                error_msg += f"data file '{test_class.__name__}_v{current_version.version_string}.json'"
+                error_msg += f"data file '{test_class.__name__}_v{current_version_path}.json'"
             error_msg += f" for class {test_class.__name__} version {current_version}! The missing file(s) will be created on your local disk for you with a '_dev' suffix when you are running the test_file_format_compatibility test, please rename and commit them."
             if run_ci_checks:
                 if "CI" in os.environ:
@@ -269,12 +286,12 @@ async def assert_backwards_forwards_compatibility(
         current_version_data_path = await _save_data_dev_files(
             test_class, current_version, test_data_dir, data_file_paths, emit_dev_warnings, run_ci_checks
         )
-        if not current_version.is_dev_version():
+        if not test_class._format_version_is_dev(current_version):
             pytest.fail(str(e))
 
     if not current_version_data_path:
         # It is a dev version and there are no data files available yet to test against.
-        assert current_version.is_dev_version(), "_save_data_dev_files should only return an empty path for dev versions"
+        assert test_class._format_version_is_dev(current_version), "_save_data_dev_files should only return an empty path for dev versions"
         return
 
     current_instance_current_file = await test_class.load(current_version_data_path)
@@ -283,16 +300,16 @@ async def assert_backwards_forwards_compatibility(
     for file_version, file_path_for_version in data_file_paths.items():
         if file_version == current_version:
             # Make sure the current class has already a backup in old_file_model_classes
-            if not current_version.is_dev_version():
+            if not test_class._format_version_is_dev(current_version):
                 assert (
                     test_class.__name__,
                     current_version,
-                ) in old_file_model_classes, f"Please create a backup of the current version of class {test_class.__name__} version {current_version} in the wrapp.datastructures.previous_versions module and add an entry to all_old_wrapp_file_model_classes."
+                ) in old_file_model_classes, f"Please create a backup of the current version of class {test_class.__name__} version {current_version} in the wrapp.datastructures.previous_versions module and add an entry to {old_file_model_classes_name}."
             continue
         logging.info(f"Checking backwards compatibilty for {test_class.__name__} {current_version} with version {file_version}")
 
         # Check backwards compatibility: the current version can read files written by the old versions
-        current_instance_old_file: WRAPPFileModel = await test_class.load(str(file_path_for_version))
+        current_instance_old_file: VersionedFileModelBase = await test_class.load(str(file_path_for_version))
         assert current_instance_old_file.format_version == current_version
         # Super special case: the .wrapp_preserve_empty_folder in the source_path have different paths after converting
         # from WRAPP 1.1.2 on Windows and Linux because the temp directories are in different places. The stored
@@ -320,17 +337,17 @@ async def assert_backwards_forwards_compatibility(
             old_class = old_file_model_classes[(test_class.__name__, file_version)]
         except KeyError:
             pytest.fail(
-                f"Compatibility test for class {test_class.__name__} failed. Found a file with version {file_version} which has no associated class! This should not have happened - try to find a Python class matching that version (git?) and register it in all_old_wrapp_file_model_classes. Or delete the file {file_path_for_version} if you are sure that version was never shipped."
+                f"Compatibility test for class {test_class.__name__} failed. Found a file with version {file_version} which has no associated class! This should not have happened - try to find a Python class matching that version (git?) and register it in {old_file_model_classes_name}. Or delete the file {file_path_for_version} if you are sure that version was never shipped."
             )
             raise  # Somehow PyCharm thinks pytest.fail(..) does not raise an exception in all cases?
         # If the major version is identical, the old version must be capable of reading and saving the new file, and vice versa
-        if file_version.major() == current_version.major():
+        if test_class._format_version_major(file_version) == test_class._format_version_major(current_version):
             logging.info(
                 f"Checking forwards compatibility for {test_class.__name__} {current_version} with version {file_version} (class {old_class.__name__})"
             )
             # Read a current version file with an old version class
-            old_instance_old_file: WRAPPFileModel = await old_class.load(str(file_path_for_version))
-            old_instance_current_file: WRAPPFileModel = await old_class.load(current_version_data_path)
+            old_instance_old_file: VersionedFileModelBase = await old_class.load(str(file_path_for_version))
+            old_instance_current_file: VersionedFileModelBase = await old_class.load(current_version_data_path)
             assert old_instance_current_file.format_version == file_version
             assert old_instance_old_file.format_version == file_version
 
@@ -356,7 +373,10 @@ async def assert_backwards_forwards_compatibility(
                 version_diff == {}
             ), f"Data read using version {file_version} of {test_class.__name__} differs from data read using current version {current_version}: {version_diff.pretty()}"
             # Save the data in the old class initialized with the new file (making sure data in the new file is preserved by the old class)
-            saved_old_instance_file_path = os.path.join(local_tmp_folder, f"{test_class.__name__}_v{file_version}_v{current_version}.json")
+            saved_old_instance_file_path = os.path.join(
+                local_tmp_folder,
+                f"{test_class.__name__}_v{_format_version_path(test_class, file_version)}_v{_format_version_path(test_class, current_version)}.json",
+            )
             await old_instance_current_file.save(CommandParameters(), saved_old_instance_file_path)
             current_instance_saved_by_old_instance = await test_class.load(saved_old_instance_file_path)
             assert (
@@ -369,7 +389,8 @@ async def assert_backwards_forwards_compatibility(
             )
             # Save the data in the new class initialized with the old file
             saved_current_instance_file_path = os.path.join(
-                local_tmp_folder, f"{test_class.__name__}_v{current_version}_v{file_version}.json"
+                local_tmp_folder,
+                f"{test_class.__name__}_v{_format_version_path(test_class, current_version)}_v{_format_version_path(test_class, file_version)}.json",
             )
             await current_instance_old_file.save(CommandParameters(), saved_current_instance_file_path)
             # Re-read the old file read and saved by the new class, make sure it is the same.
@@ -384,15 +405,15 @@ async def assert_backwards_forwards_compatibility(
             )
         else:
             # No found version should have a greater major version than our current version
-            assert file_version.major() < current_version.major()
+            assert test_class._format_version_major(file_version) < test_class._format_version_major(current_version)
             # Make sure previous major releases still behave in a reasonable manner when trying to read the new data
             logging.info(
                 f"Checking behaviour of incompatible previous version {old_class.__name__} when loading version {current_version}."
             )
-            if issubclass(old_class, WRAPPFileModel):
+            if issubclass(old_class, VersionedFileModelBase):
                 with pytest.raises(
                     FailedCommand,
-                    match=f"Failed to load.*Failed to migrate.*version {file_version.version_string} using version {current_version.version_string} as input.*",
+                    match=f"Failed to load.*Failed to migrate.*version {_format_version_string(test_class, file_version)} using version {_format_version_string(test_class, current_version)} as input.*",
                 ):
                     await old_class.load(current_version_data_path)
             else:

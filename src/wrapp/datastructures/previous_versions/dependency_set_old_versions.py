@@ -19,7 +19,7 @@ from wrapp.datastructures.previous_versions.dependency_old_versions import (
 from wrapp.datastructures.wrapp_file_model import (
     WRAPPFileModel,
     WRAPPModelVersion,
-    all_old_wrapp_file_model_classes,
+    all_old_file_model_classes,
 )
 
 
@@ -28,4 +28,7 @@ class DependencySet_V1_0(WRAPPFileModel):
     dependencies: list[Dependency_V3_0]
 
 
-all_old_wrapp_file_model_classes[("DependencySet", WRAPPModelVersion(version_string="1.0"))] = DependencySet_V1_0
+# Versioned classes above are compatibility snapshots. Do not edit an
+# existing class body after it has shipped; add a new class and registry entry
+# for a new file format version instead.
+all_old_file_model_classes[("DependencySet", WRAPPModelVersion(version_string="1.0"))] = DependencySet_V1_0

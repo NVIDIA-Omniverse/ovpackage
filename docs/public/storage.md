@@ -24,11 +24,15 @@ ovpackage supports URLs to S3 buckets, Azure containers/blobs, Google Cloud Stor
 > and all buckets accessed must have AWS Transfer Acceleration enabled in their settings. Additional costs may be incurred with
 > the AWS account; therefore, testing is recommended before activation for large payloads.
 >
-> To fine-tune S3 multipart upload performance, the following environment variables can be configured:
+> To fine-tune S3 multipart transfer performance, the following environment variables can be configured.
+> They apply to uploads and to multipart downloads:
 >
-> * `OVPACKAGE_S3_MULTIPART_THRESHOLD`: Minimum file size (in bytes) before multipart uploads are used. Default is 5 MiB (`5242880`).
-> * `OVPACKAGE_S3_MULTIPART_CHUNKSIZE`: Size (in bytes) of each part/chunk in a multipart upload. Default is 5 MiB (`5242880`).
-> * `OVPACKAGE_S3_MAX_CONCURRENCY`: Maximum number of threads/connections used for multipart uploads. Default is `50`.
+> * `OVPACKAGE_S3_MULTIPART_THRESHOLD`: Minimum file size (in bytes) before multipart transfers are used. Default is 5 MiB (`5242880`).
+> * `OVPACKAGE_S3_MULTIPART_CHUNKSIZE`: Size (in bytes) of each part/chunk in a multipart transfer. Default is 5 MiB (`5242880`).
+> * `OVPACKAGE_S3_MAX_CONCURRENCY`: Maximum number of concurrent chunk transfers per file. Default is `50`.
+>
+> These limits act per file; total transfer parallelism is additionally bounded by the global scheduler
+> limits (`--jobs`, `--file-transfer-jobs`); see generic parameters.
 >
 > Example usage:
 >
@@ -39,6 +43,18 @@ ovpackage supports URLs to S3 buckets, Azure containers/blobs, Google Cloud Stor
 > export OVPACKAGE_S3_MAX_CONCURRENCY=32
 >
 > ```
+> Timeout and retry behavior can be tuned with:
+>
+> * `OVPACKAGE_S3_CONNECT_TIMEOUT_S`: Seconds to wait for a connection to be established. Default is `5`.
+> * `OVPACKAGE_S3_READ_TIMEOUT_S`: Seconds of socket-read inactivity before a response or download stream
+>   is considered stalled and retried. Default is `60`.
+> * `OVPACKAGE_S3_EXTRA_RETRIES`: Number of attempts ovpackage makes when a transfer fails mid-stream; for
+>   multipart downloads this applies per chunk. Default is `3`.
+> * `OVPACKAGE_S3_RETRY_WAIT_SECONDS`: Base delay in seconds for the exponential backoff between attempts. Default is `1`.
+>
+> Standard AWS request retries can additionally be tuned with `AWS_RETRY_MODE` and `AWS_MAX_ATTEMPTS`
+> (or `retry_mode` / `max_attempts` in `~/.aws/config`); ovpackage passes these through unchanged.
+>
 **Azure**
     Data on Azure Blob Storage can be accessed using `https://<account>.blob.core.windows.net/<container>/...` URLs.
     For details on authentication, please refer to the Azure authentication section.
@@ -94,7 +110,12 @@ To select a specific OAuth client profile from discovery `/api/v1/auth-config`, 
 
 ovpackage stores refresh tokens in the system keyring and reuses them on subsequent runs.
 The keyring service name can be overridden with `OVPACKAGE_STORAGE_API_KEYRING_SERVICE`
-(default: `ovpackage.storageapi.discovery`).
+(default: `ovpackage.storageapi.discovery`); the username under which each refresh token
+is stored is the normalised discovery URL (the value of
+`OVPACKAGE_STORAGE_API_DISCOVERY_URL` with any trailing slash stripped, e.g.
+`https://my-discovery.example.com`). On every successful refresh exchange ovpackage writes
+the rotated refresh token back to the same entry, so a stash made out-of-band stays
+current as long as ovpackage keeps using it.
 
 Authentication source precedence is:
 
@@ -254,10 +275,26 @@ probe; all other credential sources (steps 1–3b) work normally.
 * `OVPACKAGE_GCS_ENDPOINT`: Override the GCS API endpoint (useful for local testing with
   [fake-gcs-server](https://github.com/fsouza/fake-gcs-server)).  When set, anonymous
   credentials are used automatically if no other credentials are configured.
-* `OVPACKAGE_GCS_EXTRA_RETRIES`: Maximum number of retry attempts for upload/download operations
-  (default: `3`).
-* `OVPACKAGE_GCS_RETRY_WAIT_SECONDS`: Base delay in seconds between retries with exponential
-  back-off (default: `1.0`).
+
+GCS operations use the `google-cloud-storage` client's [built-in retry and exponential
+back-off](https://cloud.google.com/storage/docs/retry-strategy#python). Each of the following
+variables, **when set**, overrides the corresponding `google-cloud-storage` setting (see the
+[google.api_core Retry reference](https://googleapis.dev/python/google-api-core/latest/retry.html));
+when unset, the library's own default is used. They are
+useful for slow or overloaded connections — for example, raising the total deadline avoids
+the `RetryError: Timeout ... exceeded` seen on large cross-cloud mirrors.
+
+* `OVPACKAGE_GCS_TIMEOUT_SECONDS`: Total deadline in seconds for a GCS operation across all
+  internal retry attempts (the retry deadline).
+* `OVPACKAGE_GCS_RETRY_INITIAL_SECONDS`: Delay in seconds before the first retry.
+* `OVPACKAGE_GCS_RETRY_MAXIMUM_SECONDS`: Maximum delay in seconds between retries.
+* `OVPACKAGE_GCS_RETRY_MULTIPLIER`: Multiplier applied to the delay after each retry (exponential back-off).
+* `OVPACKAGE_GCS_REQUEST_TIMEOUT_SECONDS`: Timeout in seconds for a single HTTP request to GCS
+  (the per-request transport timeout; the `google-cloud-storage` default is 60 seconds).
+  Raise it on connections too slow to complete an individual request within that limit —
+  the per-request `TimeoutError: The write operation timed out`. Raising
+  `OVPACKAGE_GCS_TIMEOUT_SECONDS` alone does not help there: it only retries the same
+  request-timeout-bounded attempt for longer.
 
 ## Storage Semantics and Empty Folders
 

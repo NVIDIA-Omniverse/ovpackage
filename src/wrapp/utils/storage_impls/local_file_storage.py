@@ -19,6 +19,7 @@ import logging
 import os
 import platform
 import shutil
+import sys
 from collections.abc import AsyncGenerator
 from datetime import datetime
 from typing import (
@@ -309,6 +310,27 @@ class LocalFileStorage(StorageInterface):
     def supports_create_with_hash(self, target_url: str, hash: str) -> bool:
         """Local files don't support creating from hash."""
         return False
+
+    def is_case_sensitive(self, url: str) -> bool:
+        path = self._url_to_path(url)
+        probe = path if os.path.isdir(path) else os.path.dirname(path)
+        while probe and not os.path.isdir(probe):
+            parent = os.path.dirname(probe)
+            if parent == probe:
+                return sys.platform == "linux"
+            probe = parent
+        if not probe:
+            return sys.platform == "linux"
+        swapped = probe.swapcase()
+        if swapped == probe:
+            return sys.platform == "linux"
+        try:
+            s_orig = os.stat(probe)
+            s_swap = os.stat(swapped)
+            # Same inode+device means the FS resolved both to the same entry → case-insensitive
+            return not (s_orig.st_ino == s_swap.st_ino and s_orig.st_dev == s_swap.st_dev)
+        except OSError:
+            return True
 
     def can_be_cached(self, url: str) -> bool:
         """Local files are already on disk - they're always 'cached'."""

@@ -28,9 +28,11 @@ from wrapp import (
     new,
 )
 from wrapp.commands.install import _local_copy_ops_for_eager_hash_cache
+from wrapp.datastructures.catalog import CatalogItem
 from wrapp.datastructures.package import (
     PackageInfo,
     read_package_info,
+    write_package_info,
 )
 from wrapp.datastructures.patch import (
     ItemType,
@@ -41,6 +43,7 @@ from wrapp.repo.repository import Repository
 from wrapp.utils.logging import allow_reinit_logging_for_test
 from wrapp.utils.storage import (
     Result,
+    wrapp_is_case_sensitive,
     wrapp_supports_tags,
     wrapp_url_exists,
     wrapp_write_file_bytes,
@@ -638,6 +641,63 @@ async def test_install_with_wrapp_files_with_old_version_deps(test_folder_url, a
     await install("package_a", "v1", join_paths(package_a_install, "install_a"), repo=repo_url)
 
 
+# OMPE-96260: When a parent package is re-installed with a bumped subpackage version into a
+# destination that already contains an older version of that subpackage, the install-time
+# retarget step must rewrite the freshly-copied subpackage's `repository` field to the repo it
+# was actually installed from. The bug: install consults a pre-patch snapshot of the destination
+# subpackage (whose `repository` was already correct from the earlier install), sees "no change
+# needed", and leaves the newly-copied subpackage pointing at the original source repo.
+@pytest.mark.asyncio
+async def test_install_retargets_repository_of_updated_subpackage_OMPE96260(test_folder_url, authenticator, storage_backend):
+    # The "origin" repo: where the subpackage and parent are first published. Stands in for the
+    # Nucleus repo in the real defect.
+    repo_origin = join_paths(test_folder_url, "repo_origin")
+    # The "mirror" repo: where the parent (and its subpackage copy) is mirrored to and installed
+    # from. Stands in for the S3 mirror in the real defect. mirror_with_dependencies copies the
+    # subpackage into this repo but leaves the subpackage `.wrapp`'s own `repository` field pointing
+    # at the origin repo - exactly the stale field that install must retarget at install time.
+    repo_mirror = join_paths(test_folder_url, "repo_mirror")
+
+    dest = join_paths(test_folder_url, "dest")
+    sub_wrapp_install_path = join_paths(dest, "dep_s", ".package_s.wrapp")
+
+    async def publish_and_mirror_parent(version: str) -> None:
+        # Publish the leaf subpackage and a parent that depends on it into the origin repo.
+        await create_unnamed_package(
+            storage_backend,
+            "package_s",
+            version,
+            folder=join_paths(test_folder_url, f"package_s_source_{version}"),
+            repo_folder=repo_origin,
+            prefix="s",
+        )
+        parent_source = join_paths(test_folder_url, f"package_p_source_{version}")
+        await install("package_s", version, join_paths(parent_source, "dep_s"), repo=repo_origin)
+        await create("package_p", version, parent_source, False, repo=repo_origin)
+        # Mirror the parent and its dependency into the mirror repo. The mirrored subpackage now
+        # lives in repo_mirror but its `.wrapp` still records `repository == repo_origin`.
+        await mirror_with_dependencies("package_p", version, source_repo=repo_origin, destination_repo=repo_mirror)
+
+    # First install from the mirror repo: destination has no prior subpackage, so retarget reads the
+    # freshly written file and correctly rewrites its `repository` to the mirror repo.
+    await publish_and_mirror_parent("v1")
+    await install("package_p", "v1", dest, repo=repo_mirror)
+    info = await read_package_info(sub_wrapp_install_path)
+    assert info is not None
+    assert "repo_origin" not in (info.repository or ""), f"first install left stale origin repository: {info.repository}"
+    assert "repo_mirror" in (info.repository or ""), f"first install did not retarget to mirror repository: {info.repository}"
+
+    # Update over the existing install: bump the subpackage to v2, mirror the new parent, and
+    # re-install into the same destination. The newly-copied subpackage `.wrapp` again carries
+    # `repository == repo_origin` and must be retargeted to the mirror repo.
+    await publish_and_mirror_parent("v2")
+    await install("package_p", "v2", dest, repo=repo_mirror)
+    info = await read_package_info(sub_wrapp_install_path)
+    assert info is not None
+    assert "repo_origin" not in (info.repository or ""), f"updated subpackage kept stale origin repository (OMPE-96260): {info.repository}"
+    assert "repo_mirror" in (info.repository or ""), f"updated subpackage was not retargeted to mirror repository: {info.repository}"
+
+
 @pytest.mark.asyncio
 async def test_install_from_cross_storage_type_OMPE62817(
     cli_runner, test_folder_url, alternate_storage_test_folder_url, authenticator_with_alternate, storage_backend
@@ -662,6 +722,86 @@ async def test_install_from_cross_storage_type_OMPE62817(
     await wrapp.install("package", "1.0", target_folder, repo=repo_folder)
     p = await PackageInfo.load(join_paths(target_folder, ".package.wrapp"))
     assert p.version == "1.0"
+
+
+@pytest.mark.asyncio
+async def test_install_fails_on_case_insensitive_path_conflicts_OMPE52420(cli_runner, test_folder_url, storage_backend):
+    """Test that install detects case-insensitive path conflicts when the destination storage is case-insensitive"""
+    package = "".join(random.choices(string.ascii_lowercase, k=8))
+    version = "1.0.0-" + "".join(random.choices(string.ascii_lowercase, k=8))
+    source_package = await storage_backend.create_source_package(join_paths(test_folder_url, "package_source"))
+    repo_folder = join_paths(test_folder_url, ".package_cache")
+
+    # Create the package normally
+    run_wrapp(cli_runner, ["create", package, version, source_package, "--repo", repo_folder])
+
+    package_wrapp_file = join_paths(repo_folder, ".packages", package, version, f".{package}.wrapp")
+    package_info = await read_package_info(package_wrapp_file)
+    assert package_info is not None
+    assert package_info.catalog is not None
+
+    original_item = next(item for item in package_info.catalog.items if item.relative_path == "testfile.txt")
+    conflicting_item = CatalogItem(
+        source_path=original_item.source_path,
+        relative_path="Testfile.txt",
+        hash=original_item.hash,
+        size=original_item.size,
+        tags=original_item.tags,
+    )
+    package_info.catalog.items.append(conflicting_item)
+    await write_package_info(package_wrapp_file, package_info)
+
+    # Note: "testfile.txt" and "Testfile.txt" have the same content hash, but we still fail on
+    # case-insensitive storage — installing would leave the catalog out of sync with actual files.
+    target_folder = join_paths(test_folder_url, "installed_package")
+    if wrapp_is_case_sensitive(target_folder):
+        await install(package_name=package, version=version, destination=target_folder, repo=repo_folder)
+    else:
+        with pytest.raises(FailedCommand, match="Cross platform case insensitive path conflicts found"):
+            await install(package_name=package, version=version, destination=target_folder, repo=repo_folder)
+
+
+@pytest.mark.asyncio
+async def test_install_fails_on_case_insensitive_dependency_path_conflicts_OMPE52420(cli_runner, test_folder_url, storage_backend):
+    dependency_package = "dep" + "".join(random.choices(string.ascii_lowercase, k=8))
+    package = "pkg" + "".join(random.choices(string.ascii_lowercase, k=8))
+    version = "1.0.0-" + "".join(random.choices(string.ascii_lowercase, k=8))
+    repo_folder = join_paths(test_folder_url, ".package_cache")
+
+    dependency_source = await storage_backend.create_source_package(join_paths(test_folder_url, "dependency_source"), prefix="dep_")
+    run_wrapp(cli_runner, ["create", dependency_package, version, dependency_source, "--repo", repo_folder])
+
+    source_package = await storage_backend.create_source_package(join_paths(test_folder_url, "package_source"), prefix="top_")
+    await install(dependency_package, version, join_paths(source_package, "dependency"), repo=repo_folder)
+    run_wrapp(cli_runner, ["create", package, version, source_package, "--repo", repo_folder])
+
+    dependency_wrapp_file = join_paths(repo_folder, ".packages", dependency_package, version, f".{dependency_package}.wrapp")
+    dependency_package_info = await read_package_info(dependency_wrapp_file)
+    assert dependency_package_info is not None
+    assert dependency_package_info.catalog is not None
+
+    original_item = next(item for item in dependency_package_info.catalog.items if item.relative_path.endswith("testfile.txt"))
+    conflicting_relative_path = original_item.relative_path[0].swapcase() + original_item.relative_path[1:]
+    conflicting_item = CatalogItem(
+        source_path=original_item.source_path,
+        relative_path=conflicting_relative_path,
+        hash=original_item.hash,
+        size=original_item.size,
+        tags=original_item.tags,
+    )
+    dependency_package_info.catalog.items.append(conflicting_item)
+    await write_package_info(dependency_wrapp_file, dependency_package_info)
+
+    target_folder = join_paths(test_folder_url, "installed_package")
+    dependency_target = join_paths(target_folder, "dependency")
+    if wrapp_is_case_sensitive(target_folder):
+        await install(package_name=package, version=version, destination=target_folder, repo=repo_folder)
+        assert await wrapp_url_exists(join_paths(dependency_target, original_item.relative_path))
+        assert await wrapp_url_exists(join_paths(dependency_target, conflicting_relative_path))
+    else:
+        with pytest.raises(FailedCommand, match="Cross platform case insensitive path conflicts found"):
+            await install(package_name=package, version=version, destination=target_folder, repo=repo_folder)
+        assert not await wrapp_url_exists(target_folder)
 
 
 @pytest.mark.asyncio

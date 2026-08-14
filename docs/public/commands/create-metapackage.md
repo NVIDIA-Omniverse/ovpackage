@@ -17,6 +17,11 @@ repositories, or alternatively, use [mirror](mirror.md) with `--recursive` to tr
 Note that the metapackage is a normal ovpackage package, the only difference is that it is created with an empty catalog
 of itself having only dependencies to other packages that were already created.
 
+The released SimReady package-standard sidecar metadata does not yet model ovpackage
+dependencies, and metapackages contain only dependencies, so
+`create-metapackage` does not write package-standard sidecars. See
+package standard sidecars.
+
 See also: [create](create.md), [install](install.md), [catalog](catalog.md).
 
 For CLI options, run `ovpackage create-metapackage --help`.

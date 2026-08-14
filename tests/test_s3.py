@@ -13,16 +13,20 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import asyncio
 import base64
 import binascii
 import io
 import logging
 import os
 import random
+import re
 import sys
+from collections import Counter
 from datetime import datetime
 from unittest.mock import (
     AsyncMock,
+    MagicMock,
     patch,
 )
 
@@ -45,9 +49,11 @@ from wrapp.utils.utils import (
 from .storage_test_helpers import StorageBackendForTests
 
 try:
+    import aiohttp
     from botocore.exceptions import (
         BotoCoreError,
         ClientError,
+        NoCredentialsError,
     )
 
     from wrapp.utils.storage_impls.s3_helper import parse_s3_bucket_key
@@ -58,6 +64,89 @@ try:
     )
 except (StorageMissingDependenciesError, ModuleNotFoundError) as e:
     pytest.skip(f"Missing dependencies for S3Storage: {e}", allow_module_level=True)
+
+
+def _recording_sleep():
+    """Return an (async sleep callable, delays list) pair for injecting into S3Storage.
+
+    The callable records each requested backoff delay and returns immediately (no real
+    wait, no yield). S3Storage takes it as its injected backoff sleep, so only genuine
+    backoff sleeps land in the list; the download mock's own asyncio.sleep(0) yields go
+    straight to the event loop.
+    """
+    delays: list = []
+
+    async def sleep(delay):
+        delays.append(delay)
+
+    return sleep, delays
+
+
+class _FakeClientProvider:
+    """Strict stand-in for S3ClientWrapper (satisfies the S3ClientProvider Protocol).
+
+    Returns the injected fake client from get_instance; close_instance and
+    set_new_auth_info are no-ops. Injected into S3Storage via client_provider= so the
+    lazy s3_client()/close/auth paths use it without patching get_instance.
+    """
+
+    def __init__(self, client):
+        self._client = client
+
+    async def get_instance(self):
+        return self._client
+
+    async def close_instance(self):
+        return None
+
+    def set_new_auth_info(self, auth_info):
+        return None
+
+
+class _FakeS3Client:
+    """Strict fake for the aioboto3 client surface the read/download paths call.
+
+    Exposes exactly get_object, head_object and list_objects_v2 as async methods. It is a
+    plain class (NOT MagicMock) with no __getattr__, so any other attribute access raises
+    AttributeError naturally: an unstubbed client call fails loudly instead of silently
+    returning a fabricated mock. head_object/list_objects_v2 track their own call counts so
+    the download tests can assert on them.
+    """
+
+    def __init__(self, *, get_object=None, head_object_result=None, head_exception=None, list_objects_v2_result=None):
+        self.get_object_func = get_object
+        self._head_object_result = head_object_result
+        self._head_exception = head_exception
+        self._list_objects_v2_result = {} if list_objects_v2_result is None else list_objects_v2_result
+        self.head_object_call_count = 0
+        self.list_objects_v2_call_count = 0
+
+    async def get_object(self, *args, **kwargs):
+        assert self.get_object_func is not None, "get_object called but no get_object_func configured"
+        return await self.get_object_func(*args, **kwargs)
+
+    async def head_object(self, *args, **kwargs):
+        self.head_object_call_count += 1
+        if self._head_exception is not None:
+            raise self._head_exception
+        return self._head_object_result
+
+    async def list_objects_v2(self, *args, **kwargs):
+        self.list_objects_v2_call_count += 1
+        return self._list_objects_v2_result
+
+
+class _FakeUploadS3Client:
+    """Strict fake for the client surface the upload-retry path calls.
+
+    Exposes only upload_fileobj (delegating to the test's upload mock) and delete_object;
+    any other attribute access raises AttributeError. delete_object stays an AsyncMock so
+    the upload tests can introspect its call count and Bucket/Key kwargs.
+    """
+
+    def __init__(self, upload_fileobj_func):
+        self.upload_fileobj = upload_fileobj_func
+        self.delete_object = AsyncMock(return_value={})
 
 
 def generate_random_bytes(size, seed=None):
@@ -121,6 +210,55 @@ async def test_s3_calculated_checksum(test_folder_url, storage_backend):
     print("CRC-32 Checksum:", sha32_checksum)
 
     assert sha32_checksum == uploaded_checksum
+
+
+@pytest.mark.asyncio
+@force_wrapp_thread
+async def test_s3_multipart_download_roundtrip(test_folder_url, storage_backend):
+    """End-to-end multipart download against the live S3 API (MinIO in CI).
+
+    Exercises the real chunked ranged-GET download path -- Range headers, If-Match on the quoted
+    ETag, chunk reassembly -- rather than only the mock. A small threshold/chunksize forces a
+    modest object to download as several chunks, so no multi-MiB transfer is needed. See
+    OMPE-98951 note about the previously mock-only multipart path.
+    """
+    import tempfile
+
+    if not g_aws_enabled:
+        pytest.skip("AWS is disabled")
+    if storage_backend.storage_type().name != "S3":
+        pytest.skip("Test only for s3")
+
+    # A fresh S3Storage with a small threshold/chunksize so the DOWNLOAD uses the chunked path
+    # (Router.me().s3() keeps the 5 MiB default). It reads the same endpoint/credentials from the
+    # environment, so it talks to the same backend as the fixtures.
+    with patch.dict(os.environ, {"WRAPP_S3_MULTIPART_THRESHOLD": "4096", "WRAPP_S3_MULTIPART_CHUNKSIZE": "4096"}):
+        storage = S3Storage("test-version", False, ThrottlingParameters())
+
+    url = test_folder_url + "/test_multipart_download_roundtrip_OMPE_98951.bin"
+    data = generate_random_bytes(10240)  # > 4096 threshold -> 3 chunks (4096 / 4096 / 2048)
+    assert len(data) > storage._multipart_threshold
+    bucket, key, region = parse_s3_bucket_key(url)
+
+    try:
+        # Seed the object with a single put_object -- a multipart UPLOAD at 4096-byte parts would be
+        # rejected (S3 requires parts >= 5 MiB); only the download needs the small chunk size.
+        client = await storage.s3_client().get_instance()
+        await client.put_object(Bucket=bucket, Key=key, Body=data)
+        with tempfile.TemporaryDirectory() as tmp:
+            dst_path = os.path.join(tmp, "out.bin")
+            if sys.platform == "win32":
+                dst_url = f"file:///{dst_path.replace(os.sep, '/')}"
+            else:
+                dst_url = f"file://{dst_path}"
+
+            result = await storage.download_file(url, dst_url, overwrite=True)
+            assert result == Result.OK
+            with open(dst_path, "rb") as f:
+                assert f.read() == data
+    finally:
+        await storage.delete_item(url)
+        await storage.shutdown()
 
 
 @pytest.mark.parametrize(
@@ -346,9 +484,11 @@ async def test_normalize(storage_backend):
 # ===== Retry Logic Tests =====
 
 
-def _create_client_error(error_code="InternalError", message="Test error"):
+def _create_client_error(error_code="InternalError", message="Test error", http_status=None):
     """Helper function to create a ClientError for testing."""
     error_response = {"Error": {"Code": error_code, "Message": message}}
+    if http_status is not None:
+        error_response["ResponseMetadata"] = {"HTTPStatusCode": http_status}
     operation_name = "upload_fileobj"
     return ClientError(error_response, operation_name)
 
@@ -373,29 +513,34 @@ def _create_upload_mock(fail_count: int, exception_type=None):
 
 
 class _RetryTestContext:
-    """Context manager for common retry test mocking setup."""
+    """Context manager for common retry test setup.
 
-    def __init__(self, storage, mock_upload_func):
-        self.storage = storage
-        self.mock_client = AsyncMock()
-        self.mock_client.upload_fileobj = mock_upload_func
-        self.mock_client.delete_object = AsyncMock(return_value={})
+    Builds the S3Storage under test with an injected strict upload client and a recording
+    sleep (no more patching of the global asyncio.sleep or of get_instance). Only stat and
+    boto3's TransferConfig are still patched, since neither is part of the client seam.
+    """
+
+    def __init__(self, mock_upload_func):
+        self.sleep_func, self.sleep_delays = _recording_sleep()
+        self.mock_client = _FakeUploadS3Client(mock_upload_func)
+        self.storage = S3Storage(
+            "test-version",
+            False,
+            ThrottlingParameters(),
+            client_provider=_FakeClientProvider(self.mock_client),
+            sleep=self.sleep_func,
+        )
         self.mock_stat = None
-        self.mock_sleep = None
         self._patches = []
 
     def __enter__(self):
-        # Create and enter all patches
+        # stat and TransferConfig are not part of the client seam, so they stay patched.
         self._patches = [
             patch.object(self.storage, "stat", new_callable=AsyncMock),
-            patch.object(self.storage.s3_client(), "get_instance", new_callable=AsyncMock, return_value=self.mock_client),
-            patch("asyncio.sleep", new_callable=AsyncMock),
             patch("boto3.s3.transfer.TransferConfig"),
         ]
         self.mock_stat = self._patches[0].__enter__()
         self._patches[1].__enter__()
-        self.mock_sleep = self._patches[2].__enter__()
-        self._patches[3].__enter__()
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb):
@@ -406,15 +551,14 @@ class _RetryTestContext:
 
 @pytest_asyncio.fixture
 async def retry_test_setup():
-    """Common setup for retry tests."""
+    """Common setup for retry tests. The storage is built by _RetryTestContext so the
+    strict client provider and recording sleep can be injected at construction time."""
     test_url = "s3://test-bucket/test-file.txt"
     test_data = b"test content"
     file_obj = io.BytesIO(test_data)
     nucleus_hash = "test_hash_123"
-    storage = S3Storage("test-version", False, ThrottlingParameters())
 
     yield {
-        "storage": storage,
         "test_url": test_url,
         "test_data": test_data,
         "file_obj": file_obj,
@@ -430,21 +574,21 @@ async def test_upload_retry_single_failure(retry_test_setup):
     setup = retry_test_setup
     mock_upload, call_count = _create_upload_mock(fail_count=1)
 
-    with _RetryTestContext(setup["storage"], mock_upload) as ctx:
+    with _RetryTestContext(mock_upload) as ctx:
         ctx.mock_stat.side_effect = [
             (Result.ERROR_NOT_FOUND, None),
             (Result.ERROR_NOT_FOUND, None),
             (Result.OK, _create_s3_entry("test-file.txt", len(setup["test_data"]))),
         ]
 
-        result = await setup["storage"]._upload_fileobj(
+        result = await ctx.storage._upload_fileobj(
             setup["file_obj"], len(setup["test_data"]), setup["nucleus_hash"], setup["test_url"], True
         )
 
         assert result == Result.OK
         assert call_count[0] == 2
-        assert ctx.mock_sleep.call_count == 1
-        assert 1.0 <= ctx.mock_sleep.call_args[0][0] <= 1.1
+        assert len(ctx.sleep_delays) == 1
+        assert 1.0 <= ctx.sleep_delays[0] <= 1.1
 
 
 @pytest.mark.asyncio
@@ -454,7 +598,7 @@ async def test_upload_retry_multiple_failures(retry_test_setup):
     setup = retry_test_setup
     mock_upload, call_count = _create_upload_mock(fail_count=2)
 
-    with _RetryTestContext(setup["storage"], mock_upload) as ctx:
+    with _RetryTestContext(mock_upload) as ctx:
         ctx.mock_stat.side_effect = [
             (Result.ERROR_NOT_FOUND, None),
             (Result.ERROR_NOT_FOUND, None),
@@ -462,14 +606,14 @@ async def test_upload_retry_multiple_failures(retry_test_setup):
             (Result.OK, _create_s3_entry("test-file.txt", len(setup["test_data"]))),
         ]
 
-        result = await setup["storage"]._upload_fileobj(
+        result = await ctx.storage._upload_fileobj(
             setup["file_obj"], len(setup["test_data"]), setup["nucleus_hash"], setup["test_url"], True
         )
 
         assert result == Result.OK
         assert call_count[0] == 3
-        assert ctx.mock_sleep.call_count == 2
-        sleep_times = [call_args[0][0] for call_args in ctx.mock_sleep.call_args_list]
+        assert len(ctx.sleep_delays) == 2
+        sleep_times = ctx.sleep_delays
         assert 1.0 <= sleep_times[0] <= 1.1
         assert 2.0 <= sleep_times[1] <= 2.2
 
@@ -481,20 +625,20 @@ async def test_upload_retry_max_retries_exhausted(retry_test_setup):
     setup = retry_test_setup
     mock_upload, call_count = _create_upload_mock(fail_count=3, exception_type=BotoCoreError)
 
-    with _RetryTestContext(setup["storage"], mock_upload) as ctx:
+    with _RetryTestContext(mock_upload) as ctx:
         ctx.mock_stat.side_effect = [
             (Result.ERROR_NOT_FOUND, None),
             (Result.ERROR_NOT_FOUND, None),
             (Result.ERROR_NOT_FOUND, None),
         ]
 
-        result = await setup["storage"]._upload_fileobj(
+        result = await ctx.storage._upload_fileobj(
             setup["file_obj"], len(setup["test_data"]), setup["nucleus_hash"], setup["test_url"], True
         )
 
         assert result == Result.ERROR
         assert call_count[0] == 3
-        assert ctx.mock_sleep.call_count == 2
+        assert len(ctx.sleep_delays) == 2
 
 
 @pytest.mark.asyncio
@@ -504,14 +648,14 @@ async def test_upload_retry_zero_byte_cleanup(retry_test_setup):
     setup = retry_test_setup
     mock_upload, call_count = _create_upload_mock(fail_count=1)
 
-    with _RetryTestContext(setup["storage"], mock_upload) as ctx:
+    with _RetryTestContext(mock_upload) as ctx:
         ctx.mock_stat.side_effect = [
             (Result.ERROR_NOT_FOUND, None),
             (Result.OK, _create_s3_entry("test-file.txt", 0)),  # 0-byte file
             (Result.OK, _create_s3_entry("test-file.txt", len(setup["test_data"]))),
         ]
 
-        result = await setup["storage"]._upload_fileobj(
+        result = await ctx.storage._upload_fileobj(
             setup["file_obj"], len(setup["test_data"]), setup["nucleus_hash"], setup["test_url"], True
         )
 
@@ -529,14 +673,14 @@ async def test_upload_retry_nonzero_stale_file(retry_test_setup):
     setup = retry_test_setup
     mock_upload, call_count = _create_upload_mock(fail_count=1)
 
-    with _RetryTestContext(setup["storage"], mock_upload) as ctx:
+    with _RetryTestContext(mock_upload) as ctx:
         ctx.mock_stat.side_effect = [
             (Result.ERROR_NOT_FOUND, None),
             (Result.OK, _create_s3_entry("test-file.txt", 100)),  # Non-zero byte file
             (Result.OK, _create_s3_entry("test-file.txt", len(setup["test_data"]))),
         ]
 
-        result = await setup["storage"]._upload_fileobj(
+        result = await ctx.storage._upload_fileobj(
             setup["file_obj"], len(setup["test_data"]), setup["nucleus_hash"], setup["test_url"], True
         )
 
@@ -562,14 +706,14 @@ async def test_upload_retry_file_seeking(retry_test_setup):
     setup["file_obj"].seek = tracked_seek
     mock_upload, call_count = _create_upload_mock(fail_count=1)
 
-    with _RetryTestContext(setup["storage"], mock_upload) as ctx:
+    with _RetryTestContext(mock_upload) as ctx:
         ctx.mock_stat.side_effect = [
             (Result.ERROR_NOT_FOUND, None),
             (Result.ERROR_NOT_FOUND, None),
             (Result.OK, _create_s3_entry("test-file.txt", len(setup["test_data"]))),
         ]
 
-        result = await setup["storage"]._upload_fileobj(
+        result = await ctx.storage._upload_fileobj(
             setup["file_obj"], len(setup["test_data"]), setup["nucleus_hash"], setup["test_url"], True
         )
 
@@ -585,7 +729,7 @@ async def test_upload_retry_post_retry_verification_failure(retry_test_setup):
     setup = retry_test_setup
     mock_upload, _ = _create_upload_mock(fail_count=1)
 
-    with _RetryTestContext(setup["storage"], mock_upload) as ctx:
+    with _RetryTestContext(mock_upload) as ctx:
         ctx.mock_stat.side_effect = [
             (Result.ERROR_NOT_FOUND, None),
             (Result.ERROR_NOT_FOUND, None),
@@ -593,9 +737,7 @@ async def test_upload_retry_post_retry_verification_failure(retry_test_setup):
         ]
 
         with pytest.raises(StorageOperationError, match=r"Upload retry failed.*0 byte file"):
-            await setup["storage"]._upload_fileobj(
-                setup["file_obj"], len(setup["test_data"]), setup["nucleus_hash"], setup["test_url"], True
-            )
+            await ctx.storage._upload_fileobj(setup["file_obj"], len(setup["test_data"]), setup["nucleus_hash"], setup["test_url"], True)
 
 
 @pytest.mark.asyncio
@@ -605,18 +747,16 @@ async def test_upload_retry_access_denied_permanent_error(retry_test_setup):
     setup = retry_test_setup
     mock_upload, call_count = _create_upload_mock(fail_count=1)
 
-    with _RetryTestContext(setup["storage"], mock_upload) as ctx:
+    with _RetryTestContext(mock_upload) as ctx:
         ctx.mock_stat.side_effect = [
             (Result.ERROR_NOT_FOUND, None),
             (Result.ERROR_ACCESS_DENIED, None),  # Permanent error during retry cleanup
         ]
 
         with pytest.raises(StorageOperationError, match="Access denied"):
-            await setup["storage"]._upload_fileobj(
-                setup["file_obj"], len(setup["test_data"]), setup["nucleus_hash"], setup["test_url"], True
-            )
+            await ctx.storage._upload_fileobj(setup["file_obj"], len(setup["test_data"]), setup["nucleus_hash"], setup["test_url"], True)
 
-        assert ctx.mock_sleep.call_count == 1
+        assert len(ctx.sleep_delays) == 1
         assert call_count[0] == 1
 
 
@@ -633,8 +773,8 @@ async def test_upload_retry_custom_env_variables():
         os.environ["WRAPP_S3_EXTRA_RETRIES"] = "5"
         os.environ["WRAPP_S3_RETRY_WAIT_SECONDS"] = "0.5"
 
-        # Create storage instance with custom env vars
-        storage = S3Storage("test-version", False, ThrottlingParameters())
+        # Storage is built inside _RetryTestContext, so the custom env vars set above are
+        # picked up at its construction time.
         test_url = "s3://test-bucket/test-file.txt"
         test_data = b"test content"
         file_obj = io.BytesIO(test_data)
@@ -643,7 +783,7 @@ async def test_upload_retry_custom_env_variables():
         # Mock upload to fail 4 times, succeed on 5th (within custom retry limit)
         mock_upload, call_count = _create_upload_mock(fail_count=4)
 
-        with _RetryTestContext(storage, mock_upload) as ctx:
+        with _RetryTestContext(mock_upload) as ctx:
             ctx.mock_stat.side_effect = [
                 (Result.ERROR_NOT_FOUND, None),  # Initial check
                 (Result.ERROR_NOT_FOUND, None),  # Retry 1 cleanup
@@ -653,15 +793,15 @@ async def test_upload_retry_custom_env_variables():
                 (Result.OK, _create_s3_entry("test-file.txt", len(test_data))),  # Post-retry verification
             ]
 
-            result = await storage._upload_fileobj(file_obj, len(test_data), nucleus_hash, test_url, True)
+            result = await ctx.storage._upload_fileobj(file_obj, len(test_data), nucleus_hash, test_url, True)
 
             # Verify success with custom retry count
             assert result == Result.OK
             assert call_count[0] == 5
 
             # Verify custom delay is used with exponential backoff
-            assert ctx.mock_sleep.call_count == 4
-            sleep_times = [call_args[0][0] for call_args in ctx.mock_sleep.call_args_list]
+            assert len(ctx.sleep_delays) == 4
+            sleep_times = ctx.sleep_delays
 
             # With base_delay=0.5, exponential backoff should be: 0.5, 1.0, 2.0, 4.0 (+ jitter up to 10%)
             assert 0.5 <= sleep_times[0] <= 0.55  # 0.5 * 2^0 + jitter
@@ -680,6 +820,997 @@ async def test_upload_retry_custom_env_variables():
             os.environ["WRAPP_S3_RETRY_WAIT_SECONDS"] = original_delay
         else:
             os.environ.pop("WRAPP_S3_RETRY_WAIT_SECONDS", None)
+
+
+@pytest.mark.asyncio
+@force_wrapp_thread
+async def test_upload_makes_one_attempt_with_retries_disabled_OMPE_98951(retry_test_setup):
+    """With WRAPP_S3_EXTRA_RETRIES=0 the upload is still attempted exactly once.
+
+    Regression guard: _upload used the raw retry count as the attempt budget, so 0 (a
+    documented-valid value) made the retry loop run zero times and every upload silently
+    returned Result.ERROR. Mirrors test_read_makes_one_attempt_with_retries_disabled_OMPE_98588.
+    """
+    setup = retry_test_setup
+    original_retries = os.environ.get("WRAPP_S3_EXTRA_RETRIES")
+    try:
+        os.environ["WRAPP_S3_EXTRA_RETRIES"] = "0"
+        mock_upload, call_count = _create_upload_mock(fail_count=0)
+
+        # Storage is built inside _RetryTestContext, so it picks up the env var set above.
+        with _RetryTestContext(mock_upload) as ctx:
+            ctx.mock_stat.side_effect = [
+                (Result.ERROR_NOT_FOUND, None),  # Initial existence check only; no retry stats
+            ]
+
+            result = await ctx.storage._upload_fileobj(
+                setup["file_obj"], len(setup["test_data"]), setup["nucleus_hash"], setup["test_url"], True
+            )
+
+        assert result == Result.OK
+        assert call_count[0] == 1
+        assert len(ctx.sleep_delays) == 0
+    finally:
+        if original_retries is not None:
+            os.environ["WRAPP_S3_EXTRA_RETRIES"] = original_retries
+        else:
+            os.environ.pop("WRAPP_S3_EXTRA_RETRIES", None)
+
+
+# ===== read_file_content Retry Logic Tests (OMPE-98588) =====
+
+
+class _FakeStreamingBody:
+    """Stand-in for the get_object response Body stream."""
+
+    def __init__(self, data: bytes, read_exc: Exception | None = None):
+        self._data = data
+        self._read_exc = read_exc
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *args):
+        return False
+
+    async def read(self):
+        if self._read_exc is not None:
+            raise self._read_exc
+        return self._data
+
+
+def _create_read_mock(fail_count: int, exception=None, fail_in_stream: bool = False, data: bytes = b"hello world"):
+    """Create a mock get_object that fails N times then succeeds.
+
+    When fail_in_stream is True the failure happens while reading the response body
+    (a fresh Body is handed out on every attempt), exercising the mid-stream path.
+    """
+    call_count = [0]
+    exc = exception if exception is not None else _create_client_error()
+
+    async def mock_get_object(*args, **kwargs):
+        call_count[0] += 1
+        should_fail = call_count[0] <= fail_count
+        if should_fail and not fail_in_stream:
+            raise exc
+        read_exc = exc if (should_fail and fail_in_stream) else None
+        return {"Body": _FakeStreamingBody(data, read_exc=read_exc)}
+
+    return mock_get_object, call_count
+
+
+class _ReadRetryTestContext:
+    """Inject a strict fake client + recording sleep for read_file_content retry tests.
+
+    The storage under test is built here so the client provider and backoff sleep are
+    injected at construction time (no more patching of get_instance or asyncio.sleep).
+    Any env vars a test sets before entering the context are honored at construction.
+    """
+
+    def __init__(self, get_object_func):
+        self.sleep_func, self.sleep_delays = _recording_sleep()
+        self.mock_client = _FakeS3Client(get_object=get_object_func)
+        self.storage = S3Storage(
+            "test-version",
+            False,
+            ThrottlingParameters(),
+            client_provider=_FakeClientProvider(self.mock_client),
+            sleep=self.sleep_func,
+        )
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        return False
+
+
+@pytest.mark.asyncio
+@force_wrapp_thread
+async def test_read_retry_single_failure_OMPE_98588():
+    """read_file_content succeeds after a single transient failure with backoff."""
+    mock_get_object, call_count = _create_read_mock(fail_count=1)
+
+    with _ReadRetryTestContext(mock_get_object) as ctx:
+        result, content = await ctx.storage.read_file_content("s3://test-bucket/test-file.txt")
+
+    assert result == Result.OK
+    assert content == b"hello world"
+    assert call_count[0] == 2
+    assert len(ctx.sleep_delays) == 1
+    assert 1.0 <= ctx.sleep_delays[0] <= 1.1
+
+
+@pytest.mark.asyncio
+@force_wrapp_thread
+async def test_read_retry_multiple_failures_OMPE_98588():
+    """read_file_content succeeds after multiple failures with increasing backoff."""
+    mock_get_object, call_count = _create_read_mock(fail_count=2)
+
+    with _ReadRetryTestContext(mock_get_object) as ctx:
+        result, content = await ctx.storage.read_file_content("s3://test-bucket/test-file.txt")
+
+    assert result == Result.OK
+    assert call_count[0] == 3
+    assert len(ctx.sleep_delays) == 2
+    sleep_times = ctx.sleep_delays
+    assert 1.0 <= sleep_times[0] <= 1.1
+    assert 2.0 <= sleep_times[1] <= 2.2
+
+
+@pytest.mark.asyncio
+@force_wrapp_thread
+async def test_read_retry_max_retries_exhausted_OMPE_98588(caplog):
+    """read_file_content returns ERROR after exhausting all retry attempts."""
+    mock_get_object, call_count = _create_read_mock(fail_count=3, exception=BotoCoreError())
+
+    with caplog.at_level(logging.WARNING, logger="omni.wrapp"), _ReadRetryTestContext(mock_get_object) as ctx:
+        result, content = await ctx.storage.read_file_content("s3://test-bucket/test-file.txt")
+
+    assert result == Result.ERROR
+    assert content == b""
+    assert call_count[0] == 3
+    assert len(ctx.sleep_delays) == 2
+    # Each retry logs the actual error before sleeping.
+    assert any("read attempt 1/3 failed" in r.message for r in caplog.records)
+
+
+@pytest.mark.asyncio
+@force_wrapp_thread
+async def test_read_retry_mid_stream_failure_OMPE_98588():
+    """A failure while reading the body re-issues get_object on each attempt (stream not resumed)."""
+    mock_get_object, call_count = _create_read_mock(fail_count=2, exception=BotoCoreError(), fail_in_stream=True)
+
+    with _ReadRetryTestContext(mock_get_object) as ctx:
+        result, content = await ctx.storage.read_file_content("s3://test-bucket/test-file.txt")
+
+    assert result == Result.OK
+    assert content == b"hello world"
+    assert call_count[0] == 3  # fresh get_object every attempt
+
+
+@pytest.mark.asyncio
+@force_wrapp_thread
+async def test_read_not_found_no_retry_OMPE_98588():
+    """A 404 is terminal: ERROR_NOT_FOUND with no retries."""
+    mock_get_object, call_count = _create_read_mock(fail_count=1, exception=_create_client_error(error_code="404"))
+
+    with _ReadRetryTestContext(mock_get_object) as ctx:
+        result, content = await ctx.storage.read_file_content("s3://test-bucket/test-file.txt")
+
+    assert result == Result.ERROR_NOT_FOUND
+    assert content == b""
+    assert call_count[0] == 1
+    assert len(ctx.sleep_delays) == 0
+
+
+@pytest.mark.asyncio
+@force_wrapp_thread
+@pytest.mark.parametrize(
+    "exception",
+    [
+        _create_client_error(error_code="AccessDenied"),
+        # A credential code carried in S3_ACCESS_DENIED_CODES (no HTTP status needed).
+        _create_client_error(error_code="InvalidAccessKeyId"),
+        # An *unknown* error code with HTTP 403 isolates the http_status == "403" fallback branch.
+        _create_client_error(error_code="SomeUndocumentedAuthCode", http_status=403),
+        NoCredentialsError(),
+    ],
+)
+async def test_read_access_denied_no_retry_OMPE_98588(exception):
+    """Auth/permission errors are terminal: ERROR_ACCESS_DENIED with no retries."""
+    mock_get_object, call_count = _create_read_mock(fail_count=1, exception=exception)
+
+    with _ReadRetryTestContext(mock_get_object) as ctx:
+        result, content = await ctx.storage.read_file_content("s3://test-bucket/test-file.txt")
+
+    assert result == Result.ERROR_ACCESS_DENIED
+    assert content == b""
+    assert call_count[0] == 1
+    assert len(ctx.sleep_delays) == 0
+
+
+@pytest.mark.asyncio
+@force_wrapp_thread
+async def test_read_retry_custom_env_variables_OMPE_98588():
+    """read_file_content honors custom WRAPP_S3_EXTRA_RETRIES / WRAPP_S3_RETRY_WAIT_SECONDS."""
+    original_retries = os.environ.get("WRAPP_S3_EXTRA_RETRIES")
+    original_delay = os.environ.get("WRAPP_S3_RETRY_WAIT_SECONDS")
+    try:
+        os.environ["WRAPP_S3_EXTRA_RETRIES"] = "5"
+        os.environ["WRAPP_S3_RETRY_WAIT_SECONDS"] = "0.5"
+        mock_get_object, call_count = _create_read_mock(fail_count=4)
+
+        with _ReadRetryTestContext(mock_get_object) as ctx:
+            result, content = await ctx.storage.read_file_content("s3://test-bucket/test-file.txt")
+
+        assert result == Result.OK
+        assert call_count[0] == 5
+        assert len(ctx.sleep_delays) == 4
+        sleep_times = ctx.sleep_delays
+        assert 0.5 <= sleep_times[0] <= 0.55
+        assert 1.0 <= sleep_times[1] <= 1.1
+        assert 2.0 <= sleep_times[2] <= 2.2
+        assert 4.0 <= sleep_times[3] <= 4.4
+    finally:
+        if original_retries is not None:
+            os.environ["WRAPP_S3_EXTRA_RETRIES"] = original_retries
+        else:
+            os.environ.pop("WRAPP_S3_EXTRA_RETRIES", None)
+        if original_delay is not None:
+            os.environ["WRAPP_S3_RETRY_WAIT_SECONDS"] = original_delay
+        else:
+            os.environ.pop("WRAPP_S3_RETRY_WAIT_SECONDS", None)
+
+
+@pytest.mark.asyncio
+@force_wrapp_thread
+async def test_read_makes_one_attempt_with_retries_disabled_OMPE_98588():
+    """With WRAPP_S3_EXTRA_RETRIES=0 the read is still attempted exactly once."""
+    original_retries = os.environ.get("WRAPP_S3_EXTRA_RETRIES")
+    try:
+        os.environ["WRAPP_S3_EXTRA_RETRIES"] = "0"
+        mock_get_object, call_count = _create_read_mock(fail_count=0)
+
+        with _ReadRetryTestContext(mock_get_object) as ctx:
+            result, content = await ctx.storage.read_file_content("s3://test-bucket/test-file.txt")
+
+        assert result == Result.OK
+        assert content == b"hello world"
+        assert call_count[0] == 1
+        assert len(ctx.sleep_delays) == 0
+    finally:
+        if original_retries is not None:
+            os.environ["WRAPP_S3_EXTRA_RETRIES"] = original_retries
+        else:
+            os.environ.pop("WRAPP_S3_EXTRA_RETRIES", None)
+
+
+# ===== download_file Chunked Retry Logic Tests (OMPE-98951) =====
+
+
+class _RangedGetMock:
+    """A get_object mock that serves byte ranges of `data` and records every call's kwargs.
+
+    fail_plan maps a chunk's range start offset (None for an unranged get) to a list of
+    exceptions; each GET for that range consumes one exception until the list is empty.
+    With fail_in_stream the exception is raised while reading the response body instead
+    of by the get_object call itself, exercising the mid-stream failure path.
+    Keying failures by range offset instead of call order keeps the tests deterministic
+    under the concurrent chunk downloads.
+    """
+
+    def __init__(self, data: bytes, fail_plan: dict | None = None, fail_in_stream: bool = False, ignore_range: bool = False):
+        self.data = data
+        self.calls: list[dict] = []
+        self.fail_plan = {key: list(excs) for key, excs in (fail_plan or {}).items()}
+        self.fail_in_stream = fail_in_stream
+        # Model an endpoint/proxy that ignores the Range header and returns the full 200 body.
+        self.ignore_range = ignore_range
+
+    async def __call__(self, **kwargs):
+        self.calls.append(kwargs)
+        # Yield to the event loop like a real network call would; without a suspension
+        # point, sibling-task cancellation could never be delivered mid-download and the
+        # bounded chunk-worker pool would never interleave. Nothing here stubs asyncio.sleep
+        # (S3Storage takes an injected backoff-sleep instead), so this plain sleep(0) really
+        # yields to the loop.
+        await asyncio.sleep(0)
+        range_header = kwargs.get("Range")
+        if range_header is None:
+            plan_key = None
+            payload = self.data
+        else:
+            match = re.fullmatch(r"bytes=(\d+)-(\d+)", range_header)
+            assert match, f"malformed Range header: {range_header}"
+            start, end = int(match.group(1)), int(match.group(2))
+            plan_key = start
+            payload = self.data if self.ignore_range else self.data[start : end + 1]
+        pending = self.fail_plan.get(plan_key)
+        if pending:
+            exc = pending.pop(0)
+            if not self.fail_in_stream:
+                raise exc
+            return {"Body": _FakeStreamingBody(payload, read_exc=exc)}
+        return {"Body": _FakeStreamingBody(payload)}
+
+
+class _DownloadTestContext:
+    """Inject a strict fake client + recording sleep for download_file tests.
+
+    Builds the S3Storage under test so the client provider and backoff sleep are injected at
+    construction time (no more patching of get_instance or asyncio.sleep). The strict fake
+    client answers get_object and head_object (and list_objects_v2, unused on this path) so
+    _head_object_entry works against it. Pass chunked=True (plus threshold/chunksize/extra_env/
+    throttling) to build a multipart-sized storage; otherwise a real-default storage is built.
+    """
+
+    def __init__(
+        self,
+        get_object_func,
+        size: int,
+        head_exception: Exception | None = None,
+        *,
+        chunked: bool = False,
+        threshold: str = "4",
+        chunksize: str = "4",
+        extra_env: dict | None = None,
+        throttling: ThrottlingParameters | None = None,
+    ):
+        self.sleep_func, self.sleep_delays = _recording_sleep()
+        head_result = None if head_exception is not None else {"ContentLength": size, "LastModified": datetime.now(), "ETag": '"test-etag"'}
+        self.mock_client = _FakeS3Client(get_object=get_object_func, head_object_result=head_result, head_exception=head_exception)
+        provider = _FakeClientProvider(self.mock_client)
+        if chunked:
+            self.storage = _make_chunked_storage(
+                threshold=threshold,
+                chunksize=chunksize,
+                extra_env=extra_env,
+                throttling=throttling,
+                client_provider=provider,
+                sleep=self.sleep_func,
+            )
+        else:
+            self.storage = S3Storage(
+                "test-version", False, throttling or ThrottlingParameters(), client_provider=provider, sleep=self.sleep_func
+            )
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        return False
+
+
+def _make_chunked_storage(
+    threshold: str = "4",
+    chunksize: str = "4",
+    extra_env: dict | None = None,
+    throttling: ThrottlingParameters | None = None,
+    *,
+    client_provider=None,
+    sleep=asyncio.sleep,
+) -> S3Storage:
+    """Create an S3Storage whose multipart threshold/chunksize are small enough for chunked tests.
+
+    Pass throttling=ThrottlingParameters(file_transfer_jobs=..., jobs=...) to exercise the
+    networkdata / roundtrip slot bounds. client_provider/sleep thread the DI seam through so
+    tests can inject a strict fake client and a recording sleep.
+    """
+    env = {"WRAPP_S3_MULTIPART_THRESHOLD": threshold, "WRAPP_S3_MULTIPART_CHUNKSIZE": chunksize}
+    env.update(extra_env or {})
+    with patch.dict(os.environ, env):
+        return S3Storage("test-version", False, throttling or ThrottlingParameters(), client_provider=client_provider, sleep=sleep)
+
+
+@pytest.mark.asyncio
+@force_wrapp_thread
+async def test_download_small_file_OMPE_98951(tmp_path):
+    """A file at or below the multipart threshold is fetched with a single unranged, If-Match-pinned GET."""
+    data = b"hello world!"
+    dst_path = tmp_path / "out.bin"
+    mock_get = _RangedGetMock(data)
+
+    with _DownloadTestContext(mock_get, size=len(data)) as ctx:
+        result = await ctx.storage.download_file("s3://test-bucket/test-file.txt", str(dst_path), overwrite=True)
+
+    assert result == Result.OK
+    assert dst_path.read_bytes() == data
+    assert len(mock_get.calls) == 1
+    # No Range (the whole small object is fetched at once) but the GET is pinned to the version
+    # stat saw via If-Match, so a concurrent overwrite fails the GET instead of returning it.
+    assert "Range" not in mock_get.calls[0]
+    assert mock_get.calls[0]["IfMatch"] == '"test-etag"'
+
+
+@pytest.mark.asyncio
+@force_wrapp_thread
+async def test_download_small_file_concurrent_replace_412_OMPE_98951(tmp_path):
+    """A concurrent overwrite between stat and the small-file GET (If-Match 412) aborts cleanly.
+
+    The small-file branch is unranged, so the mock's fail_plan is keyed by None. A 412
+    PreconditionFailed means the object changed under us: the download must fail terminally
+    (not retry, not buffer the replaced object into RAM) and leave no partial destination file.
+    Mirrors the multipart test_download_chunk_precondition_failed_aborts_OMPE_98951.
+    """
+    data = b"hello world!"
+    dst_path = tmp_path / "out.bin"
+    precondition_failed = _create_client_error(error_code="PreconditionFailed", http_status=412)
+    mock_get = _RangedGetMock(data, fail_plan={None: [precondition_failed]})
+
+    with _DownloadTestContext(mock_get, size=len(data)) as ctx:
+        result = await ctx.storage.download_file("s3://test-bucket/test-file.txt", str(dst_path), overwrite=True)
+
+    # 412 is classified as a permanent, non-retryable client error -> terminal Result.ERROR.
+    assert result == Result.ERROR
+    assert not dst_path.exists()
+    # The unranged small-file GET is attempted exactly once (no retry of a version-mismatch) ...
+    assert len(mock_get.calls) == 1
+    assert "Range" not in mock_get.calls[0]
+    # ... it carried the If-Match pin that produced the 412 ...
+    assert mock_get.calls[0]["IfMatch"] == '"test-etag"'
+    # ... and no backoff sleep is taken (the mock's own sleep(0) yields don't count).
+    backoff_sleeps = [c for c in ctx.sleep_delays if c > 0]
+    assert backoff_sleeps == []
+
+
+@pytest.mark.asyncio
+@force_wrapp_thread
+async def test_download_metadata_uses_head_object_not_list_OMPE_98951(tmp_path):
+    """The download metadata lookup issues exactly one head_object and NO list_objects_v2.
+
+    The download path only needs the object's size/etag, so _download_file_content uses the
+    head_object-only _head_object_entry helper rather than the general-purpose stat(), which
+    also fires a list_objects_v2 folder-prefix probe -- a wasted LIST per file on large syncs.
+    """
+    data = b"hello world!"
+    dst_path = tmp_path / "out.bin"
+    mock_get = _RangedGetMock(data)
+
+    with _DownloadTestContext(mock_get, size=len(data)) as ctx:
+        result = await ctx.storage.download_file("s3://test-bucket/test-file.txt", str(dst_path), overwrite=True)
+
+    assert result == Result.OK
+    assert dst_path.read_bytes() == data
+    assert ctx.mock_client.head_object_call_count == 1
+    assert ctx.mock_client.list_objects_v2_call_count == 0
+
+
+@pytest.mark.asyncio
+@force_wrapp_thread
+async def test_download_multi_chunk_ranges_and_assembly_OMPE_98951(tmp_path):
+    """A file above the threshold is split into ranged GETs and assembled at the right offsets."""
+    data = bytes(range(10))
+    dst_path = tmp_path / "out.bin"
+    mock_get = _RangedGetMock(data)
+
+    with _DownloadTestContext(mock_get, size=len(data), chunked=True) as ctx:
+        result = await ctx.storage.download_file("s3://test-bucket/test-file.txt", str(dst_path), overwrite=True)
+
+    assert result == Result.OK
+    assert dst_path.read_bytes() == data
+    assert {call["Range"] for call in mock_get.calls} == {"bytes=0-3", "bytes=4-7", "bytes=8-9"}
+    # The object version seen by stat must be pinned on every chunk GET.
+    assert all(call["IfMatch"] == '"test-etag"' for call in mock_get.calls)
+
+
+@pytest.mark.asyncio
+@force_wrapp_thread
+async def test_download_more_chunks_than_workers_each_claimed_once_OMPE_98951(tmp_path):
+    """With a bounded pool smaller than the chunk count, every chunk is claimed exactly once.
+
+    WRAPP_S3_MAX_CONCURRENCY caps the pool at 2 workers while the file splits into 5 chunks
+    (num_workers < n_chunks), so each worker must claim several chunks off the shared
+    next_chunk_index counter. A double-claim or skip bug in that counter would corrupt the
+    reassembled file or duplicate a GET; asserting each Range appears *exactly once* (by count,
+    not set membership) catches both, which a set-based assertion would hide.
+    """
+    data = bytes(range(18))  # 5 chunks of size 4: bytes=0-3, 4-7, 8-11, 12-15, 16-17
+    dst_path = tmp_path / "out.bin"
+    mock_get = _RangedGetMock(data)
+
+    with _DownloadTestContext(mock_get, size=len(data), chunked=True, extra_env={"WRAPP_S3_MAX_CONCURRENCY": "2"}) as ctx:
+        result = await ctx.storage.download_file("s3://test-bucket/test-file.txt", str(dst_path), overwrite=True)
+
+    assert result == Result.OK
+    # The reassembled destination must equal the source byte-for-byte.
+    assert dst_path.read_bytes() == data
+    # Each expected Range must be fetched exactly once - no chunk double-claimed or skipped.
+    range_counts = Counter(call["Range"] for call in mock_get.calls)
+    assert range_counts == Counter({"bytes=0-3": 1, "bytes=4-7": 1, "bytes=8-11": 1, "bytes=12-15": 1, "bytes=16-17": 1})
+    # Every chunk GET pins the version seen by stat.
+    assert all(call["IfMatch"] == '"test-etag"' for call in mock_get.calls)
+
+
+@pytest.mark.asyncio
+@force_wrapp_thread
+async def test_download_chunk_wrong_length_fails_OMPE_98951(tmp_path):
+    """A ranged GET that returns the wrong number of bytes fails instead of corrupting the file.
+
+    Models an endpoint/proxy that ignores the Range header and returns the full 200 body: the
+    chunk read validates its length against the requested range, so the download fails with
+    Result.ERROR and leaves no partial file rather than writing misaligned data and reporting
+    success. See OMPE-98951.
+    """
+    data = bytes(range(10))
+    dst_path = tmp_path / "out.bin"
+    mock_get = _RangedGetMock(data, ignore_range=True)  # every ranged GET returns the full body
+
+    with _DownloadTestContext(mock_get, size=len(data), chunked=True) as ctx:
+        result = await ctx.storage.download_file("s3://test-bucket/test-file.txt", str(dst_path), overwrite=True)
+
+    assert result == Result.ERROR
+    assert not dst_path.exists()
+
+
+@pytest.mark.asyncio
+@force_wrapp_thread
+async def test_download_chunk_precondition_failed_aborts_OMPE_98951(tmp_path):
+    """A concurrent overwrite between stat and a chunk GET (If-Match 412) aborts cleanly.
+
+    Version pinning is the MR's headline safety guarantee: a 412 PreconditionFailed means the
+    object changed under us, so the download must fail terminally rather than stitch together
+    bytes from two versions. It must not be retried (nothing transient to recover) and must
+    leave no partial destination file behind.
+    """
+    data = bytes(range(10))
+    dst_path = tmp_path / "out.bin"
+    precondition_failed = _create_client_error(error_code="PreconditionFailed", http_status=412)
+    mock_get = _RangedGetMock(data, fail_plan={4: [precondition_failed]})
+
+    with _DownloadTestContext(mock_get, size=len(data), chunked=True) as ctx:
+        result = await ctx.storage.download_file("s3://test-bucket/test-file.txt", str(dst_path), overwrite=True)
+
+    # 412 is classified as a permanent, non-retryable client error -> terminal Result.ERROR.
+    assert result == Result.ERROR
+    assert not dst_path.exists()
+    # The failing chunk is attempted exactly once (no retry of a version-mismatch failure) ...
+    assert len([c for c in mock_get.calls if c.get("Range") == "bytes=4-7"]) == 1
+    # ... and no backoff sleep is taken (the mock's own sleep(0) yields don't count).
+    backoff_sleeps = [c for c in ctx.sleep_delays if c > 0]
+    assert backoff_sleeps == []
+
+
+@pytest.mark.asyncio
+@force_wrapp_thread
+async def test_download_chunk_midstream_retry_OMPE_98951(tmp_path):
+    """A transient mid-stream failure of one chunk is retried; the download still succeeds."""
+    data = bytes(range(10))
+    dst_path = tmp_path / "out.bin"
+    mock_get = _RangedGetMock(data, fail_plan={4: [BotoCoreError()]}, fail_in_stream=True)
+
+    with _DownloadTestContext(mock_get, size=len(data), chunked=True) as ctx:
+        result = await ctx.storage.download_file("s3://test-bucket/test-file.txt", str(dst_path), overwrite=True)
+
+    assert result == Result.OK
+    assert dst_path.read_bytes() == data
+    # 3 chunks + 1 retry of the failed chunk, each attempt with a fresh GET.
+    assert len(mock_get.calls) == 4
+    # One backoff sleep (the mock's own sleep(0) yields don't count).
+    backoff_sleeps = [c for c in ctx.sleep_delays if c > 0]
+    assert len(backoff_sleeps) == 1
+
+
+@pytest.mark.asyncio
+@force_wrapp_thread
+async def test_download_retry_exhausted_removes_partial_OMPE_98951(tmp_path):
+    """A persistently failing chunk exhausts its retries; the partial file is removed."""
+    data = bytes(range(10))
+    dst_path = tmp_path / "out.bin"
+    # Default WRAPP_S3_EXTRA_RETRIES is 3, so 3 failures on one chunk exhaust all attempts.
+    mock_get = _RangedGetMock(data, fail_plan={4: [BotoCoreError(), BotoCoreError(), BotoCoreError()]})
+
+    with _DownloadTestContext(mock_get, size=len(data), chunked=True) as ctx:
+        result = await ctx.storage.download_file("s3://test-bucket/test-file.txt", str(dst_path), overwrite=True)
+
+    assert result == Result.ERROR
+    assert not dst_path.exists()
+    # Two backoff sleeps for three attempts (the mock's own sleep(0) yields don't count).
+    backoff_sleeps = [c for c in ctx.sleep_delays if c > 0]
+    assert len(backoff_sleeps) == 2
+
+
+@pytest.mark.asyncio
+@force_wrapp_thread
+async def test_download_unexpected_worker_exception_returns_error_OMPE_98951(tmp_path):
+    """An unexpected (non-boto/aiohttp) chunk failure yields Result.ERROR and removes the partial file.
+
+    An exception outside (BotoCoreError, ClientError, aiohttp.ClientError) -- e.g. an OSError/
+    ENOSPC from f_dst.write on a full disk -- escapes _read_file_ranged_content unclassified, is
+    NOT wrapped in _ChunkDownloadError by the chunk worker, and fails the TaskGroup as an
+    ExceptionGroup that does not match except* _ChunkDownloadError. download_file's generic
+    except-Exception branch is the only thing converting it into a per-file Result.ERROR plus
+    partial-file cleanup; if that branch regressed, the ExceptionGroup would escape and abort the
+    caller's whole task group instead of failing just this file. See OMPE-98951.
+    """
+    data = bytes(range(10))
+    dst_path = tmp_path / "out.bin"
+    mock_get = _RangedGetMock(data, fail_plan={4: [RuntimeError("boom")]})
+
+    with _DownloadTestContext(mock_get, size=len(data), chunked=True) as ctx:
+        # Must return a Result, not propagate an ExceptionGroup out of download_file.
+        result = await ctx.storage.download_file("s3://test-bucket/test-file.txt", str(dst_path), overwrite=True)
+
+    assert result == Result.ERROR
+    assert not dst_path.exists()
+    # The unexpected exception bypasses the retry classifier: the failing chunk is attempted
+    # exactly once and no backoff sleep is taken (the mock's own sleep(0) yields don't count).
+    assert len([c for c in mock_get.calls if c.get("Range") == "bytes=4-7"]) == 1
+    backoff_sleeps = [c for c in ctx.sleep_delays if c > 0]
+    assert backoff_sleeps == []
+
+
+@pytest.mark.asyncio
+@force_wrapp_thread
+async def test_download_partial_cleanup_permissionerror_is_swallowed_OMPE_98951(tmp_path):
+    """A PermissionError while removing the partial file must not escape download_file.
+
+    On Windows an AV/indexer can briefly hold the just-closed destination file, so os.remove on
+    the failure path raises PermissionError. Partial-cleanup is best-effort: it must be swallowed
+    so download_file still returns the true failure Result instead of letting an OSError propagate
+    to the caller's task group (and it must not be misreported as ERROR_ACCESS_DENIED). See
+    OMPE-98951.
+    """
+    data = bytes(range(10))
+    dst_path = tmp_path / "out.bin"
+    # Exhaust the chunk's retries so the download fails and partial-cleanup runs.
+    mock_get = _RangedGetMock(data, fail_plan={4: [BotoCoreError(), BotoCoreError(), BotoCoreError()]})
+
+    with _DownloadTestContext(mock_get, size=len(data), chunked=True) as ctx:
+        with patch("os.remove", side_effect=PermissionError("locked by scanner")):
+            # Must return a Result, not raise: pre-fix the re-raised PermissionError escaped here.
+            result = await ctx.storage.download_file("s3://test-bucket/test-file.txt", str(dst_path), overwrite=True)
+
+    # The genuine failure Result is preserved (not masked as ERROR_ACCESS_DENIED).
+    assert result == Result.ERROR
+    # os.remove was attempted but its PermissionError was swallowed, so the partial file remains.
+    assert dst_path.exists()
+
+
+@pytest.mark.asyncio
+@force_wrapp_thread
+async def test_download_not_found_OMPE_98951(tmp_path):
+    """A missing object yields ERROR_NOT_FOUND and leaves no destination file behind."""
+    dst_path = tmp_path / "out.bin"
+    mock_get = _RangedGetMock(b"")
+
+    with _DownloadTestContext(mock_get, size=0, head_exception=_create_client_error(error_code="404")) as ctx:
+        result = await ctx.storage.download_file("s3://test-bucket/test-file.txt", str(dst_path), overwrite=True)
+
+    assert result == Result.ERROR_NOT_FOUND
+    assert not dst_path.exists()
+    assert len(mock_get.calls) == 0
+
+
+@pytest.mark.asyncio
+@force_wrapp_thread
+async def test_download_already_exists_OMPE_98951(tmp_path):
+    """overwrite=False with an existing destination fails before any S3 call."""
+    data = b"new content"
+    dst_path = tmp_path / "out.bin"
+    dst_path.write_bytes(b"old content")
+    mock_get = _RangedGetMock(data)
+
+    with _DownloadTestContext(mock_get, size=len(data)) as ctx:
+        result = await ctx.storage.download_file("s3://test-bucket/test-file.txt", str(dst_path), overwrite=False)
+
+    assert result == Result.ERROR_ALREADY_EXISTS
+    assert dst_path.read_bytes() == b"old content"
+    assert len(mock_get.calls) == 0
+    assert ctx.mock_client.head_object_call_count == 0
+
+
+@pytest.mark.asyncio
+@force_wrapp_thread
+async def test_download_overwrite(tmp_path):
+    """overwrite=True replaces an existing destination file."""
+    data = b"new content"
+    dst_path = tmp_path / "out.bin"
+    dst_path.write_bytes(b"old content that is longer")
+    mock_get = _RangedGetMock(data)
+
+    with _DownloadTestContext(mock_get, size=len(data)) as ctx:
+        result = await ctx.storage.download_file("s3://test-bucket/test-file.txt", str(dst_path), overwrite=True)
+
+    assert result == Result.OK
+    assert dst_path.read_bytes() == data
+
+
+@pytest.mark.asyncio
+@force_wrapp_thread
+async def test_download_zero_byte_file(tmp_path):
+    """A zero-byte object is materialized as an empty file without any GET."""
+    dst_path = tmp_path / "out.bin"
+    mock_get = _RangedGetMock(b"")
+
+    with _DownloadTestContext(mock_get, size=0) as ctx:
+        result = await ctx.storage.download_file("s3://test-bucket/test-file.txt", str(dst_path), overwrite=True)
+
+    assert result == Result.OK
+    assert dst_path.exists() and dst_path.stat().st_size == 0
+    assert len(mock_get.calls) == 0
+
+
+@pytest.mark.asyncio
+@force_wrapp_thread
+async def test_download_wrong_type_for_folder_key_OMPE_98951(tmp_path):
+    """A source key ending in '/' is rejected with ERROR_WRONG_TYPE, like read_file_content."""
+    dst_path = tmp_path / "out.bin"
+    mock_get = _RangedGetMock(b"")
+
+    with _DownloadTestContext(mock_get, size=0) as ctx:
+        result = await ctx.storage.download_file("s3://test-bucket/folder/", str(dst_path), overwrite=True)
+
+    assert result == Result.ERROR_WRONG_TYPE
+    assert not dst_path.exists()
+
+
+@pytest.mark.asyncio
+@force_wrapp_thread
+async def test_download_access_denied_cancels_other_chunks_OMPE_98951(tmp_path):
+    """A terminal chunk failure aborts the download promptly and removes the partial file."""
+    data = bytes(range(64))  # 16 chunks of 4 bytes
+    dst_path = tmp_path / "out.bin"
+    # Two workers make the abort observable: far fewer than 16 GETs must have happened.
+    mock_get = _RangedGetMock(data, fail_plan={0: [_create_client_error(error_code="AccessDenied")]})
+
+    # _RangedGetMock yields on every GET (a real sleep(0)), so once the offset-0 chunk fails
+    # the sibling workers are cancelled before most of the 16 GETs run.
+    with _DownloadTestContext(mock_get, size=len(data), chunked=True, extra_env={"WRAPP_S3_MAX_CONCURRENCY": "2"}) as ctx:
+        result = await ctx.storage.download_file("s3://test-bucket/test-file.txt", str(dst_path), overwrite=True)
+
+    assert result == Result.ERROR_ACCESS_DENIED
+    assert not dst_path.exists()
+    assert len(mock_get.calls) < 16
+
+
+@pytest.mark.asyncio
+@force_wrapp_thread
+async def test_download_cancelled_removes_partial_OMPE_98951(tmp_path):
+    """Cancelling a download propagates CancelledError and removes the partial file."""
+    data = bytes(range(16))
+    dst_path = tmp_path / "out.bin"
+    reached_read = asyncio.Event()
+    hang_forever = asyncio.Event()
+
+    class _HangingBody(_FakeStreamingBody):
+        async def read(self):
+            reached_read.set()
+            await hang_forever.wait()
+            return b""
+
+    calls = []
+
+    async def mock_get_object(**kwargs):
+        calls.append(kwargs)
+        return {"Body": _HangingBody(b"")}
+
+    with _DownloadTestContext(mock_get_object, size=len(data), chunked=True) as ctx:
+        download = asyncio.create_task(ctx.storage.download_file("s3://test-bucket/test-file.txt", str(dst_path), overwrite=True))
+        await reached_read.wait()
+        download.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await download
+
+    assert not dst_path.exists()
+
+
+@pytest.mark.asyncio
+@force_wrapp_thread
+async def test_download_chunk_midstream_client_payload_error_retry_OMPE_98951(tmp_path):
+    """A mid-stream aiohttp.ClientPayloadError (S3 idle-reset of the body) is retried, not fatal.
+
+    ClientPayloadError is neither a BotoCoreError nor a botocore ClientError, so before the fix
+    it escaped the read retry loop and failed the whole download. It must now be classified
+    retryable and the re-fetched chunk must reassemble byte-identically.
+    """
+    data = bytes(range(10))
+    dst_path = tmp_path / "out.bin"
+    mock_get = _RangedGetMock(data, fail_plan={4: [aiohttp.ClientPayloadError()]}, fail_in_stream=True)
+
+    with _DownloadTestContext(mock_get, size=len(data), chunked=True) as ctx:
+        result = await ctx.storage.download_file("s3://test-bucket/test-file.txt", str(dst_path), overwrite=True)
+
+    assert result == Result.OK
+    assert dst_path.read_bytes() == data
+    # 3 chunks + 1 retry of the failed chunk, each attempt re-issuing a fresh GET.
+    assert len(mock_get.calls) == 4
+    # Exactly one backoff sleep (the mock's own sleep(0) yields don't count).
+    backoff_sleeps = [c for c in ctx.sleep_delays if c > 0]
+    assert len(backoff_sleeps) == 1
+
+
+@pytest.mark.skipif(not os.path.isdir("/proc/self/fd"), reason="FD sampling requires /proc/self/fd (Linux)")
+@pytest.mark.asyncio
+@force_wrapp_thread
+async def test_download_bounds_open_destination_files_OMPE_98951(tmp_path):
+    """At most file_transfer_jobs destination files are open at once (bounds FDs, avoids EMFILE).
+
+    The destination FD is opened inside the single NetworkDataTransfer slot, so firing many
+    concurrent download_file tasks with file_transfer_jobs=2 can never open more than 2
+    destination files simultaneously -- the rest wait on the throttler before their open().
+
+    The bound is verified patch-free by sampling this process's real open FDs via /proc/self/fd
+    at a deterministic point: the two slot-holding reads hang on a never-set Event and the settle
+    loop gives any (incorrectly) unbounded extra task time to open its destination, so a single
+    sample is equivalent to peak tracking.
+    """
+    # A tiny file uses the single-GET small-file path (one open, one read per download).
+    data = b"xy"
+    n_downloads = 6
+    file_transfer_jobs = 2
+
+    reached_reads = 0
+    reads_may_proceed = asyncio.Event()  # never set -> reads hang, holding their slot open
+
+    class _HangingBody(_FakeStreamingBody):
+        async def read(self):
+            nonlocal reached_reads
+            reached_reads += 1
+            await reads_may_proceed.wait()
+            return self._data
+
+    async def mock_get_object(**kwargs):
+        return {"Body": _HangingBody(data)}
+
+    def open_destination_fds() -> int:
+        """Count open FDs resolving to .bin destination files under tmp_path."""
+        dst_dir = os.path.realpath(str(tmp_path)) + os.sep
+        count = 0
+        for fd in os.listdir("/proc/self/fd"):
+            try:
+                target = os.readlink(f"/proc/self/fd/{fd}")
+            except OSError:
+                continue  # fd vanished between listdir and readlink (e.g. the listdir FD itself)
+            if target.startswith(dst_dir) and target.endswith(".bin"):
+                count += 1
+        return count
+
+    downloads = []
+    with _DownloadTestContext(
+        mock_get_object,
+        size=len(data),
+        chunked=True,
+        threshold="1024",
+        throttling=ThrottlingParameters(file_transfer_jobs=file_transfer_jobs, jobs=8),
+    ) as ctx:
+        for i in range(n_downloads):
+            dst = tmp_path / f"out{i}.bin"
+            downloads.append(asyncio.create_task(ctx.storage.download_file("s3://test-bucket/test-file.txt", str(dst), overwrite=True)))
+        # Let the event loop run until the two slots are occupied and their reads are hanging.
+        for _ in range(2000):
+            await asyncio.sleep(0)
+            if reached_reads >= file_transfer_jobs:
+                break
+        # Give any (incorrectly) unbounded extra tasks a chance to slip past the throttler.
+        for _ in range(100):
+            await asyncio.sleep(0)
+
+        assert reached_reads == file_transfer_jobs
+        # Exactly the two slot-holders have their destination open; an implementation that
+        # opened destinations before slot acquisition would show all 6 here.
+        assert open_destination_fds() == file_transfer_jobs
+
+        # Unblock and let every download finish so nothing is left dangling.
+        reads_may_proceed.set()
+        results = await asyncio.gather(*downloads)
+
+    assert all(r == Result.OK for r in results)
+
+
+@pytest.mark.asyncio
+@force_wrapp_thread
+async def test_download_holds_single_networkdata_slot_OMPE_98951(tmp_path):
+    """A chunked download never re-acquires NetworkDataTransfer: at most one slot is held.
+
+    download_file holds exactly one networkdata slot for the whole file; the chunk workers read
+    underneath it via the low-level fetch without re-acquiring networkdata. Sampling the throttler
+    on every GET must therefore never see more than one processing task.
+    """
+    data = bytes(range(10))  # 3 chunks of 4 bytes
+    dst_path = tmp_path / "out.bin"
+    base_mock = _RangedGetMock(data)
+    observed_networkdata = []
+
+    # sampling_get references the storage's throttler, so the storage must exist before the
+    # get_object mock. Build the strict fake client + recording sleep and inject them directly
+    # (rather than via _DownloadTestContext, which would build the storage after the mock).
+    recording_sleep, _sleep_delays = _recording_sleep()
+    fake_client = _FakeS3Client(head_object_result={"ContentLength": len(data), "LastModified": datetime.now(), "ETag": '"test-etag"'})
+    storage = _make_chunked_storage(client_provider=_FakeClientProvider(fake_client), sleep=recording_sleep)
+
+    async def sampling_get(**kwargs):
+        observed_networkdata.append(len(storage._throttler_networkdata.processing_tasks))
+        return await base_mock(**kwargs)
+
+    fake_client.get_object_func = sampling_get
+    result = await storage.download_file("s3://test-bucket/test-file.txt", str(dst_path), overwrite=True)
+
+    assert result == Result.OK
+    assert dst_path.read_bytes() == data
+    # Multiple chunks were fetched under the one held slot.
+    assert len(base_mock.calls) == 3
+    # The parent download holds exactly one networkdata slot throughout; workers add none.
+    assert max(observed_networkdata) <= 1
+    assert 1 in observed_networkdata
+
+
+@pytest.mark.asyncio
+@force_wrapp_thread
+@pytest.mark.parametrize("env_value, expected_read, expected_connect", [(None, 60.0, 5.0), ("123.5", 123.5, 123.5), ("abc", 60.0, 5.0)])
+async def test_s3_client_read_timeout_env(env_value, expected_read, expected_connect):
+    """WRAPP_S3_READ_TIMEOUT_S/WRAPP_S3_CONNECT_TIMEOUT_S reach the botocore client config; unset or invalid
+    values fall back to the defaults (botocore's own 60s read / 5s connect)."""
+    env_vars = ("WRAPP_S3_READ_TIMEOUT_S", "WRAPP_S3_CONNECT_TIMEOUT_S")
+    originals = {env_var: os.environ.get(env_var) for env_var in env_vars}
+    try:
+        for env_var in env_vars:
+            if env_value is None:
+                os.environ.pop(env_var, None)
+            else:
+                os.environ[env_var] = env_value
+        storage = S3Storage("test-version", False, ThrottlingParameters())
+        wrapper = storage.s3_client()
+        mock_session = MagicMock()
+        mock_session.client = MagicMock(return_value=AsyncMock())
+
+        with patch.object(S3ClientWrapper, "session", new_callable=AsyncMock, return_value=mock_session):
+            await wrapper.get_instance()
+
+        config = mock_session.client.call_args.kwargs["config"]
+        assert config.read_timeout == expected_read
+        assert config.connect_timeout == expected_connect
+    finally:
+        for env_var, original in originals.items():
+            if original is not None:
+                os.environ[env_var] = original
+            else:
+                os.environ.pop(env_var, None)
+
+
+@pytest.mark.parametrize("bad_value", ["-1", "0", "not-an-int"])
+@pytest.mark.parametrize(
+    "env_var, attr, default",
+    [
+        ("WRAPP_S3_MULTIPART_CHUNKSIZE", "_multipart_chunksize", 5 * 1024 * 1024),
+        ("WRAPP_S3_MULTIPART_THRESHOLD", "_multipart_threshold", 5 * 1024 * 1024),
+        ("WRAPP_S3_MAX_CONCURRENCY", "_max_concurrency", 50),
+    ],
+)
+def test_nonpositive_s3_size_env_falls_back_to_default_OMPE_98951(env_var, attr, default, bad_value):
+    """A non-positive/invalid size or count setting must not reach the download math.
+
+    A negative WRAPP_S3_MULTIPART_CHUNKSIZE would make n_chunks negative, so the chunk-worker
+    loop would never run and a multipart download would silently produce a zero-filled file of
+    the correct size while reporting Result.OK. parse_env_int rejects non-integer / non-positive
+    values and falls back to the positive default, guarding against that. See OMPE-98951.
+    """
+    with patch.dict(os.environ, {env_var: bad_value}):
+        storage = S3Storage("test-version", False, ThrottlingParameters())
+    assert getattr(storage, attr) == default
+    assert getattr(storage, attr) > 0
+
+
+def test_extra_retries_and_wait_env_parsing_OMPE_98951():
+    """EXTRA_RETRIES allows 0 (disables retries) but rejects negatives; RETRY_WAIT_SECONDS parses.
+
+    EXTRA_RETRIES goes through parse_env_int(minimum=0), so 0 is honored while a negative or
+    non-integer value falls back to the default. RETRY_WAIT_SECONDS goes through parse_env_float,
+    so a non-numeric value falls back to the default. See OMPE-98951.
+    """
+    # 0 is a valid retry count (disables extra retries) and must be preserved.
+    with patch.dict(os.environ, {"WRAPP_S3_EXTRA_RETRIES": "0"}):
+        assert S3Storage("test-version", False, ThrottlingParameters())._retry_count == 0
+    # A negative or non-integer retry count falls back to the default (3).
+    with patch.dict(os.environ, {"WRAPP_S3_EXTRA_RETRIES": "-2"}):
+        assert S3Storage("test-version", False, ThrottlingParameters())._retry_count == 3
+    with patch.dict(os.environ, {"WRAPP_S3_EXTRA_RETRIES": "notanint"}):
+        assert S3Storage("test-version", False, ThrottlingParameters())._retry_count == 3
+    # RETRY_WAIT_SECONDS parses a valid float; a non-numeric value falls back to the default (1.0).
+    with patch.dict(os.environ, {"WRAPP_S3_RETRY_WAIT_SECONDS": "2.5"}):
+        assert S3Storage("test-version", False, ThrottlingParameters())._retry_delay == 2.5
+    with patch.dict(os.environ, {"WRAPP_S3_RETRY_WAIT_SECONDS": "notanumber"}):
+        assert S3Storage("test-version", False, ThrottlingParameters())._retry_delay == 1.0
 
 
 @pytest.mark.asyncio

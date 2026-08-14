@@ -25,15 +25,20 @@ from tests.assert_backwards_forwards_compatibility import (
 )
 from wrapp.datastructures.catalog import Catalog
 from wrapp.datastructures.hash_cache import HashCacheFile
+from wrapp.datastructures.manifest import Manifest
 from wrapp.datastructures.package import (
     Dependency,
     DependencySet,
     PackageInfo,
 )
+from wrapp.datastructures.package_standard import (
+    PackageStandardBom,
+    PackageStandardDefinition,
+)
 from wrapp.datastructures.patch import PatchOpList
 from wrapp.datastructures.wrapp_file_model import (
-    WRAPPFileModel,
-    all_old_wrapp_file_model_classes,
+    VersionedFileModelBase,
+    all_old_file_model_classes,
 )
 
 
@@ -46,6 +51,9 @@ from wrapp.datastructures.wrapp_file_model import (
         HashCacheFile,
         PatchOpList,
         PackageInfo,
+        PackageStandardDefinition,
+        PackageStandardBom,
+        Manifest,
         # CollectedReferences, This has not been in the hands of users yet - and right now it is hard to produce data for it (would have to re-enable the verify/collect functionality)
     ],
 )
@@ -53,11 +61,11 @@ from wrapp.datastructures.wrapp_file_model import (
 async def test_file_format_compatibility(wrapp_init, local_tmp_folder, test_class):
     # Make sure all classes for old versions have names matching the expected regex in _get_model_schema
     old_version_class_name_regex = re.compile(previous_version_class_name_regex_str)
-    for k, old_version_class in all_old_wrapp_file_model_classes.items():
+    for k, old_version_class in all_old_file_model_classes.items():
         name, version = k
         old_version_class_name = old_version_class.__name__
-        # classes for importing data before WRAPPFileModel
-        if not issubclass(old_version_class, WRAPPFileModel):
+        # Pre-VersionedFileModelBase classes are still used for importing old data.
+        if not issubclass(old_version_class, VersionedFileModelBase):
             continue
         assert old_version_class_name_regex.match(
             old_version_class_name

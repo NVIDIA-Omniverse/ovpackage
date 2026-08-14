@@ -24,6 +24,7 @@ They require valid Azure Blob Storage credentials to be set in environment varia
 The tests will be skipped if the credentials are not set.
 """
 
+import asyncio
 import os
 import sys
 import tempfile
@@ -43,6 +44,7 @@ def path_to_file_url(path: str) -> str:
         return f"file://{abs_path}"
 
 
+from tests.common import count_open_fds_under
 from wrapp import __version__
 from wrapp.datastructures.command_context import (
     CommandParameters,
@@ -184,6 +186,178 @@ async def test_azure_transfer_concurrency_is_forwarded_to_upload_and_download():
     assert content == b"content"
     fake_blob_client.download_blob.assert_awaited()
     assert fake_blob_client.download_blob.await_args.kwargs["max_concurrency"] == WRAPP_AZURE_DOWNLOAD_MAX_CONCURRENCY
+
+
+def _make_azure_storage_with_fake_client(fake_blob_client, throttling) -> AzureBlobStorage:
+    """AzureBlobStorage whose async client always resolves to the given fake blob client."""
+    storage = AzureBlobStorage("0.0.0-test", False, throttling)
+
+    class _FakeAsyncClient:
+        def get_container_client(self, _container_name):
+            return self
+
+        def get_blob_client(self, *_args, **_kwargs):
+            return fake_blob_client
+
+    class _FakeWrapper:
+        async def get_async_instance(self):
+            return _FakeAsyncClient()
+
+    storage._azure_client = _FakeWrapper()
+    return storage
+
+
+@pytest.mark.skipif(not os.path.isdir("/proc/self/fd"), reason="FD sampling requires /proc/self/fd (Linux)")
+@pytest.mark.asyncio
+async def test_azure_upload_bounds_open_source_files_OMPE_74369(tmp_path):
+    """At most file_transfer_jobs source files are open at once during uploads.
+
+    The source FD is opened only inside the held NetworkDataTransfer slot; pending
+    uploads wait on the throttler without holding a file handle (the brief hash
+    open closes synchronously before the throttle). An implementation that opened
+    sources before slot acquisition would show all 6 FDs here.
+    """
+    n_uploads = 6
+    file_transfer_jobs = 2
+
+    reached_uploads = 0
+    uploads_may_proceed = asyncio.Event()  # never set until the assert -> uploads hang holding their slot
+
+    async def _hanging_upload_blob(_f_src, **_kwargs):
+        nonlocal reached_uploads
+        reached_uploads += 1
+        await uploads_may_proceed.wait()
+
+    fake_blob_client = AsyncMock()
+    fake_blob_client.upload_blob = _hanging_upload_blob
+
+    storage = _make_azure_storage_with_fake_client(fake_blob_client, ThrottlingParameters(file_transfer_jobs=file_transfer_jobs, jobs=8))
+
+    uploads = []
+    for i in range(n_uploads):
+        src = tmp_path / f"src{i}.bin"
+        src.write_bytes(b"payload-%d" % i)
+        uploads.append(
+            asyncio.create_task(storage.upload_file(path_to_file_url(str(src)), f"azure://account/container/blob{i}.bin", overwrite=True))
+        )
+
+    # Let the event loop run until the two slots are occupied and their uploads are hanging.
+    for _ in range(2000):
+        await asyncio.sleep(0)
+        if reached_uploads >= file_transfer_jobs:
+            break
+    # Give any (incorrectly) unbounded extra tasks a chance to slip past the throttler.
+    for _ in range(100):
+        await asyncio.sleep(0)
+
+    assert reached_uploads == file_transfer_jobs
+    assert count_open_fds_under(str(tmp_path), ".bin") == file_transfer_jobs
+
+    uploads_may_proceed.set()
+    results = await asyncio.gather(*uploads)
+    assert all(r == Result.OK for r in results)
+
+
+@pytest.mark.skipif(not os.path.isdir("/proc/self/fd"), reason="FD sampling requires /proc/self/fd (Linux)")
+@pytest.mark.asyncio
+async def test_azure_download_bounds_open_destination_files_and_streams_OMPE_74369(tmp_path):
+    """At most file_transfer_jobs destination files are open at once, and downloads
+    stream via readinto instead of buffering the whole blob with readall.
+    """
+    n_downloads = 6
+    file_transfer_jobs = 2
+    payload = b"streamed-content"
+
+    reached_downloads = 0
+    downloads_may_proceed = asyncio.Event()  # never set until the assert -> downloads hang holding their slot
+
+    class _FakeDownloadStream:
+        async def readinto(self, stream):
+            nonlocal reached_downloads
+            reached_downloads += 1
+            await downloads_may_proceed.wait()
+            stream.write(payload)
+            return len(payload)
+
+        async def readall(self):
+            raise AssertionError("download_file must stream via readinto, not buffer the whole blob via readall")
+
+    async def _fake_download_blob(**_kwargs):
+        return _FakeDownloadStream()
+
+    fake_blob_client = AsyncMock()
+    fake_blob_client.download_blob = _fake_download_blob
+
+    storage = _make_azure_storage_with_fake_client(fake_blob_client, ThrottlingParameters(file_transfer_jobs=file_transfer_jobs, jobs=8))
+
+    downloads = []
+    for i in range(n_downloads):
+        dst = tmp_path / f"dst{i}.bin"
+        downloads.append(
+            asyncio.create_task(storage.download_file(f"azure://account/container/blob{i}.bin", path_to_file_url(str(dst)), overwrite=True))
+        )
+
+    for _ in range(2000):
+        await asyncio.sleep(0)
+        if reached_downloads >= file_transfer_jobs:
+            break
+    for _ in range(100):
+        await asyncio.sleep(0)
+
+    assert reached_downloads == file_transfer_jobs
+    # Exactly the slot-holders have their destination open; an implementation that
+    # opened destinations before slot acquisition would show all 6 here.
+    assert count_open_fds_under(str(tmp_path), ".bin") == file_transfer_jobs
+
+    downloads_may_proceed.set()
+    results = await asyncio.gather(*downloads)
+    assert all(r == Result.OK for r in results)
+    for i in range(n_downloads):
+        assert (tmp_path / f"dst{i}.bin").read_bytes() == payload
+
+
+@pytest.mark.asyncio
+async def test_azure_upload_fails_if_source_changed_while_queued_OMPE_74369(tmp_path):
+    """An upload whose source file changed while waiting for a transfer slot fails cleanly.
+
+    The nucleus hash is computed before throttling; uploading the changed bytes
+    would store stale hash metadata.
+    """
+    upload_calls = []
+
+    async def _fake_upload_blob(_f_src, **_kwargs):
+        upload_calls.append(1)
+
+    fake_blob_client = AsyncMock()
+    fake_blob_client.upload_blob = _fake_upload_blob
+
+    storage = _make_azure_storage_with_fake_client(fake_blob_client, ThrottlingParameters(file_transfer_jobs=1, jobs=8))
+
+    # Occupy the single transfer slot so the upload queues after hashing.
+    slot_may_release = asyncio.Event()
+
+    async def _occupy_slot():
+        await slot_may_release.wait()
+
+    holder = asyncio.create_task(storage._throttler_networkdata.run(_occupy_slot()))
+    for _ in range(50):
+        await asyncio.sleep(0)
+
+    src = tmp_path / "src.bin"
+    src.write_bytes(b"original")
+    upload = asyncio.create_task(storage.upload_file(path_to_file_url(str(src)), "azure://account/container/blob.bin", overwrite=True))
+    # Let the upload hash the file and block on the occupied throttler...
+    for _ in range(100):
+        await asyncio.sleep(0)
+    # ...then change the source before a slot becomes available.
+    src.write_bytes(b"changed content with a different size")
+
+    slot_may_release.set()
+    await holder
+    result = await upload
+
+    assert result == Result.ERROR
+    assert not upload_calls
 
 
 def has_azure_credentials():

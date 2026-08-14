@@ -119,7 +119,7 @@ async def status_command(
     try:
         wrapp_cli_scheduler = WrappSchedulerCLI(params=scheduler_params)
         async with wrapp_cli_scheduler as scheduler:
-            dirty_packages, errors_per_package = await status(wrapp_file, context=context, scheduler=scheduler)
+            dirty_packages, errors_per_package = await status(wrapp_file, ignores=ignore_file, context=context, scheduler=scheduler)
             if len(dirty_packages) > 0:
                 if output_format == LsOutputFormat.normal:
                     output_table = Table(box=None)

@@ -22,7 +22,6 @@ import traceback
 from asyncio import AbstractEventLoop
 from collections.abc import AsyncGenerator
 from datetime import datetime
-from random import uniform
 from typing import (
     Dict,
     List,
@@ -54,6 +53,7 @@ from wrapp.utils.utils import (
     StorageMissingDependenciesError,
     StorageOperationError,
     get_path_from_url,
+    parse_env_float,
 )
 
 logger = logging.getLogger("omni.wrapp")
@@ -72,7 +72,9 @@ try:
         Forbidden,
         GoogleAPICallError,
         NotFound,
+        RetryError,
     )
+    from google.api_core.retry import Retry
     from google.auth.exceptions import (
         DefaultCredentialsError,
         GoogleAuthError,
@@ -91,6 +93,11 @@ except ImportError as e:
 
 # Constants
 NUCLEUS_HASH_METADATA_KEY = "nv_omniverse_nucleus_hash"
+
+
+def _log_gcs_retry(exc: Exception) -> None:
+    """``on_error`` hook for the GCS SDK retry: log each transient error that triggers a retry."""
+    logger.warning(f"GCS transient error, retrying: {exc!r}")
 
 
 def parse_gcs_url(url: str) -> Tuple[str, str]:
@@ -453,8 +460,37 @@ class GCSStorage(StorageInterface):
         self._throttler_roundtrip = TaskThrottler(ThrottlerType.ServerRoundTrip, "GCS", throttling_params.jobs)
         self._throttler_networkdata = TaskThrottler(ThrottlerType.NetworkDataTransfer, "GCS", throttling_params.file_transfer_jobs)
         self._throttler_serverdata = TaskThrottler(ThrottlerType.LongRunningServerOp, "GCS", throttling_params.jobs)
-        self._retry_count = int(os.getenv("WRAPP_GCS_EXTRA_RETRIES", "3"))
-        self._retry_delay = float(os.getenv("WRAPP_GCS_RETRY_WAIT_SECONDS", "1.0"))
+        # Configure the google-cloud-storage client's own retry/back-off. Each knob is only
+        # overridden when its env var is set; otherwise the library's own default is used
+        # (we do not impose WRAPP-specific defaults). WRAPP_GCS_TIMEOUT_SECONDS maps to the
+        # retry deadline (the "Timeout of Ns exceeded" RetryError). Reuse DEFAULT_RETRY's
+        # transient-error predicate and attach an on_error hook so the client's internal
+        # retries are logged as warnings.
+        retry_overrides: dict = {}
+        for env_name, key in (
+            ("WRAPP_GCS_RETRY_INITIAL_SECONDS", "initial"),
+            ("WRAPP_GCS_RETRY_MAXIMUM_SECONDS", "maximum"),
+            ("WRAPP_GCS_RETRY_MULTIPLIER", "multiplier"),
+            ("WRAPP_GCS_TIMEOUT_SECONDS", "timeout"),
+        ):
+            value = parse_env_float(env_name)
+            if value is None:
+                # Unset or invalid (parse_env_float warned): do not pass the kwarg so the
+                # google-cloud-storage default applies.
+                continue
+            retry_overrides[key] = value
+        self._retry = Retry(predicate=DEFAULT_RETRY._predicate, on_error=_log_gcs_retry, **retry_overrides)
+        # WRAPP_GCS_REQUEST_TIMEOUT_SECONDS configures the per-request transport timeout
+        # (the "The write operation timed out" TimeoutError on connections too slow to
+        # finish a single request). It is independent of the retry deadline above: raising
+        # the deadline only retries the same request-timeout-bounded attempt for longer.
+        # Same override-only-when-set contract as the retry knobs.
+        self._request_timeout: Optional[float] = parse_env_float("WRAPP_GCS_REQUEST_TIMEOUT_SECONDS")
+        # Keyword arguments applied to every google-cloud-storage call. timeout= is only
+        # included when overridden so the library's own per-request default applies otherwise.
+        self._sdk_call_kwargs: Dict = {"retry": self._retry}
+        if self._request_timeout is not None:
+            self._sdk_call_kwargs["timeout"] = self._request_timeout
 
     def backend_throttlers(self) -> list[TaskThrottler]:
         return [self._throttler_roundtrip, self._throttler_networkdata, self._throttler_serverdata]
@@ -524,7 +560,7 @@ class GCSStorage(StorageInterface):
                 blobs = list(
                     await self._throttler_roundtrip.run(
                         asyncio.get_running_loop().run_in_executor(
-                            None, lambda: list(client.list_blobs(bucket_name, prefix=object_name, max_results=1))
+                            None, lambda: list(client.list_blobs(bucket_name, prefix=object_name, max_results=1, **self._sdk_call_kwargs))
                         )
                     )
                 )
@@ -533,7 +569,9 @@ class GCSStorage(StorageInterface):
                 else:
                     # Check if bucket exists and the prefix is the root
                     try:
-                        await self._throttler_roundtrip.run(asyncio.get_running_loop().run_in_executor(None, bucket.reload))
+                        await self._throttler_roundtrip.run(
+                            asyncio.get_running_loop().run_in_executor(None, lambda: bucket.reload(**self._sdk_call_kwargs))
+                        )
                         if object_name == "":
                             return Result.OK, GCSListEntry.folder("")
                         else:
@@ -544,7 +582,9 @@ class GCSStorage(StorageInterface):
                 # For file-like paths, try to get the blob properties
                 blob = bucket.blob(object_name)
                 try:
-                    await self._throttler_roundtrip.run(asyncio.get_running_loop().run_in_executor(None, blob.reload))
+                    await self._throttler_roundtrip.run(
+                        asyncio.get_running_loop().run_in_executor(None, lambda: blob.reload(**self._sdk_call_kwargs))
+                    )
                     return Result.OK, GCSListEntry.file_from_blob(object_name, blob)
                 except NotFound:
                     # Check if there's a directory with this name
@@ -552,7 +592,8 @@ class GCSStorage(StorageInterface):
                     blobs = list(
                         await self._throttler_roundtrip.run(
                             asyncio.get_running_loop().run_in_executor(
-                                None, lambda: list(client.list_blobs(bucket_name, prefix=directory_path, max_results=1))
+                                None,
+                                lambda: list(client.list_blobs(bucket_name, prefix=directory_path, max_results=1, **self._sdk_call_kwargs)),
                             )
                         )
                     )
@@ -571,7 +612,7 @@ class GCSStorage(StorageInterface):
             return Result.ERROR_ACCESS_DENIED, None
         except NotFound:
             return Result.ERROR_NOT_FOUND, None
-        except GoogleAPICallError as e:
+        except (GoogleAPICallError, RetryError) as e:
             logger.error(f"GCS error during stat {url}: {e}")
             self._last_connection_status = ConnectionStatus.CONNECT_ERROR
             return Result.ERROR, None
@@ -596,7 +637,9 @@ class GCSStorage(StorageInterface):
             # Check if bucket exists
             bucket = client.bucket(bucket_name)
             try:
-                await self._throttler_roundtrip.run(asyncio.get_running_loop().run_in_executor(None, bucket.reload))
+                await self._throttler_roundtrip.run(
+                    asyncio.get_running_loop().run_in_executor(None, lambda: bucket.reload(**self._sdk_call_kwargs))
+                )
             except NotFound:
                 raise StorageOperationError(f"Bucket {bucket_name} not found", Result.ERROR_NOT_FOUND)
 
@@ -605,7 +648,9 @@ class GCSStorage(StorageInterface):
             loop = asyncio.get_running_loop()
 
             blobs_iterator = await self._throttler_roundtrip.run(
-                loop.run_in_executor(None, lambda: client.list_blobs(bucket_name, prefix=object_name, delimiter="/"))
+                loop.run_in_executor(
+                    None, lambda: client.list_blobs(bucket_name, prefix=object_name, delimiter="/", **self._sdk_call_kwargs)
+                )
             )
 
             # Process blobs (files)
@@ -637,7 +682,7 @@ class GCSStorage(StorageInterface):
             raise StorageOperationError(f"Permission error: {e}", Result.ERROR_ACCESS_DENIED)
         except NotFound as e:
             raise StorageOperationError(f"Resource not found: {e}", Result.ERROR_NOT_FOUND)
-        except GoogleAPICallError as e:
+        except (GoogleAPICallError, RetryError) as e:
             logger.error(f"GCS error during list_directory {url}: {e}")
             self._last_connection_status = ConnectionStatus.CONNECT_ERROR
             raise StorageOperationError(f"GCS error: {e}", Result.ERROR)
@@ -658,7 +703,9 @@ class GCSStorage(StorageInterface):
             # Check if bucket exists
             bucket = client.bucket(bucket_name)
             try:
-                await self._throttler_roundtrip.run(asyncio.get_running_loop().run_in_executor(None, bucket.reload))
+                await self._throttler_roundtrip.run(
+                    asyncio.get_running_loop().run_in_executor(None, lambda: bucket.reload(**self._sdk_call_kwargs))
+                )
             except NotFound:
                 raise StorageOperationError(f"Bucket {bucket_name} not found", Result.ERROR_NOT_FOUND)
 
@@ -669,7 +716,7 @@ class GCSStorage(StorageInterface):
             loop = asyncio.get_running_loop()
             # List all blobs with the given prefix (no delimiter for recursive listing)
             all_blobs = await self._throttler_roundtrip.run(
-                loop.run_in_executor(None, lambda: list(client.list_blobs(bucket_name, prefix=object_name)))
+                loop.run_in_executor(None, lambda: list(client.list_blobs(bucket_name, prefix=object_name, **self._sdk_call_kwargs)))
             )
 
             for blob in all_blobs:
@@ -700,7 +747,7 @@ class GCSStorage(StorageInterface):
             raise StorageOperationError(f"Permission error: {e}", Result.ERROR_ACCESS_DENIED)
         except NotFound as e:
             raise StorageOperationError(f"Resource not found: {e}", Result.ERROR_NOT_FOUND)
-        except GoogleAPICallError as e:
+        except (GoogleAPICallError, RetryError) as e:
             logger.error(f"GCS error during list_file_tree {url}: {e}")
             self._last_connection_status = ConnectionStatus.CONNECT_ERROR
             raise StorageOperationError(f"GCS error: {e}", Result.ERROR)
@@ -735,7 +782,9 @@ class GCSStorage(StorageInterface):
             blob = bucket.blob(object_name)
 
             loop = asyncio.get_running_loop()
-            content = await self._throttler_networkdata.run(loop.run_in_executor(None, blob.download_as_bytes))
+            content = await self._throttler_networkdata.run(
+                loop.run_in_executor(None, lambda: blob.download_as_bytes(**self._sdk_call_kwargs))
+            )
 
             return Result.OK, content
 
@@ -749,7 +798,7 @@ class GCSStorage(StorageInterface):
             return Result.ERROR_ACCESS_DENIED, bytes()
         except NotFound:
             return Result.ERROR_NOT_FOUND, bytes()
-        except GoogleAPICallError as e:
+        except (GoogleAPICallError, RetryError) as e:
             logger.error(f"GCS error during read_file_content {file_url}: {e}")
             self._last_connection_status = ConnectionStatus.CONNECT_ERROR
             return Result.ERROR, bytes()
@@ -764,13 +813,15 @@ class GCSStorage(StorageInterface):
         loop = asyncio.get_running_loop()
         try:
             bucket = client.bucket(bucket_name)
-            await self._throttler_roundtrip.run(loop.run_in_executor(None, bucket.reload))
+            await self._throttler_roundtrip.run(loop.run_in_executor(None, lambda: bucket.reload(**self._sdk_call_kwargs)))
         except GoogleAuthError as e:
             raise StorageOperationError(f"GCS authentication error during create_bucket {bucket_name}: {e}")
         except NotFound:
             try:
-                await self._throttler_roundtrip.run(loop.run_in_executor(None, lambda: client.create_bucket(bucket_name)))
-            except GoogleAPICallError as e:
+                await self._throttler_roundtrip.run(
+                    loop.run_in_executor(None, lambda: client.create_bucket(bucket_name, **self._sdk_call_kwargs))
+                )
+            except (GoogleAPICallError, RetryError) as e:
                 logger.error(f"GCS error during create_bucket {bucket_name}: {e}")
                 raise e
 
@@ -793,23 +844,10 @@ class GCSStorage(StorageInterface):
             blob.metadata = metadata
 
             loop = asyncio.get_running_loop()
-            for attempt in range(1, self._retry_count + 1):
-                try:
-                    await self._throttler_networkdata.run(loop.run_in_executor(None, lambda: blob.upload_from_string(content)))
-                    return Result.OK
-                except GoogleAPICallError as e:
-                    if attempt == self._retry_count:
-                        logger.error(f"[{file_url}] write failed on attempt {attempt}/{self._retry_count}: {e}. No more retries left.")
-                        self._last_connection_status = ConnectionStatus.CONNECT_ERROR
-                        return Result.ERROR
-                    delay = self._retry_delay * (2 ** (attempt - 1))
-                    jitter = uniform(0, delay * 0.1)
-                    logger.warning(
-                        f"[{file_url}] write attempt {attempt}/{self._retry_count} failed: {e}. Retrying in {delay + jitter:.1f}s..."
-                    )
-                    await asyncio.sleep(delay + jitter)
-
-            return Result.ERROR  # retry_count == 0
+            await self._throttler_networkdata.run(
+                loop.run_in_executor(None, lambda: blob.upload_from_string(content, **self._sdk_call_kwargs))
+            )
+            return Result.OK
 
         except GoogleAuthError as e:
             logger.error(f"GCS authentication error during write_file {file_url}: {e}")
@@ -819,7 +857,7 @@ class GCSStorage(StorageInterface):
             logger.error(f"GCS write_file {file_url} failed because of permission error: {e}")
             self._last_connection_status = ConnectionStatus.AUTH_ERROR
             return Result.ERROR_ACCESS_DENIED
-        except GoogleAPICallError as e:
+        except (GoogleAPICallError, RetryError) as e:
             logger.error(f"GCS error during write_file {file_url}: {e}")
             self._last_connection_status = ConnectionStatus.CONNECT_ERROR
             return Result.ERROR
@@ -839,7 +877,7 @@ class GCSStorage(StorageInterface):
 
                 loop = asyncio.get_running_loop()
                 try:
-                    await self._throttler_roundtrip.run(loop.run_in_executor(None, blob.delete))
+                    await self._throttler_roundtrip.run(loop.run_in_executor(None, lambda: blob.delete(**self._sdk_call_kwargs)))
                     return Result.OK
                 except NotFound:
                     return Result.ERROR_NOT_FOUND
@@ -852,7 +890,7 @@ class GCSStorage(StorageInterface):
             logger.error(f"GCS delete_item {url} failed because of permission error: {e}")
             self._last_connection_status = ConnectionStatus.AUTH_ERROR
             return Result.ERROR_ACCESS_DENIED
-        except GoogleAPICallError as e:
+        except (GoogleAPICallError, RetryError) as e:
             logger.error(f"GCS error during delete_item {url}: {e}")
             self._last_connection_status = ConnectionStatus.CONNECT_ERROR
             return Result.ERROR
@@ -871,11 +909,11 @@ class GCSStorage(StorageInterface):
                 async def _perform_delete(blob_name):
                     bucket = client.bucket(bucket_name)
                     blob = bucket.blob(blob_name)
-                    await self._throttler_roundtrip.run(loop.run_in_executor(None, blob.delete))
+                    await self._throttler_roundtrip.run(loop.run_in_executor(None, lambda: blob.delete(**self._sdk_call_kwargs)))
 
                 # List all blobs with the given prefix
                 all_blobs = await self._throttler_roundtrip.run(
-                    loop.run_in_executor(None, lambda: list(client.list_blobs(bucket_name, prefix=object_name)))
+                    loop.run_in_executor(None, lambda: list(client.list_blobs(bucket_name, prefix=object_name, **self._sdk_call_kwargs)))
                 )
 
                 if not all_blobs:
@@ -897,7 +935,7 @@ class GCSStorage(StorageInterface):
             logger.error(f"GCS delete_tree {url} failed because of permission error: {e}")
             self._last_connection_status = ConnectionStatus.AUTH_ERROR
             return Result.ERROR_ACCESS_DENIED
-        except GoogleAPICallError as e:
+        except (GoogleAPICallError, RetryError) as e:
             logger.error(f"GCS error during delete_tree {url}: {e}")
             self._last_connection_status = ConnectionStatus.CONNECT_ERROR
             return Result.ERROR
@@ -920,7 +958,7 @@ class GCSStorage(StorageInterface):
 
             if not overwrite:
                 loop = asyncio.get_running_loop()
-                exists = await self._throttler_roundtrip.run(loop.run_in_executor(None, blob.exists))
+                exists = await self._throttler_roundtrip.run(loop.run_in_executor(None, lambda: blob.exists(**self._sdk_call_kwargs)))
                 if exists:
                     return Result.ERROR_ALREADY_EXISTS
 
@@ -930,23 +968,10 @@ class GCSStorage(StorageInterface):
             blob.metadata = metadata
 
             loop = asyncio.get_running_loop()
-            for attempt in range(1, self._retry_count + 1):
-                try:
-                    await self._throttler_networkdata.run(loop.run_in_executor(None, lambda: blob.upload_from_filename(src_path)))
-                    return Result.OK
-                except GoogleAPICallError as e:
-                    if attempt == self._retry_count:
-                        logger.error(f"[{dst_url}] upload failed on attempt {attempt}/{self._retry_count}: {e}. No more retries left.")
-                        self._last_connection_status = ConnectionStatus.CONNECT_ERROR
-                        return Result.ERROR
-                    delay = self._retry_delay * (2 ** (attempt - 1))
-                    jitter = uniform(0, delay * 0.1)
-                    logger.warning(
-                        f"[{dst_url}] upload attempt {attempt}/{self._retry_count} failed: {e}. Retrying in {delay + jitter:.1f}s..."
-                    )
-                    await asyncio.sleep(delay + jitter)
-
-            return Result.ERROR  # retry_count == 0
+            await self._throttler_networkdata.run(
+                loop.run_in_executor(None, lambda: blob.upload_from_filename(src_path, **self._sdk_call_kwargs))
+            )
+            return Result.OK
 
         except FileNotFoundError:
             return Result.ERROR_NOT_FOUND
@@ -964,7 +989,7 @@ class GCSStorage(StorageInterface):
             logger.error(f"GCS upload_file {dst_url} failed because of permission error: {e}")
             self._last_connection_status = ConnectionStatus.AUTH_ERROR
             return Result.ERROR_ACCESS_DENIED
-        except GoogleAPICallError as e:
+        except (GoogleAPICallError, RetryError) as e:
             logger.error(f"GCS error during upload_file {dst_url}: {e}")
             self._last_connection_status = ConnectionStatus.CONNECT_ERROR
             return Result.ERROR
@@ -985,25 +1010,10 @@ class GCSStorage(StorageInterface):
                 return Result.ERROR_ALREADY_EXISTS
 
             loop = asyncio.get_running_loop()
-            for attempt in range(1, self._retry_count + 1):
-                try:
-                    await self._throttler_networkdata.run(loop.run_in_executor(None, lambda: blob.download_to_filename(dst_path)))
-                    return Result.OK
-                except GoogleAPICallError as e:
-                    if isinstance(e, (NotFound, Forbidden)):
-                        raise
-                    if attempt == self._retry_count:
-                        logger.error(f"[{src_url}] download failed on attempt {attempt}/{self._retry_count}: {e}. No more retries left.")
-                        self._last_connection_status = ConnectionStatus.CONNECT_ERROR
-                        return Result.ERROR
-                    delay = self._retry_delay * (2 ** (attempt - 1))
-                    jitter = uniform(0, delay * 0.1)
-                    logger.warning(
-                        f"[{src_url}] download attempt {attempt}/{self._retry_count} failed: {e}. Retrying in {delay + jitter:.1f}s..."
-                    )
-                    await asyncio.sleep(delay + jitter)
-
-            return Result.ERROR  # retry_count == 0
+            await self._throttler_networkdata.run(
+                loop.run_in_executor(None, lambda: blob.download_to_filename(dst_path, **self._sdk_call_kwargs))
+            )
+            return Result.OK
 
         except FileNotFoundError:
             return Result.ERROR_NOT_FOUND
@@ -1020,7 +1030,7 @@ class GCSStorage(StorageInterface):
             logger.error(f"GCS download_file {src_url} failed because of permission error: {e}")
             self._last_connection_status = ConnectionStatus.AUTH_ERROR
             return Result.ERROR_ACCESS_DENIED
-        except GoogleAPICallError as e:
+        except (GoogleAPICallError, RetryError) as e:
             logger.error(f"GCS error during download_file {src_url}: {e}")
             self._last_connection_status = ConnectionStatus.CONNECT_ERROR
             return Result.ERROR
@@ -1096,7 +1106,7 @@ class GCSStorage(StorageInterface):
             # Check if source exists
             loop = asyncio.get_running_loop()
             try:
-                await self._throttler_roundtrip.run(loop.run_in_executor(None, src_blob.reload))
+                await self._throttler_roundtrip.run(loop.run_in_executor(None, lambda: src_blob.reload(**self._sdk_call_kwargs)))
             except NotFound:
                 return Result.ERROR_NOT_FOUND
 
@@ -1105,13 +1115,13 @@ class GCSStorage(StorageInterface):
             # Check if destination exists and we're not allowed to overwrite
             if not overwrite:
                 dst_blob = dst_bucket.blob(dst_object_name)
-                exists = await self._throttler_roundtrip.run(loop.run_in_executor(None, dst_blob.exists))
+                exists = await self._throttler_roundtrip.run(loop.run_in_executor(None, lambda: dst_blob.exists(**self._sdk_call_kwargs)))
                 if exists:
                     return Result.ERROR_ALREADY_EXISTS
 
             # Server-side copy
             await self._throttler_serverdata.run(
-                loop.run_in_executor(None, lambda: src_bucket.copy_blob(src_blob, dst_bucket, dst_object_name, retry=DEFAULT_RETRY))
+                loop.run_in_executor(None, lambda: src_bucket.copy_blob(src_blob, dst_bucket, dst_object_name, **self._sdk_call_kwargs))
             )
 
             return Result.OK
@@ -1124,7 +1134,7 @@ class GCSStorage(StorageInterface):
             logger.error(f"GCS copy {src_url} to {dst_url} failed because of permission error: {e}")
             self._last_connection_status = ConnectionStatus.AUTH_ERROR
             return Result.ERROR_ACCESS_DENIED
-        except GoogleAPICallError as e:
+        except (GoogleAPICallError, RetryError) as e:
             logger.error(f"GCS error during copy {src_url} to {dst_url}: {e}")
             self._last_connection_status = ConnectionStatus.CONNECT_ERROR
             return Result.ERROR

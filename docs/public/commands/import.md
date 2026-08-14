@@ -7,6 +7,13 @@ Given a previously exported tar file and a repository location, import the packa
 An exported package can be imported again into a repository. This is typically used after creating a tar file
 with the `export` command. Supported archive formats are `.tar` and `.tar.gz`.
 
+If an archive contains SimReady package-standard sidecars, `import` writes them
+next to the imported `.wrapp` file verbatim, preserving package-standard
+identity; it does not regenerate, re-hash, or validate them. The archive is
+trusted the same way its `.wrapp` catalog and content hashes are trusted, so
+whatever sidecars the archive carries are imported as-is. See
+package standard sidecars.
+
 For usage examples, see the [Tutorial](../tutorial.md). For CLI options, run `ovpackage import --help`.
 
 ## Python API Reference

@@ -53,6 +53,12 @@ from wrapp.datastructures.package import (
     load_package_setup,
     wrapp_file_name,
 )
+from wrapp.datastructures.package_standard import (
+    PACKAGE_STANDARD_DEFINITION_FILENAME,
+    PACKAGE_STANDARD_METADATA_FOLDER,
+    read_package_standard_definition_bytes,
+    read_package_standard_metadata_files,
+)
 from wrapp.options import (
     AuthOption,
     CatalogFileOption,
@@ -210,7 +216,15 @@ async def export_package(
         catalog_content = await Catalog.load(catalog)
         # Create a package and then export it
         new_package = PackageInfo(name=package_name, version=version, source=catalog, catalog=catalog_content)
-        await _export_package_internal(new_package, output, overwrite=overwrite, dedup=dedup, context=context, scheduler=scheduler)
+        await _export_package_internal(
+            new_package,
+            output,
+            overwrite=overwrite,
+            dedup=dedup,
+            source_package_url=None,
+            context=context,
+            scheduler=scheduler,
+        )
     elif repo:
         scheduler = scheduler.create_sub_context_and_node(f"Export {package_name} {version}", expected_num_sub_jobs=1)
 
@@ -226,7 +240,17 @@ async def export_package(
         if source_setup is None:
             raise FailedCommand(f"Failed to load the source's package .wrapp file at {source_package_url}")
         else:
-            await _export_package_internal(source_setup, output, overwrite=overwrite, dedup=dedup, context=context, scheduler=scheduler)
+            await _export_package_internal(
+                source_setup,
+                output,
+                overwrite=overwrite,
+                dedup=dedup,
+                source_package_url=source_package_url,
+                context=context,
+                scheduler=scheduler,
+            )
+    else:
+        raise FailedCommand("Specify a source to export from: either a repository with --repo or a catalog with --catalog.")
 
 
 async def _export_package_internal(
@@ -234,6 +258,7 @@ async def _export_package_internal(
     output: str,
     overwrite: bool,
     dedup,
+    source_package_url: Optional[str],
     *,
     context: CommandParameters,
     scheduler: SchedulerContext,
@@ -268,6 +293,16 @@ async def _export_package_internal(
             blob_store_package.catalog.storage_map = storage_map
             tarfile_package_str = blob_store_package.model_dump_json(indent=4)
             _write_into_tarfile(tar, wrapp_file_name(blob_store_package.name), tarfile_package_str.encode("UTF-8"))
+
+            # Carry the source package's existing package-standard sidecars into the archive verbatim; the export
+            # does not regenerate (and therefore does not re-hash) them. The root definition file and every file in
+            # the .metadata folder are archived. A catalog-only export has no source package.
+            if source_package_url is not None:
+                definition_bytes = await read_package_standard_definition_bytes(source_package_url)
+                if definition_bytes is not None:
+                    _write_into_tarfile(tar, PACKAGE_STANDARD_DEFINITION_FILENAME, definition_bytes)
+                for rel_path, metadata_bytes in (await read_package_standard_metadata_files(source_package_url)).items():
+                    _write_into_tarfile(tar, f"{PACKAGE_STANDARD_METADATA_FOLDER}/{rel_path}", metadata_bytes)
 
             # Now copy the content of the package into the tarball
             # When we are de-duplicating, check that no hash is stored twice

@@ -31,7 +31,7 @@ from wrapp.datastructures.previous_versions.serialized_data import SerializedDat
 from wrapp.datastructures.wrapp_file_model import (
     WRAPPFileModel,
     WRAPPModelVersion,
-    all_old_wrapp_file_model_classes,
+    all_old_file_model_classes,
 )
 
 
@@ -292,9 +292,12 @@ class Catalog_V5_0(WRAPPFileModel):
         return Catalog_V5_0(**data_dict)
 
 
-all_old_wrapp_file_model_classes[("Catalog", WRAPPModelVersion(version_string="0"))] = Catalog_V1
-all_old_wrapp_file_model_classes[("Catalog", WRAPPModelVersion(version_string="1"))] = Catalog_V1
-all_old_wrapp_file_model_classes[("Catalog", WRAPPModelVersion(version_string="2.0"))] = Catalog_V2_0
-all_old_wrapp_file_model_classes[("Catalog", WRAPPModelVersion(version_string="3.0"))] = Catalog_V3_0
-all_old_wrapp_file_model_classes[("Catalog", WRAPPModelVersion(version_string="4.0"))] = Catalog_V4_0
-all_old_wrapp_file_model_classes[("Catalog", WRAPPModelVersion(version_string="5.0"))] = Catalog_V5_0
+# Versioned classes above are compatibility snapshots. Do not edit an
+# existing class body after it has shipped; add a new class and registry entry
+# for a new file format version instead.
+all_old_file_model_classes[("Catalog", WRAPPModelVersion(version_string="0"))] = Catalog_V1
+all_old_file_model_classes[("Catalog", WRAPPModelVersion(version_string="1"))] = Catalog_V1
+all_old_file_model_classes[("Catalog", WRAPPModelVersion(version_string="2.0"))] = Catalog_V2_0
+all_old_file_model_classes[("Catalog", WRAPPModelVersion(version_string="3.0"))] = Catalog_V3_0
+all_old_file_model_classes[("Catalog", WRAPPModelVersion(version_string="4.0"))] = Catalog_V4_0
+all_old_file_model_classes[("Catalog", WRAPPModelVersion(version_string="5.0"))] = Catalog_V5_0

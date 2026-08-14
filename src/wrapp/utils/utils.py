@@ -22,6 +22,7 @@ from typing import (
     TYPE_CHECKING,
     List,
     Optional,
+    overload,
 )
 from urllib.parse import (
     urlparse,
@@ -44,8 +45,14 @@ if TYPE_CHECKING:
 logger = logging.getLogger("omni.wrapp")
 
 
-def parse_env_int(env_var: str, default: int) -> int:
-    """Parse an environment variable as a positive integer, falling back to *default*."""
+def parse_env_int(env_var: str, default: int, *, minimum: Optional[int] = None) -> int:
+    """Parse an environment variable as an integer, falling back to *default*.
+
+    A non-integer value logs a warning and returns *default*. When *minimum* is given, a parsed
+    value below it is likewise rejected (warn + *default*); pass ``minimum=1`` for a
+    must-be-positive setting or ``minimum=0`` where 0 is meaningful (e.g. a retry count that
+    disables retries). When *minimum* is None (the default) no lower-bound check is applied.
+    """
     raw = os.environ.get(env_var)
     if raw is None:
         return default
@@ -54,10 +61,39 @@ def parse_env_int(env_var: str, default: int) -> int:
     except ValueError:
         logger.warning(f"Ignoring invalid {env_var}={raw!r} (not an integer), using default {default}")
         return default
-    if value <= 0:
-        logger.warning(f"Ignoring non-positive {env_var}={value}, using default {default}")
+    if minimum is not None and value < minimum:
+        logger.warning(f"Ignoring {env_var}={value} (must be >= {minimum}), using default {default}")
         return default
     return value
+
+
+@overload
+def parse_env_float(env_var: str) -> Optional[float]:
+    ...
+
+
+@overload
+def parse_env_float(env_var: str, default: float) -> float:
+    ...
+
+
+def parse_env_float(env_var: str, default: Optional[float] = None) -> Optional[float]:
+    """Parse an environment variable as a float, falling back to *default*.
+
+    An unset (or empty) variable silently returns *default*; a set but non-numeric
+    value logs a warning and returns *default*. Unlike :func:`parse_env_int`, no
+    positivity/range validation is applied — any parseable float is returned as-is
+    (a validation policy is deferred until env parsing is unified across the
+    storage backends).
+    """
+    raw = os.environ.get(env_var)
+    if not raw:
+        return default
+    try:
+        return float(raw)
+    except ValueError:
+        logger.warning(f"Ignoring invalid {env_var}={raw!r}: expected a number; falling back to the default.")
+        return default
 
 
 @wrapp_public_api
@@ -124,7 +160,10 @@ def validate_non_empty_string(parameter_name: str, value: str) -> None:
         raise FailedCommandValueError(parameter_name, value, f"{parameter_name} cannot be empty")
 
 
+@wrapp_public_api
 class FailedPatchCommand(FailedCommand):
+    """Raised when applying a patch fails; carries the offending ``Patch`` for diagnostics."""
+
     def __init__(self, msg: str, patch: "Patch"):
         super().__init__(msg)
         self.patch = patch

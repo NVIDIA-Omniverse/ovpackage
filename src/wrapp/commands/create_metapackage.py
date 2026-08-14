@@ -120,6 +120,10 @@ async def create_metapackage_command(
     context, scheduler_params = context_from_params()
     try:
         dependencies = DependencySet(dependencies=[])  # mypy empty
+        if not package_name:
+            raise FailedCommand("You must specify a package name.")
+        if not version:
+            raise FailedCommand("You must specify a version.")
         if not json and not csv:
             raise FailedCommand("You must specify the metapackage content either with a JSON file or a CSV file parameter!")
         if json and csv:

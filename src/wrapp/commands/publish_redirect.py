@@ -47,10 +47,10 @@ from wrapp.datastructures.loaded_package import (
 from wrapp.datastructures.package import (
     PackageInfo,
     UniquePackageLocation,
+    _write_package_info,
     load_package_setup,
     wrapp_file_in_repo,
     wrapp_file_name,
-    write_package_info,
 )
 from wrapp.options import (
     AuthOption,
@@ -412,8 +412,14 @@ async def _create_redirect_for_package(
         all_source_repos=all_source_repos,
     )
 
-    # Write the redirect package to the redirect repo location
-    await write_package_info(redirect_wrapp_url, redirect_package, context)
+    # Write the redirect package to the redirect repo location, carrying any
+    # package-standard sidecars from the source package verbatim (like mirror/install).
+    await _write_package_info(
+        redirect_wrapp_url,
+        redirect_package,
+        context,
+        package_standard_seed_url=source_wrapp_url,
+    )
     created_files.append(redirect_wrapp_url)
     logger.info(f"Created redirect package at {redirect_wrapp_url}")
 

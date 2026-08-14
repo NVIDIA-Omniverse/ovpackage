@@ -25,31 +25,46 @@ import secrets
 import tempfile
 import urllib.parse
 import webbrowser
-from contextlib import asynccontextmanager
+from contextlib import (
+    asynccontextmanager,
+    contextmanager,
+)
 from datetime import datetime
 from math import ceil
 from typing import (
     Any,
     AsyncGenerator,
     Awaitable,
+    BinaryIO,
     Callable,
     Dict,
     Generator,
+    Iterator,
     List,
     Optional,
     Tuple,
     TypeVar,
+    Union,
 )
 
 from wrapp.datastructures.command_context import ThrottlingParameters
 from wrapp.utils import storage_interface
 from wrapp.utils.config import (
+    DEFAULT_STORAGE_API_BACKEND_NAME,
+    StorageAPIBackendConfig,
     WrappConfig,
     load_wrapp_config,
 )
 from wrapp.utils.coro import sync_calls_async_on_wrapp_thread
-from wrapp.utils.nucleus_hash import calc_nucleus_hash_from_stream
+from wrapp.utils.nucleus_hash import (
+    IncrementalNucleusHasher,
+    calc_nucleus_hash_from_stream,
+)
 from wrapp.utils.scheduler_task_node import SchedulerTaskGroupNode
+from wrapp.utils.stats import (
+    Stats,
+    StatType,
+)
 from wrapp.utils.storage_interface import (
     ConnectionStatus,
     DirectorySemantics,
@@ -86,6 +101,7 @@ try:
     import grpc
     import grpc.aio
     import keyring
+    import yarl
     from aiohttp import web
     from google.protobuf.struct_pb2 import Value
     from nvidia.omniverse.storage.capabilities.v1alpha import (
@@ -138,7 +154,7 @@ try:
     import requests  # isort: skip
 except ImportError as e:
     missing = getattr(e, "name", str(e))
-    error_msg = f"failed to import {missing}. Required dependencies: aiohttp>=3.11.18; grpcio>=1.71.0; grpcio-tools>=1.71.0; requests>=2.32.3; keyring>=25.0.0. Install with 'pip install ovpackage[storage-api]'. Exception: {e}"
+    error_msg = f"failed to import {missing}. Required dependencies: aiohttp>=3.11.18; yarl>=1.17.0; grpcio>=1.71.0; grpcio-tools>=1.71.0; requests>=2.32.3; keyring>=25.0.0. Install with 'pip install ovpackage[storage-api]'. Exception: {e}"
     raise StorageMissingDependenciesError(error_msg) from e
 
 # Per-service version lookup tables for protocol negotiation.
@@ -189,22 +205,40 @@ _STORAGE_API_ALLOWED_VERSIONS = {
 }
 _UPLOAD_RETRIES_ENV_VAR = "WRAPP_STORAGE_API_UPLOAD_RETRIES"
 _LEGACY_UPLOAD_RETRIES_ENV_VAR = "WRAPP_STORAGEAPI_UPLOAD_RETRIES"
+_DOWNLOAD_RETRIES_ENV_VAR = "WRAPP_STORAGE_API_DOWNLOAD_RETRIES"
+_LEGACY_DOWNLOAD_RETRIES_ENV_VAR = "WRAPP_STORAGEAPI_DOWNLOAD_RETRIES"
 _ENABLE_RANGE_DOWNLOAD_ENV_VAR = "WRAPP_STORAGE_API_ENABLE_RANGE_DOWNLOAD"
 _LEGACY_ENABLE_RANGE_DOWNLOAD_ENV_VAR = "WRAPP_STORAGEAPI_ENABLE_RANGE_DOWNLOAD"
 _DOWNLOAD_RANGE_PART_SIZE_ENV_VAR = "WRAPP_STORAGE_API_DOWNLOAD_RANGE_PART_SIZE"
 _LEGACY_DOWNLOAD_RANGE_PART_SIZE_ENV_VAR = "WRAPP_STORAGEAPI_DOWNLOAD_RANGE_PART_SIZE"
 _DOWNLOAD_RANGE_MAX_CONCURRENCY_ENV_VAR = "WRAPP_STORAGE_API_DOWNLOAD_RANGE_MAX_CONCURRENCY"
 _LEGACY_DOWNLOAD_RANGE_MAX_CONCURRENCY_ENV_VAR = "WRAPP_STORAGEAPI_DOWNLOAD_RANGE_MAX_CONCURRENCY"
+_DISABLE_METADATA_ENV_VAR = "WRAPP_STORAGE_API_DISABLE_METADATA"
+_METADATA_RETRIES_ENV_VAR = "WRAPP_STORAGE_API_METADATA_RETRIES"
+_READ_RETRIES_ENV_VAR = "WRAPP_STORAGE_API_READ_RETRIES"
+_DISABLE_ENUMERATE_ENV_VAR = "WRAPP_STORAGE_API_DISABLE_ENUMERATE"
 _DEFAULT_STORAGEAPI_DOWNLOAD_RANGE_PART_SIZE = 8 * 1024 * 1024
 _DEFAULT_STORAGEAPI_DOWNLOAD_RANGE_MAX_CONCURRENCY = 8
 _STORAGEAPI_DOWNLOAD_CHUNK_SIZE = 4 * 1024 * 1024
+_STORAGEAPI_WRITE_CHUNK_SIZE = 1024 * 1024
 _CONTENT_RANGE_PATTERN = re.compile(r"^bytes (\d+)-(\d+)/(\d+|\*)$")
-_RETRYABLE_WRITE_GRPC_STATUS_CODES = {
+_RETRYABLE_GRPC_STATUS_CODES = {
     grpc.StatusCode.ABORTED,
     grpc.StatusCode.DEADLINE_EXCEEDED,
     grpc.StatusCode.RESOURCE_EXHAUSTED,
     grpc.StatusCode.UNAVAILABLE,
 }
+
+
+def _presigned_url(url: str) -> "yarl.URL":
+    """Wrap a presigned/redirect URL so aiohttp uses it byte-exact.
+
+    yarl re-normalizes percent-encoding by default (e.g. %2F -> / inside the
+    X-Amz-Credential query value of S3/CloudFront presigned URLs), which
+    breaks the signature and yields 403 AccessDenied. encoded=True disables
+    the re-encoding.
+    """
+    return yarl.URL(url, encoded=True)
 
 
 def _encode_resource_address_for_storage_service(resource_address: str) -> str:
@@ -217,6 +251,211 @@ def _decode_resource_address_from_storage_service(resource_address: str) -> str:
     parsed = urllib.parse.urlsplit(resource_address.replace("\\", "/"))
     unquoted_path = urllib.parse.unquote(parsed.path)
     return urllib.parse.urlunsplit((parsed.scheme, parsed.netloc, unquoted_path, parsed.query, parsed.fragment))
+
+
+def _stat_snapshot(st: os.stat_result) -> Tuple[int, int, int, int]:
+    # ctime_ns is included because a same-size rewrite can restore mtime (e.g.
+    # touch -r) but cannot restore ctime on POSIX. On Windows st_ctime_ns is the
+    # creation time, so an in-place same-size rewrite with restored mtime is not
+    # detectable there without re-hashing.
+    return (st.st_size, st.st_mtime_ns, st.st_ctime_ns, st.st_ino)
+
+
+class _WriteSource:
+    """Lazy, re-openable content source for Storage API writes (OMPE-74369).
+
+    Path-backed sources defer opening the local file until the caller holds a
+    NetworkDataTransfer slot, so pending transfers hold neither a file handle
+    nor the file's content in memory. Bytes-backed sources preserve the public
+    write_file()/write_file_content() bytes contract. slice() creates a bounded
+    view for multipart parts. Every open starts at the slice origin, so retries
+    rewind for free by re-opening.
+
+    Path-backed sources capture a stat snapshot at creation and validate it on
+    every deferred open: a file that changed while the transfer was queued fails
+    cleanly instead of uploading bytes that no longer match the advertised size
+    and the content hash computed up front.
+    """
+
+    def __init__(
+        self,
+        *,
+        path: Optional[str] = None,
+        data: Optional[bytes] = None,
+        offset: int = 0,
+        size: Optional[int] = None,
+        snapshot: Optional[Tuple[int, int, int, int]] = None,
+    ):
+        assert (path is None) != (data is None)
+        self._path = path
+        self._data = data
+        self._offset = offset
+        if snapshot is None and path is not None:
+            snapshot = _stat_snapshot(os.stat(path))
+        self._snapshot = snapshot
+        # size=None means "the whole content"; slices always carry an explicit size.
+        self._is_slice = size is not None
+        if size is not None:
+            self._size = size
+        elif data is not None:
+            self._size = len(data)
+        else:
+            assert snapshot is not None
+            self._size = snapshot[0]
+
+    @classmethod
+    def from_path(cls, path: str) -> "_WriteSource":
+        return cls(path=path)
+
+    @classmethod
+    def from_open_file(cls, path: str, f: BinaryIO) -> "_WriteSource":
+        """Path-backed source whose snapshot is taken from an already-open handle.
+
+        Lets a caller that just hashed the file bind the source to the exact
+        state it hashed, with no stat-after-hash window.
+        """
+        return cls(path=path, snapshot=_stat_snapshot(os.fstat(f.fileno())))
+
+    @classmethod
+    def from_bytes(cls, data: bytes) -> "_WriteSource":
+        return cls(data=data)
+
+    @property
+    def size(self) -> int:
+        return self._size
+
+    def slice(self, offset: int, length: int) -> "_WriteSource":
+        length = max(0, min(length, self._size - offset))
+        return _WriteSource(path=self._path, data=self._data, offset=self._offset + offset, size=length, snapshot=self._snapshot)
+
+    def ensure_unchanged(self) -> None:
+        """Re-stat a path-backed source and fail if it changed since the snapshot.
+
+        For transfers that complete without ever opening the source (e.g. a
+        server-side zero-byte write), this is the only change check that runs.
+        """
+        if self._path is None or self._snapshot is None:
+            return
+        if _stat_snapshot(os.stat(self._path)) != self._snapshot:
+            raise StorageOperationError(
+                f"Source file {self._path} changed while the upload was queued; "
+                f"aborting so the stored content hash matches the uploaded bytes"
+            )
+
+    def _open_validated(self) -> BinaryIO:
+        """Open the backing file, verify it still matches the snapshot, seek to the slice origin."""
+        assert self._path is not None
+        f = open(self._path, "rb")
+        try:
+            if self._snapshot is not None and _stat_snapshot(os.fstat(f.fileno())) != self._snapshot:
+                raise StorageOperationError(
+                    f"Source file {self._path} changed while the upload was queued; "
+                    f"aborting so the stored content hash matches the uploaded bytes"
+                )
+            if self._offset:
+                f.seek(self._offset)
+        except BaseException:
+            f.close()
+            raise
+        return f
+
+    @contextmanager
+    def open(self) -> Iterator[BinaryIO]:
+        """Open the content for reading, positioned at the slice origin.
+
+        Path-backed sources open the local file — call only while holding a
+        transfer slot. Reads on a sliced source are not bounded to the slice
+        length; use read_bytes() for slices.
+        """
+        if self._data is not None:
+            yield io.BytesIO(self._data[self._offset : self._offset + self._size])
+            return
+        f = self._open_validated()
+        try:
+            yield f
+        finally:
+            f.close()
+
+    def read_bytes(self) -> bytes:
+        """The (possibly sliced) content as bytes — call only while holding a transfer slot."""
+        if self._data is not None:
+            return self._data[self._offset : self._offset + self._size]
+        f = self._open_validated()
+        try:
+            return f.read(self._size)
+        finally:
+            f.close()
+
+    @contextmanager
+    def open_payload(self) -> Iterator[Union[bytes, BinaryIO]]:
+        """The content as an aiohttp request body — call only while holding a transfer slot.
+
+        Bytes-backed sources yield the bytes (wire-identical to the pre-OMPE-74369
+        behavior). A path-backed whole file yields the open file object, which
+        aiohttp streams with a Content-Length derived via fstat (no chunked
+        transfer-encoding, as presigned URLs require). A path-backed slice yields
+        bytes bounded by the slice length, because fstat on the raw file object
+        would report the wrong size.
+        """
+        if self._data is not None or self._is_slice:
+            yield self.read_bytes()
+            return
+        f = self._open_validated()
+        try:
+            yield f
+        finally:
+            f.close()
+
+
+class _HashingPayloadReader(io.BufferedIOBase):
+    """File-object request body that hashes the bytes aiohttp actually reads.
+
+    Delegates fileno()/seek()/tell() so aiohttp still derives Content-Length via
+    fstat and sends a non-chunked body. The hash is only usable if the body was
+    read sequentially from position 0; any other access pattern flags it invalid
+    and the upload then stores no hash rather than a possibly-wrong one.
+
+    Deliberately does NOT expose the wrapped file's .name: this keeps the
+    request headers identical to the historical bytes body
+    (application/octet-stream, no Content-Disposition) instead of a MIME type
+    guessed from the local filename — headers a presigned signature may not
+    cover.
+    """
+
+    def __init__(self, f: BinaryIO):
+        self._f = f
+        self.hasher = IncrementalNucleusHasher()
+        self._expected_pos = f.tell()
+        if self._expected_pos != 0:
+            self.hasher.invalidate()
+
+    def read(self, size: Optional[int] = -1) -> bytes:
+        pos = self._f.tell()
+        data = self._f.read(-1 if size is None else size)
+        if pos != self._expected_pos:
+            self.hasher.invalidate()
+        elif data:
+            self.hasher.update(data)
+            self._expected_pos = pos + len(data)
+        return data
+
+    def readable(self) -> bool:
+        return True
+
+    def seekable(self) -> bool:
+        return True
+
+    def seek(self, offset: int, whence: int = io.SEEK_SET) -> int:
+        result = self._f.seek(offset, whence)
+        if result != self._expected_pos:
+            self.hasher.invalidate()
+        return result
+
+    def tell(self) -> int:
+        return self._f.tell()
+
+    def fileno(self) -> int:
+        return self._f.fileno()
 
 
 class _AuthFailed(Exception):
@@ -424,6 +663,9 @@ class StorageAPIStorage(StorageInterface):
     async def get_cached_file_async(self, file_url: str, download: bool = True) -> Tuple[Result, Optional[LocalReadOnlyFile]]:
         raise NotImplementedError
 
+    def is_case_sensitive(self, url: str) -> bool:
+        return False
+
     def can_be_cached(self, url: str) -> bool:
         return False
 
@@ -465,6 +707,12 @@ class StorageAPIStorageGRPC(StorageAPIStorage):
         Optional per-service API version pins (for example ``v1alpha`` or
         ``v1beta``). If set, WRAPP fails fast when that pinned version is not
         advertised by the server.
+    ``WRAPP_STORAGE_API_DISABLE_ENUMERATE``
+        Disable the Storage API ``Enumerate`` tree-walk path and fall back to
+        recursive ``ListStat`` traversal.
+    ``WRAPP_STORAGE_API_READ_RETRIES``, ``WRAPP_STORAGE_API_METADATA_RETRIES``
+        Number of attempts for retryable read-side gRPC calls, including
+        streams, and metadata gRPC calls (default ``3``).
 
     **URL routing**
 
@@ -488,13 +736,23 @@ class StorageAPIStorageGRPC(StorageAPIStorage):
         wrapp_version: str,
         debug_level: bool,
         throttling_params: ThrottlingParameters,
-        use_enumerate=False,
+        use_enumerate: Optional[bool] = None,
         wrapp_config: Optional[WrappConfig] = None,
+        backend_config: Optional[StorageAPIBackendConfig] = None,
     ):
         self._wrapp_version = wrapp_version
         self._debug_level = debug_level
-        self._endpoint = os.getenv("WRAPP_STORAGE_API_GRPC_ADDRESS", "")
-        discovery_env = os.getenv("WRAPP_STORAGE_API_DISCOVERY_URL", "")
+        # ``default`` is the instance configured by the global WRAPP_STORAGE_API_*
+        # env vars; a named instance (backend_config is not None) is configured
+        # purely from its [storage_api.<name>] wrapp.toml table, with no env-var
+        # fallback for its endpoint/discovery URL.
+        self._name = backend_config.name if backend_config is not None else DEFAULT_STORAGE_API_BACKEND_NAME
+        if backend_config is None:
+            self._endpoint = os.getenv("WRAPP_STORAGE_API_GRPC_ADDRESS", "")
+            discovery_env = os.getenv("WRAPP_STORAGE_API_DISCOVERY_URL", "")
+        else:
+            self._endpoint = ""
+            discovery_env = ""
         self._discovery_url = self._normalize_discovery_url(discovery_env)
         self._interactive_fallback = False
         self._channel: Optional[grpc.aio.Channel] = None
@@ -502,7 +760,18 @@ class StorageAPIStorageGRPC(StorageAPIStorage):
         self._filefolder_api: Any = None
         self._capability_api: Any = None
         self._metadata_api: Any = None
-        self._use_enumerate = use_enumerate
+        # Production uses Enumerate by default; opt out per-process via env.
+        # Tests pass an explicit bool to pin behavior regardless of env state.
+        if use_enumerate is None:
+            disable_enumerate = self._parse_bool_env(_DISABLE_ENUMERATE_ENV_VAR, False)
+            self._use_enumerate = not disable_enumerate
+            if disable_enumerate:
+                logger.info(
+                    "StorageAPI Enumerate disabled by %s; falling back to recursive ListStat traversal",
+                    _DISABLE_ENUMERATE_ENV_VAR,
+                )
+        else:
+            self._use_enumerate = use_enumerate
         self._top_level_addresses: Optional[List[str]] = None
         self._routes: Optional[List[str]] = None
         self._route_regexes: Optional[List[re.Pattern]] = None
@@ -543,64 +812,118 @@ class StorageAPIStorageGRPC(StorageAPIStorage):
             _DEFAULT_STORAGEAPI_DOWNLOAD_RANGE_MAX_CONCURRENCY,
             legacy_env_var=_LEGACY_DOWNLOAD_RANGE_MAX_CONCURRENCY_ENV_VAR,
         )
+        self._metadata_disabled = self._parse_bool_env(_DISABLE_METADATA_ENV_VAR, False)
+        self._metadata_max_attempts = self._parse_positive_int_env(_METADATA_RETRIES_ENV_VAR, 3)
+        self._read_max_attempts = self._parse_positive_int_env(_READ_RETRIES_ENV_VAR, 3)
         # Use throttling_params for throttler initialization
         self._throttler_roundtrip = TaskThrottler(ThrottlerType.ServerRoundTrip, "StorageAPI", throttling_params.jobs)
         self._throttler_networkdata = TaskThrottler(ThrottlerType.NetworkDataTransfer, "StorageAPI", throttling_params.file_transfer_jobs)
         self._throttler_serverdata = TaskThrottler(ThrottlerType.LongRunningServerOp, "StorageAPI", throttling_params.jobs)
 
-        self._apply_wrapp_config(wrapp_config, discovery_env=discovery_env)
+        if backend_config is None:
+            # Default instance: apply [storage_api.default] with env precedence.
+            if wrapp_config is None:
+                wrapp_config = load_wrapp_config()
+            self._apply_backend_config(
+                wrapp_config.default_storage_api,
+                source_path=wrapp_config.source_path,
+                discovery_env=discovery_env,
+            )
+        else:
+            # Named instance: apply its own table (discovery_env is "" so the
+            # table's discovery_url is adopted, not overridden by env).
+            self._apply_backend_config(
+                backend_config,
+                source_path=wrapp_config.source_path if wrapp_config is not None else None,
+                discovery_env=discovery_env,
+            )
 
-    def _apply_wrapp_config(self, wrapp_config: Optional[WrappConfig], *, discovery_env: str) -> None:
-        """Apply ``wrapp.toml`` overrides on top of env-var configuration.
+    def _apply_backend_config(
+        self,
+        backend: Optional[StorageAPIBackendConfig],
+        *,
+        source_path: Optional[object],
+        discovery_env: str,
+    ) -> None:
+        """Apply a single ``[storage_api.<name>]`` table on top of any env-var
+        configuration for this instance.
 
-        Precedence: env vars > wrapp.toml > built-in defaults. When both an
-        env var and a TOML value are set for ``discovery_url`` and they
-        disagree, the env var wins and a WARNING is emitted naming the TOML
-        source path so that the override is never silent.
+        Precedence (default instance only): env vars > wrapp.toml > built-in
+        defaults. When both an env var and a TOML value are set for
+        ``discovery_url`` and they disagree, the env var wins and a WARNING is
+        emitted naming the TOML source path so that the override is never
+        silent. Named instances pass ``discovery_env=""`` and therefore always
+        adopt their table's ``discovery_url``.
         """
-        if wrapp_config is None:
-            wrapp_config = load_wrapp_config()
-        backend = wrapp_config.default_storage_api
         if backend is None:
             return
 
-        source = wrapp_config.source_path
+        source = source_path
+        label = f"[storage_api.{self._name}]"
         if backend.discovery_url:
             toml_url = self._normalize_discovery_url(backend.discovery_url)
             if discovery_env:
                 if self._discovery_url != toml_url:
                     logger.warning(
-                        "wrapp config %s sets [storage_api.default].discovery_url=%r "
+                        "wrapp config %s sets %s.discovery_url=%r "
                         "but WRAPP_STORAGE_API_DISCOVERY_URL=%r is also set; "
                         "the environment variable wins.",
                         source,
+                        label,
                         toml_url,
                         self._discovery_url,
                     )
             else:
                 logger.info(
-                    "wrapp config %s: using [storage_api.default].discovery_url=%r",
+                    "wrapp config %s: using %s.discovery_url=%r",
                     source,
+                    label,
                     toml_url,
                 )
                 self._discovery_url = toml_url
 
         if backend.routes:
-            patterns = list(backend.routes)
-            self._config_route_overrides = patterns
-            self._config_route_regexes = [self._compile_route_pattern(p) for p in patterns]
-            logger.info(
-                "wrapp config %s: using [storage_api.default].routes (%d pattern(s)) as the authoritative route table; "
-                "any server-advertised routes/TLAs will be logged for diagnostics only.",
-                source,
-                len(patterns),
-            )
+            if not self._endpoint and not self._discovery_url:
+                logger.error(
+                    "wrapp config %s: %s.routes is set but no gRPC endpoint or "
+                    "discovery URL is configured; routes will be ignored.",
+                    source,
+                    label,
+                )
+            else:
+                patterns = list(backend.routes)
+                self._config_route_overrides = patterns
+                self._config_route_regexes = [self._compile_route_pattern(p) for p in patterns]
+                logger.info(
+                    "wrapp config %s: using %s.routes (%d pattern(s)) as the authoritative route table; "
+                    "any server-advertised routes/TLAs will be logged for diagnostics only.",
+                    source,
+                    label,
+                    len(patterns),
+                )
+                # The override is authoritative regardless of whether
+                # discovery later succeeds, so seed the live route table
+                # now.  This makes ``has_known_scope()`` return True from
+                # construction time and lets the Router claim the
+                # configured URLs on the first routing decision.  After a
+                # successful connect,
+                # ``_apply_config_route_overrides_to_scope()`` reasserts
+                # the override on top of whatever ``_fetch_routes``
+                # returned.
+                self._routes = list(patterns)
+                self._route_regexes = list(self._config_route_regexes)
 
     def _apply_config_route_overrides_to_scope(self) -> None:
         """If a route override was loaded from wrapp.toml, install it as the
         authoritative scope. Called after ``_fetch_routes`` /
         ``_fetch_top_level_addresses`` so the server's response is always
-        fetched and logged before being shadowed."""
+        fetched and logged before being shadowed.
+
+        Note: the live route table is already seeded at construction time
+        from the same override (see ``_apply_backend_config``).  This method
+        exists to reassert the override in case ``_fetch_routes`` later
+        overwrote ``_routes`` with what the server advertised.
+        """
         if self._config_route_regexes is None or self._config_route_overrides is None:
             return
         if self._routes is not None and self._routes != self._config_route_overrides:
@@ -657,16 +980,28 @@ class StorageAPIStorageGRPC(StorageAPIStorage):
         return max(1, parsed)
 
     @staticmethod
-    def _is_retryable_write_grpc_error(error: grpc.RpcError) -> bool:
-        if error.code() in _RETRYABLE_WRITE_GRPC_STATUS_CODES:
+    def _is_retryable_grpc_error(error: grpc.RpcError) -> bool:
+        code = error.code()
+        if code in _RETRYABLE_GRPC_STATUS_CODES:
             return True
-        if error.code() != grpc.StatusCode.UNKNOWN:
-            return False
         details = ""
         details_method = getattr(error, "details", None)
         if callable(details_method):
             details = details_method() or ""
-        return "timeout" in details.lower()
+        details_lower = details.lower()
+        if code == grpc.StatusCode.UNKNOWN:
+            return "timeout" in details_lower
+        if code == grpc.StatusCode.INTERNAL:
+            return any(
+                marker in details_lower
+                for marker in (
+                    "connection reset",
+                    "recvmsg",
+                    "rst_stream",
+                    "timeout",
+                )
+            )
+        return False
 
     def _parse_service_version_overrides(self) -> Dict[str, Optional[str]]:
         """Parse and validate per-service version override env vars."""
@@ -828,10 +1163,10 @@ class StorageAPIStorageGRPC(StorageAPIStorage):
         """Ensure gRPC channel and stubs are initialized within an async context."""
         if self._channel is None:
             if self._discovery_url:
-                logger.debug(f"StorageAPI: discovering gRPC endpoint via {self._discovery_url}")
+                logger.debug(f"StorageAPI[{self._name}]: discovering gRPC endpoint via {self._discovery_url}")
                 self._endpoint = await self._discover_storage_endpoint()
-                logger.debug(f"StorageAPI: discovered gRPC endpoint: {self._endpoint}")
-            logger.debug(f"StorageAPI: creating gRPC channel to {self._endpoint}")
+                logger.debug(f"StorageAPI[{self._name}]: discovered gRPC endpoint: {self._endpoint}")
+            logger.debug(f"StorageAPI[{self._name}]: creating gRPC channel to {self._endpoint}")
             channel = self._create_grpc_channel(self._endpoint)
             self._channel = channel
             try:
@@ -944,28 +1279,47 @@ class StorageAPIStorageGRPC(StorageAPIStorage):
         self._filefolder_api = _FF_GRPC[ff_ver].FileFolderServiceStub(self._channel)
 
         # Metadata (optional -- not all servers expose this service)
-        md_versions = available.get("metadata", [])
-        md_candidates = _selection_order("metadata")
-        md_ver = next((v for v in md_candidates if v in md_versions), None)
-        if md_ver:
-            self._metadata_version = md_ver
-            self._metadata_msgs = _MD_PB2[md_ver]
-            self._metadata_api = _MD_GRPC[md_ver].MetadataServiceStub(self._channel)
-        else:
-            md_override = self._service_version_overrides.get("metadata")
-            if md_override:
-                raise StorageInitializationError(
-                    "Storage API version override "
-                    f"{_STORAGE_API_VERSION_ENV_VARS['metadata']}={md_override!r} is not available "
-                    f"(server advertised metadata: {md_versions})."
-                )
+        md_ver: Optional[str] = None
+        if self._metadata_disabled:
+            # Client-side opt-out: skip stubbing the Metadata service even when
+            # the server advertises it, so subsequent writes don't trigger
+            # best-effort UpdateMetadata calls (useful when the metadata
+            # service is unhealthy or for benchmarks where the side-channel
+            # would dominate latency).
+            logger.info(
+                "StorageAPI metadata service disabled by %s",
+                _DISABLE_METADATA_ENV_VAR,
+            )
             self._metadata_version = None
             self._metadata_msgs = None
             self._metadata_api = None
+        else:
+            md_versions = available.get("metadata", [])
+            md_candidates = _selection_order("metadata")
+            md_ver = next((v for v in md_candidates if v in md_versions), None)
+            if md_ver:
+                self._metadata_version = md_ver
+                self._metadata_msgs = _MD_PB2[md_ver]
+                self._metadata_api = _MD_GRPC[md_ver].MetadataServiceStub(self._channel)
+            else:
+                md_override = self._service_version_overrides.get("metadata")
+                if md_override:
+                    raise StorageInitializationError(
+                        "Storage API version override "
+                        f"{_STORAGE_API_VERSION_ENV_VARS['metadata']}={md_override!r} is not available "
+                        f"(server advertised metadata: {md_versions})."
+                    )
+                self._metadata_version = None
+                self._metadata_msgs = None
+                self._metadata_api = None
 
+        if self._metadata_disabled:
+            md_status = "disabled"
+        else:
+            md_status = md_ver or "unavailable"
         logger.info(
             f"StorageAPI negotiated versions: capabilities={cap_version}, "
-            f"fileobject={fo_ver}, filefolder={ff_ver}, metadata={md_ver or 'unavailable'}"
+            f"fileobject={fo_ver}, filefolder={ff_ver}, metadata={md_status}"
         )
 
     @staticmethod
@@ -993,8 +1347,8 @@ class StorageAPIStorageGRPC(StorageAPIStorage):
             logger.debug("ListRoutes requires v1alpha CapabilitiesService, skipping")
             return False
         try:
-            response = await self._run_grpc(
-                self._throttler_roundtrip,
+            response = await self._run_control_grpc_with_retries(
+                "ListRoutes",
                 self._capability_api.ListRoutes,
                 self._capabilities_msgs.ListRoutesRequest(),
             )
@@ -1004,7 +1358,7 @@ class StorageAPIStorageGRPC(StorageAPIStorage):
                 return False
             self._routes = patterns
             self._route_regexes = [self._compile_route_pattern(p) for p in patterns]
-            logger.info(f"StorageAPI routes: {self._routes}")
+            logger.info(f"StorageAPI[{self._name}] routes: {self._routes}")
             return True
         except grpc.RpcError as e:
             if e.code() == grpc.StatusCode.UNIMPLEMENTED:
@@ -1049,13 +1403,13 @@ class StorageAPIStorageGRPC(StorageAPIStorage):
     async def _fetch_top_level_addresses(self):
         """Cache the address spaces this server serves (for URL routing)."""
         try:
-            response = await self._run_grpc(
-                self._throttler_roundtrip,
+            response = await self._run_control_grpc_with_retries(
+                "ListTopLevelAddresses",
                 self._capability_api.ListTopLevelAddresses,
                 self._capabilities_msgs.ListTopLevelAddressesRequest(),
             )
             self._top_level_addresses = [entry.top_level_address.rstrip("/") for entry in response.items]
-            logger.info(f"StorageAPI top-level addresses: {self._top_level_addresses}")
+            logger.info(f"StorageAPI[{self._name}] top-level addresses: {self._top_level_addresses}")
         except Exception as e:
             logger.warning(f"Failed to fetch top-level addresses, URL routing will use catch-all: {e}")
             self._top_level_addresses = None
@@ -1848,6 +2202,171 @@ class StorageAPIStorageGRPC(StorageAPIStorage):
             await self._channel.close()
             self._channel = None
 
+    async def _run_metadata_grpc_with_retries(
+        self,
+        op_label: str,
+        grpc_method: Callable[..., Awaitable[Any]],
+        request: Any,
+    ) -> Any:
+        """Run a Metadata-service gRPC call with retries.
+
+        Mirrors ``write_file_content``'s retry policy
+        (``_RETRYABLE_GRPC_STATUS_CODES`` with 1s/2s/4s exponential
+        backoff) so transient ``UNAVAILABLE`` / upstream-timeout responses
+        don't leave the data write looking healthy while the metadata
+        side-channel silently drops on the first try. Number of attempts is
+        tunable via ``WRAPP_STORAGE_API_METADATA_RETRIES`` (default 3).
+
+        Returns the gRPC response on success. Raises ``grpc.RpcError`` if all
+        attempts are exhausted or a non-retryable code is received; callers
+        decide whether to swallow or surface that.
+        """
+        max_attempts = self._metadata_max_attempts
+        base_delay = 1.0
+        method_name = getattr(grpc_method, "_method", None) or getattr(grpc_method, "__name__", "metadata")
+        for attempt in range(1, max_attempts + 1):
+            try:
+                return await self._run_grpc(self._throttler_roundtrip, grpc_method, request)
+            except grpc.RpcError as e:
+                if attempt == max_attempts or not self._is_retryable_grpc_error(e):
+                    raise
+                delay = base_delay * (2 ** (attempt - 1))
+                # Per-attempt retries are routine on a transient blip; only
+                # the final-give-up path stays a WARNING. Use info so a
+                # successful retry doesn't look like an error.
+                logger.info(
+                    "[%s] metadata %s attempt %d/%d failed: %s. Retrying in %.1fs...",
+                    op_label,
+                    method_name,
+                    attempt,
+                    max_attempts,
+                    e,
+                    delay,
+                )
+                Stats.get().increment(StatType.GRPC_RETRY)
+                await asyncio.sleep(delay)
+        raise AssertionError("metadata retry loop exited without returning or raising")
+
+    async def _run_read_grpc_with_retries(
+        self,
+        op_label: str,
+        grpc_method: Callable[..., Awaitable[Any]],
+        request: Any,
+    ) -> Any:
+        """Run a read-side gRPC call with retries for transient proxy/backend timeouts."""
+        max_attempts = self._read_max_attempts
+        base_delay = 1.0
+        method_name = getattr(grpc_method, "_method", None) or getattr(grpc_method, "__name__", "read")
+        for attempt in range(1, max_attempts + 1):
+            try:
+                return await self._run_grpc(self._throttler_roundtrip, grpc_method, request)
+            except grpc.RpcError as e:
+                if attempt == max_attempts or not self._is_retryable_grpc_error(e):
+                    raise
+                delay = base_delay * (2 ** (attempt - 1))
+                logger.info(
+                    "[%s] read %s attempt %d/%d failed: %s. Retrying in %.1fs...",
+                    op_label,
+                    method_name,
+                    attempt,
+                    max_attempts,
+                    e,
+                    delay,
+                )
+                Stats.get().increment(StatType.GRPC_RETRY)
+                await asyncio.sleep(delay)
+        raise AssertionError("read retry loop exited without returning or raising")
+
+    async def _run_control_grpc_with_retries(
+        self,
+        op_label: str,
+        grpc_method: Callable[..., Awaitable[Any]],
+        request: Any,
+    ) -> Any:
+        """Run a read-only control-plane gRPC call with retries."""
+        max_attempts = self._read_max_attempts
+        base_delay = 1.0
+        method_name = getattr(grpc_method, "_method", None) or getattr(grpc_method, "__name__", "control")
+        for attempt in range(1, max_attempts + 1):
+            try:
+                return await self._run_grpc(self._throttler_roundtrip, grpc_method, request)
+            except grpc.RpcError as e:
+                if attempt == max_attempts or not self._is_retryable_grpc_error(e):
+                    raise
+                delay = base_delay * (2 ** (attempt - 1))
+                logger.info(
+                    "[%s] control %s attempt %d/%d failed: %s. Retrying in %.1fs...",
+                    op_label,
+                    method_name,
+                    attempt,
+                    max_attempts,
+                    e,
+                    delay,
+                )
+                Stats.get().increment(StatType.GRPC_RETRY)
+                await asyncio.sleep(delay)
+        raise AssertionError("control retry loop exited without returning or raising")
+
+    async def _run_read_operation_with_retries(
+        self,
+        op_label: str,
+        operation: Callable[[], Awaitable[_TaskReturnType]],
+        *,
+        on_retry: Optional[Callable[[], Awaitable[None]]] = None,
+    ) -> _TaskReturnType:
+        """Run a read-side operation with retries for retryable gRPC stream failures."""
+        max_attempts = self._read_max_attempts
+        base_delay = 1.0
+        for attempt in range(1, max_attempts + 1):
+            try:
+                return await operation()
+            except grpc.RpcError as e:
+                if attempt == max_attempts or not self._is_retryable_grpc_error(e):
+                    raise
+                if on_retry is not None:
+                    await on_retry()
+                delay = base_delay * (2 ** (attempt - 1))
+                logger.info(
+                    "[%s] read stream attempt %d/%d failed: %s. Retrying in %.1fs...",
+                    op_label,
+                    attempt,
+                    max_attempts,
+                    e,
+                    delay,
+                )
+                Stats.get().increment(StatType.GRPC_RETRY)
+                await asyncio.sleep(delay)
+        raise AssertionError("read operation retry loop exited without returning or raising")
+
+    async def _sleep_before_grpc_stream_retry(
+        self,
+        op_label: str,
+        method_name: str,
+        attempt: int,
+        max_attempts: int,
+        error: grpc.RpcError,
+    ) -> bool:
+        """Sleep before retrying a restartable gRPC stream.
+
+        List-like Storage API streams do not expose resume tokens, so callers
+        restart from the beginning and dedupe entries they already yielded.
+        """
+        if attempt == max_attempts or not self._is_retryable_grpc_error(error):
+            return False
+        delay = 1.0 * (2 ** (attempt - 1))
+        logger.info(
+            "[%s] %s stream attempt %d/%d failed: %s. Retrying in %.1fs...",
+            op_label,
+            method_name,
+            attempt,
+            max_attempts,
+            error,
+            delay,
+        )
+        Stats.get().increment(StatType.GRPC_RETRY)
+        await asyncio.sleep(delay)
+        return True
+
     async def _get_nucleus_hash(self, resource_address: str) -> Optional[str]:
         """Retrieve the stored nucleus hash for a resource via the Metadata API.
 
@@ -1856,9 +2375,10 @@ class StorageAPIStorageGRPC(StorageAPIStorage):
         """
         if not self._metadata_api or not self._metadata_msgs:
             return None
+        Stats.get().increment(StatType.GET_METADATA_ASYNC)
         try:
-            response = await self._run_grpc(
-                self._throttler_roundtrip,
+            response = await self._run_metadata_grpc_with_retries(
+                resource_address,
                 self._metadata_api.GetMetadata,
                 self._metadata_msgs.GetMetadataRequest(
                     uri=_encode_resource_address_for_storage_service(resource_address),
@@ -1879,9 +2399,10 @@ class StorageAPIStorageGRPC(StorageAPIStorage):
         """Store the nucleus hash for a resource via the Metadata API (best-effort)."""
         if not self._metadata_api or not self._metadata_msgs:
             return
+        Stats.get().increment(StatType.SET_METADATA_ASYNC)
         try:
-            await self._run_grpc(
-                self._throttler_roundtrip,
+            await self._run_metadata_grpc_with_retries(
+                resource_address,
                 self._metadata_api.UpdateMetadata,
                 self._metadata_msgs.UpdateMetadataRequest(
                     uri=_encode_resource_address_for_storage_service(resource_address),
@@ -1891,6 +2412,35 @@ class StorageAPIStorageGRPC(StorageAPIStorage):
             )
         except grpc.RpcError as e:
             logger.warning("Failed to store nucleus hash metadata for %s: %s", resource_address, e)
+
+    async def _delete_nucleus_hash(self, resource_address: str) -> None:
+        """Remove any stored nucleus hash for a resource via the Metadata API (best-effort).
+
+        Used when an upload cannot provide a trustworthy hash: on overwrite the
+        destination may still carry the previous object's hash, which must not
+        be left describing the new content.
+
+        Benign race: a retried/delayed delete can remove a hash that a newer
+        concurrent upload to the same address just wrote. That leaves the hash
+        missing — re-derivable, never incorrect — which matches this method's
+        semantics.
+        """
+        if not self._metadata_api or not self._metadata_msgs:
+            return
+        Stats.get().increment(StatType.DELETE_METADATA_ASYNC)
+        try:
+            await self._run_metadata_grpc_with_retries(
+                resource_address,
+                self._metadata_api.DeleteMetadata,
+                self._metadata_msgs.DeleteMetadataRequest(
+                    uri=_encode_resource_address_for_storage_service(resource_address),
+                    user_metadata_key=NUCLEUS_HASH_METADATA_KEY,
+                ),
+            )
+        except grpc.RpcError as e:
+            if e.code() in (grpc.StatusCode.NOT_FOUND, grpc.StatusCode.UNIMPLEMENTED):
+                return
+            logger.warning("Failed to delete nucleus hash metadata for %s: %s", resource_address, e)
 
     @property
     def has_metadata_support(self) -> bool:
@@ -1936,10 +2486,25 @@ class StorageAPIStorageGRPC(StorageAPIStorage):
         return result
 
     async def make_resource_identity(self, file_url, item: ListEntry, relative_url) -> Tuple[str, str, storage_interface.ResourceIdentity]:
-        if isinstance(item, StorageAPIListEntry) and item._resource_identity:
+        if not isinstance(item, StorageAPIListEntry):
+            raise TypeError("Can only generate ResourceIdentity for StorageAPI list entries")
+        if item._resource_identity:
             return file_url, relative_url, StorageAPIResourceIdentity(item._resource_identity)
-        else:
-            raise TypeError("Can only generate ResourceIdentity for StorageAPI list entries with resource_identity")
+        # AddressInfo protos from Enumerate do not carry identities. Most
+        # list_file_tree callers receive entries already classified and
+        # identity-patched, but keep this fallback for older direct callers
+        # and tests that construct StorageAPIListEntry objects manually.
+        Stats.get().increment(StatType.STAT)
+        result, stat_item = await self.stat(file_url)
+        if result != Result.OK or not isinstance(stat_item, StorageAPIListEntry) or not stat_item._resource_identity:
+            raise TypeError(
+                f"Cannot generate ResourceIdentity for {file_url}: stat returned result={result}, "
+                f"resource_identity={getattr(stat_item, '_resource_identity', None)!r}"
+            )
+        item._resource_identity = stat_item._resource_identity
+        if stat_item.nucleus_hash and not item.nucleus_hash:
+            item.nucleus_hash = stat_item.nucleus_hash
+        return file_url, relative_url, StorageAPIResourceIdentity(stat_item._resource_identity)
 
     async def stat(self, url: str) -> Tuple[Result, Optional[ListEntry]]:
         await self._ensure_grpc_stubs()
@@ -1947,8 +2512,8 @@ class StorageAPIStorageGRPC(StorageAPIStorage):
             raise StorageOperationError("Failed to initialize Storage API backend!")
         resource_address = await self._sanitize_address_for_storage_service(url)
         try:
-            stat_coro = self._run_grpc(
-                self._throttler_roundtrip,
+            stat_coro = self._run_read_grpc_with_retries(
+                resource_address,
                 self._fileobject_api.Stat,
                 self._fileobject_msgs.StatRequest(resource_address=_encode_resource_address_for_storage_service(resource_address)),
             )
@@ -2003,68 +2568,164 @@ class StorageAPIStorageGRPC(StorageAPIStorage):
             else:
                 raise StorageOperationError(f"Failure to check for folder by calling list on {url}: {str(e)}")
 
+    async def _list_entry_from_enumerate_address(
+        self,
+        resource_address: str,
+        relative_resource_address: str,
+        metadata: Optional[Any],
+    ) -> Optional[StorageAPIListEntry]:
+        normalized_relative = relative_resource_address.rstrip("/\\")
+        if not normalized_relative:
+            return None
+        if relative_resource_address.endswith(("/", "\\")):
+            return StorageAPIListEntry(normalized_relative, None, None, None, is_folder=True)
+
+        result, stat_item = await self.stat(resource_address)
+        if result != Result.OK or not isinstance(stat_item, StorageAPIListEntry):
+            raise StorageOperationError(
+                f"Cannot classify Enumerate entry {resource_address}: stat returned result={result}, item={stat_item!r}"
+            )
+        if stat_item.is_folder:
+            return StorageAPIListEntry(normalized_relative, None, None, None, is_folder=True)
+        if not stat_item._resource_identity:
+            raise StorageOperationError(f"Cannot classify Enumerate file entry {resource_address}: stat returned no resource identity")
+
+        size = stat_item.size
+        metadata_size = self._metadata_data_object_size(metadata)
+        if size is None and metadata_size is not None:
+            size = metadata_size
+        modification_time = stat_item.modified_time
+        metadata_modification_time = self._metadata_last_modified_time(metadata)
+        if modification_time is None and metadata_modification_time is not None:
+            modification_time = metadata_modification_time
+        entry = StorageAPIListEntry(
+            resource_address=normalized_relative,
+            resource_identity=stat_item._resource_identity,
+            size=size,
+            modification_time=modification_time,
+            is_folder=False,
+        )
+        if stat_item.nucleus_hash:
+            entry.nucleus_hash = stat_item.nucleus_hash
+        return entry
+
     async def list_file_tree(self, url: str) -> AsyncGenerator[ListEntry, None]:
         await self._ensure_grpc_stubs()
         if not self._fileobject_api:
             raise StorageOperationError("Failed to initialize Storage API backend!")
         resource_address = await self._sanitize_address_for_storage_service(url)
-        try:
-            enumerate_response = self._iterate_grpc(
-                self._throttler_roundtrip,
-                self._fileobject_api.Enumerate,
-                self._fileobject_msgs.EnumerateRequest(resource_address=_encode_resource_address_for_storage_service(resource_address)),
-            )
+        # Anchor the prefix with a trailing slash. The server treats
+        # EnumerateRequest.resource_address as a string prefix, so a request
+        # for ".../foo" would also pull in sibling ".../foo-2/..." entries.
+        # Always end the prefix in '/' to scope to the intended subtree.
+        prefix = resource_address.rstrip("/") + "/"
+        encoded_prefix = _encode_resource_address_for_storage_service(prefix)
+        max_attempts = self._read_max_attempts
+        seen_entries: set[tuple[str, str]] = set()
+        yielded_folder_paths: set[str] = set()
+        for attempt in range(1, max_attempts + 1):
+            try:
+                enumerate_response = self._iterate_grpc(
+                    self._throttler_serverdata,
+                    self._fileobject_api.Enumerate,
+                    self._fileobject_msgs.EnumerateRequest(resource_address=encoded_prefix),
+                )
 
-            # Handle response synchronously and yield results asynchronously
-            async for results in enumerate_response:
-                for entry in results.items:
-                    entry_resource_address = entry.resource_address
-                    if not urllib.parse.urlsplit(entry_resource_address).scheme:
-                        relative_entry_address = entry_resource_address.lstrip("/\\")
-                        entry_resource_address = f"{resource_address.rstrip('/')}/{relative_entry_address}"
-                    # TODO This will go away with the newer Storage API, which will not return folders from Enumerate (?)
-                    op_result, is_folder = await self.is_folder(entry_resource_address)
-                    if op_result != Result.OK:
-                        raise StorageOperationError(f"Can't determine type of file for address {entry.resource_address}: {op_result}")
-                    if not is_folder:
-                        yield StorageAPIListEntry(
-                            resource_address=StorageAPIListEntry.relative_resource_address(resource_address, entry_resource_address),
-                            resource_identity=None,
-                            size=None,
-                            modification_time=None,
-                            is_folder=False,
+                async for results in enumerate_response:
+                    for entry in results.items:
+                        raw_entry_resource_address = entry.resource_address
+                        entry_resource_address = _decode_resource_address_from_storage_service(raw_entry_resource_address)
+                        if not urllib.parse.urlsplit(entry_resource_address).scheme:
+                            relative_entry_address = entry_resource_address.lstrip("/\\")
+                            entry_resource_address = f"{prefix.rstrip('/')}/{relative_entry_address}"
+                            relative_resource_address = relative_entry_address
+                        else:
+                            relative_resource_address = StorageAPIListEntry.relative_resource_address(prefix, raw_entry_resource_address)
+                        normalized_relative = relative_resource_address.rstrip("/\\")
+                        if not normalized_relative:
+                            continue
+                        entry_item = await self._list_entry_from_enumerate_address(
+                            entry_resource_address,
+                            relative_resource_address,
+                            getattr(entry, "metadata", None),
                         )
-        except grpc.RpcError as e:
-            raise StorageOperationError(f"Error calling list_file_tree: {str(e)}")
+                        if entry_item is None:
+                            continue
+
+                        path_parts = normalized_relative.split("/")
+                        for parent_index in range(1, len(path_parts)):
+                            folder_path = "/".join(path_parts[:parent_index])
+                            if folder_path in yielded_folder_paths:
+                                continue
+                            yielded_folder_paths.add(folder_path)
+                            yield StorageAPIListEntry(folder_path, None, None, None, is_folder=True)
+
+                        entry_kind = "folder" if entry_item.is_folder else "file"
+                        entry_key = (entry_kind, entry_item.relative_path)
+                        if entry_key in seen_entries:
+                            continue
+                        if entry_item.is_folder:
+                            if entry_item.relative_path in yielded_folder_paths:
+                                continue
+                            yielded_folder_paths.add(entry_item.relative_path)
+                        seen_entries.add(entry_key)
+                        yield entry_item
+                return
+            except grpc.RpcError as e:
+                if await self._sleep_before_grpc_stream_retry(prefix, "list_file_tree", attempt, max_attempts, e):
+                    continue
+                if e.code() == grpc.StatusCode.NOT_FOUND:
+                    # The Enumerate RPC reports a missing prefix (e.g. a package with no .metadata folder) as NOT_FOUND.
+                    # Surface it as ERROR_NOT_FOUND so callers treat an absent directory as an empty listing, making the
+                    # net behavior uniform across backends: object stores (S3/Azure/GCS) already yield an empty listing
+                    # for a missing prefix, and the local backend raises ERROR_NOT_FOUND the same way.
+                    raise StorageOperationError(f"Error calling list_file_tree: {str(e)}", Result.ERROR_NOT_FOUND) from e
+                raise StorageOperationError(f"Error calling list_file_tree: {str(e)}") from e
+        raise AssertionError("list_file_tree retry loop exited without returning or raising")
 
     async def list_directory(self, url: str) -> AsyncGenerator[ListEntry, None]:
         await self._ensure_grpc_stubs()
         if not self._filefolder_api:
             raise StorageOperationError("Failed to initialize Storage API backend!")
         resource_address = await self._sanitize_address_for_storage_service(url)
-        try:
-            resource_address = resource_address.lstrip("/")
-            logger.info(f"Listing {resource_address}")
-            async for results in self._iterate_grpc(
-                self._throttler_roundtrip,
-                self._filefolder_api.ListStat,
-                self._filefolder_msgs.ListStatRequest(
-                    folder=self._filefolder_msgs.FolderAddress(
-                        uri=_encode_resource_address_for_storage_service(resource_address.rstrip("/"))
-                    )
-                ),
-            ):
-                partial_result = results
-                # First the subfolders
-                for entry in partial_result.subfolder_addresses:
-                    relative_folder_address = StorageAPIListEntry.relative_resource_address(resource_address, entry.uri)
-                    if relative_folder_address:
-                        yield StorageAPIListEntry(relative_folder_address, None, None, None, is_folder=True)
-                # Then the files
-                for file_entry in partial_result.entries:
-                    yield StorageAPIListEntry.from_list_item(resource_address, file_entry)
-        except grpc.RpcError as e:
-            raise StorageOperationError(f"Error calling list_directory: {str(e)}")
+        resource_address = resource_address.lstrip("/")
+        logger.info(f"Listing {resource_address}")
+        request = self._filefolder_msgs.ListStatRequest(
+            folder=self._filefolder_msgs.FolderAddress(uri=_encode_resource_address_for_storage_service(resource_address.rstrip("/")))
+        )
+        seen_entries: set[tuple[str, str]] = set()
+        max_attempts = self._read_max_attempts
+        for attempt in range(1, max_attempts + 1):
+            try:
+                async for results in self._iterate_grpc(
+                    self._throttler_roundtrip,
+                    self._filefolder_api.ListStat,
+                    request,
+                ):
+                    partial_result = results
+                    # First the subfolders
+                    for entry in partial_result.subfolder_addresses:
+                        relative_folder_address = StorageAPIListEntry.relative_resource_address(resource_address, entry.uri)
+                        if relative_folder_address:
+                            key = ("folder", relative_folder_address)
+                            if key in seen_entries:
+                                continue
+                            seen_entries.add(key)
+                            yield StorageAPIListEntry(relative_folder_address, None, None, None, is_folder=True)
+                    # Then the files
+                    for file_entry in partial_result.entries:
+                        list_entry = StorageAPIListEntry.from_list_item(resource_address, file_entry)
+                        key = ("file", list_entry.relative_path)
+                        if key in seen_entries:
+                            continue
+                        seen_entries.add(key)
+                        yield list_entry
+                return
+            except grpc.RpcError as e:
+                if await self._sleep_before_grpc_stream_retry(resource_address, "list_directory", attempt, max_attempts, e):
+                    continue
+                raise StorageOperationError(f"Error calling list_directory: {str(e)}") from e
+        raise AssertionError("list_directory retry loop exited without returning or raising")
 
     async def list_checkpoints(self, url: str) -> Tuple[Result, List[ListEntry]]:
         raise NotImplementedError
@@ -2126,6 +2787,27 @@ class StorageAPIStorageGRPC(StorageAPIStorage):
         return getattr(metadata, "data_object_size", None)
 
     @staticmethod
+    def _metadata_last_modified_time(metadata) -> Optional[datetime]:
+        if metadata is None:
+            return None
+        has_field = getattr(metadata, "HasField", None)
+        if callable(has_field):
+            try:
+                if not has_field("last_modified_timestamp"):
+                    return None
+            except ValueError:
+                return None
+        timestamp = getattr(metadata, "last_modified_timestamp", None)
+        if timestamp is None:
+            return None
+        to_datetime = getattr(timestamp, "ToDatetime", None)
+        if callable(to_datetime):
+            return to_datetime()
+        if isinstance(timestamp, datetime):
+            return timestamp
+        return None
+
+    @staticmethod
     def _parse_content_range_header(content_range: str | None) -> Optional[tuple[int, int, int]]:
         if not content_range:
             return None
@@ -2157,7 +2839,7 @@ class StorageAPIStorageGRPC(StorageAPIStorage):
 
         async def _download():
             nonlocal downloaded_bytes
-            async with session.get(redirect_target_url, headers=headers) as redirected_response:
+            async with session.get(_presigned_url(redirect_target_url), headers=headers) as redirected_response:
                 redirected_response.raise_for_status()
                 with open(file_path, "wb") as f:
                     async for chunk in redirected_response.content.iter_chunked(_STORAGEAPI_DOWNLOAD_CHUNK_SIZE):
@@ -2180,7 +2862,7 @@ class StorageAPIStorageGRPC(StorageAPIStorage):
         probe_headers["Range"] = "bytes=0-0"
 
         async def _probe() -> Optional[int]:
-            async with session.get(redirect_target_url, headers=probe_headers) as response:
+            async with session.get(_presigned_url(redirect_target_url), headers=probe_headers) as response:
                 if response.status != 206:
                     await response.read()
                     return None
@@ -2214,7 +2896,7 @@ class StorageAPIStorageGRPC(StorageAPIStorage):
             range_headers["Range"] = f"bytes={start}-{end}"
 
             async def _download():
-                async with session.get(redirect_target_url, headers=range_headers) as response:
+                async with session.get(_presigned_url(redirect_target_url), headers=range_headers) as response:
                     if response.status != 206:
                         await response.read()
                         raise _RangeDownloadNotSupported(f"Range request {start}-{end} returned HTTP {response.status}, expected 206")
@@ -2279,9 +2961,9 @@ class StorageAPIStorageGRPC(StorageAPIStorage):
         expected_size: Optional[int],
     ) -> None:
         max_attempts = self._parse_positive_int_env(
-            _UPLOAD_RETRIES_ENV_VAR,
+            _DOWNLOAD_RETRIES_ENV_VAR,
             3,
-            legacy_env_var=_LEGACY_UPLOAD_RETRIES_ENV_VAR,
+            legacy_env_var=_LEGACY_DOWNLOAD_RETRIES_ENV_VAR,
         )
         base_delay = 1.0
 
@@ -2314,9 +2996,8 @@ class StorageAPIStorageGRPC(StorageAPIStorage):
                 if attempt == max_attempts:
                     raise
                 delay = base_delay * (2 ** (attempt - 1))
-                logger.warning(
-                    f"[{redirect_target_url}] download attempt {attempt}/{max_attempts} failed: {e}. Retrying in {delay:.1f}s..."
-                )
+                logger.info(f"[{redirect_target_url}] download attempt {attempt}/{max_attempts} failed: {e}. Retrying in {delay:.1f}s...")
+                Stats.get().increment(StatType.GRPC_RETRY)
                 await asyncio.sleep(delay)
 
     async def _download_redirect_to_bytes(
@@ -2351,6 +3032,15 @@ class StorageAPIStorageGRPC(StorageAPIStorage):
         if not self._fileobject_api:
             raise StorageOperationError("Failed to initialize Storage API backend!")
         try:
+            return await self._run_read_operation_with_retries(
+                resource_identity,
+                lambda: self._read_resource_identity_once(resource_identity),
+            )
+        except grpc.RpcError as e:
+            raise StorageOperationError(f"Error calling read: {str(e)}") from e
+
+    async def _read_resource_identity_once(self, resource_identity: str) -> Tuple[Result, bytes]:
+        try:
             data = bytearray()
             expected_size: Optional[int] = None
             async for reply in self._iterate_grpc(
@@ -2383,14 +3073,23 @@ class StorageAPIStorageGRPC(StorageAPIStorage):
                     raise StorageOperationError(f"Unexpected reply {reply}")
             logger.debug("Done downloading via grpc)")
             return Result.OK, bytes(data)
-        except grpc.RpcError as e:
-            raise StorageOperationError(f"Error calling read: {str(e)}") from e
+        except grpc.RpcError:
+            raise
 
     async def read_file_content(self, file_url: str) -> Tuple[Result, bytes]:
         await self._ensure_grpc_stubs()
         if not self._fileobject_api:
             raise StorageOperationError("Failed to initialize Storage API backend!")
         resource_address = await self._sanitize_address_for_storage_service(file_url)
+        try:
+            return await self._run_read_operation_with_retries(
+                resource_address,
+                lambda: self._read_file_content_once(file_url, resource_address),
+            )
+        except grpc.RpcError as e:
+            raise StorageOperationError(f"Error calling read: {str(e)}") from e
+
+    async def _read_file_content_once(self, file_url: str, resource_address: str) -> Tuple[Result, bytes]:
         try:
             data = bytearray()
             expected_size: Optional[int] = None
@@ -2425,90 +3124,168 @@ class StorageAPIStorageGRPC(StorageAPIStorage):
                     raise StorageOperationError(f"Unexpected reply {reply}")
             logger.debug(f"Done downloading via grpc)")
             return Result.OK, bytes(data)
-        except grpc.RpcError as e:
-            raise StorageOperationError(f"Error calling read: {str(e)}")
+        except grpc.RpcError:
+            raise
 
     async def _download_to_file(self, src_url: str, file_path: str) -> Result:
         await self._ensure_grpc_stubs()
         if not self._fileobject_api:
             raise StorageOperationError("Failed to initialize Storage API backend!")
         resource_address = await self._sanitize_address_for_storage_service(src_url)
-        expected_size: Optional[int] = None
-        downloaded_bytes = 0
-        dst_file = None
-        try:
-            async for reply in self._iterate_grpc(
-                self._throttler_networkdata,
-                self._fileobject_api.ReadFromAddress,
-                self._fileobject_msgs.ReadFromAddressRequest(
-                    resource_address=_encode_resource_address_for_storage_service(resource_address)
-                ),
-            ):
-                if reply.HasField("resource_info"):
-                    metadata = reply.resource_info.metadata
-                    if metadata.HasField("data_object_size"):
-                        expected_size = metadata.data_object_size
-                    logger.debug(f"Found {src_url}, downloading {expected_size if expected_size is not None else 'unknown'} bytes")
-                elif reply.HasField("chunk"):
-                    if dst_file is None:
-                        dst_file = open(file_path, "wb")
-                    chunk_data = reply.chunk.chunk
-                    dst_file.write(chunk_data)
-                    downloaded_bytes += len(chunk_data)
-                elif reply.HasField("redirect"):
-                    if dst_file is not None:
-                        raise StorageOperationError(f"Unexpected redirect message for {src_url} after streaming chunks had started.")
-                    session = await self._ensure_aiohttp_session()
-                    redirect_headers = {header.name: header.value for header in reply.redirect.additional_headers}
-                    try:
-                        await self._download_redirect_to_file(
-                            session=session,
-                            redirect_target_url=reply.redirect.redirect_target_url,
-                            headers=redirect_headers,
-                            file_path=file_path,
-                            expected_size=expected_size,
-                        )
-                    except (aiohttp.ClientError, asyncio.TimeoutError) as e:
-                        raise StorageOperationError(f"{reply.redirect.redirect_target_url} failed to download: {e}") from e
-                    logger.debug("Done downloading from webserver")
-                    return Result.OK
-                else:
-                    raise StorageOperationError(f"Unexpected reply {reply}")
+        attempt_path = f"{file_path}.wrapp-download-{secrets.token_hex(8)}.tmp"
 
-            if dst_file is None:
-                # Represents a valid 0-byte object delivered without chunk messages.
-                with open(file_path, "wb"):
-                    pass
-            logger.debug("Done downloading via grpc")
-            if expected_size is not None and downloaded_bytes != expected_size:
-                logger.warning(
-                    "Downloaded %d bytes for %s via gRPC chunks, metadata reported %d bytes",
-                    downloaded_bytes,
-                    src_url,
-                    expected_size,
-                )
-            return Result.OK
+        async def _download_once_to_temp_file() -> Result:
+            result = await self._download_to_file_once(src_url, attempt_path, resource_address)
+            if result == Result.OK:
+                os.replace(attempt_path, file_path)
+            else:
+                await _remove_partial_download()
+            return result
+
+        async def _remove_partial_download() -> None:
+            try:
+                os.unlink(attempt_path)
+            except FileNotFoundError:
+                pass
+
+        try:
+            return await self._run_read_operation_with_retries(
+                resource_address,
+                _download_once_to_temp_file,
+                on_retry=_remove_partial_download,
+            )
         except grpc.RpcError as e:
+            await _remove_partial_download()
             if e.code() == grpc.StatusCode.NOT_FOUND:
                 return Result.ERROR_NOT_FOUND
             raise StorageOperationError(f"Error calling read: {str(e)}") from e
-        finally:
-            if dst_file is not None:
-                dst_file.close()
+
+    async def _download_to_file_once(self, src_url: str, file_path: str, resource_address: str) -> Result:
+        request = self._fileobject_msgs.ReadFromAddressRequest(
+            resource_address=_encode_resource_address_for_storage_service(resource_address)
+        )
+
+        async def _throttled_grpc_download() -> Tuple[Optional[Any], Optional[int], Result]:
+            """Drain the Read stream under ONE held NetworkDataTransfer slot.
+
+            The RPC is created only after the slot is held (mirroring _iterate_lazy)
+            and the destination is opened lazily on the first chunk, so at most
+            file_transfer_jobs destination files are open at once (OMPE-74369).
+            Nothing in here may re-acquire networkdata: a redirect reply is returned
+            to the caller and handled after the slot is released, because the
+            redirect download acquires its own slots.
+
+            Returns (redirect_reply, expected_size, result); redirect_reply is None
+            when the transfer was handled via gRPC chunks, in which case result is
+            ERROR (as a Result, so the caller's partial-file cleanup runs) when the
+            streamed byte count does not match the declared object size.
+            """
+            expected_size: Optional[int] = None
+            downloaded_bytes = 0
+            dst_file = None
+            grpc_metadata = await self._grpc_metadata()
+            if grpc_metadata:
+                stream = self._fileobject_api.ReadFromAddress(request, metadata=grpc_metadata)
+            else:
+                stream = self._fileobject_api.ReadFromAddress(request)
+            try:
+                async for reply in stream:
+                    if reply.HasField("resource_info"):
+                        metadata = reply.resource_info.metadata
+                        if metadata.HasField("data_object_size"):
+                            expected_size = metadata.data_object_size
+                        logger.debug(f"Found {src_url}, downloading {expected_size if expected_size is not None else 'unknown'} bytes")
+                    elif reply.HasField("chunk"):
+                        if dst_file is None:
+                            dst_file = open(file_path, "wb")
+                        chunk_data = reply.chunk.chunk
+                        dst_file.write(chunk_data)
+                        downloaded_bytes += len(chunk_data)
+                    elif reply.HasField("redirect"):
+                        if dst_file is not None:
+                            raise StorageOperationError(f"Unexpected redirect message for {src_url} after streaming chunks had started.")
+                        return reply, expected_size, Result.OK
+                    else:
+                        raise StorageOperationError(f"Unexpected reply {reply}")
+
+                if dst_file is None:
+                    # Represents a valid 0-byte object delivered without chunk messages.
+                    with open(file_path, "wb"):
+                        pass
+                if expected_size is not None and downloaded_bytes != expected_size:
+                    # A stream that ended cleanly but short (or long) must not be
+                    # reported as a successful download of the declared object.
+                    logger.error(
+                        "Downloaded %d bytes for %s via gRPC chunks, but metadata reported %d bytes; failing the download",
+                        downloaded_bytes,
+                        src_url,
+                        expected_size,
+                    )
+                    return None, expected_size, Result.ERROR
+                logger.debug("Done downloading via grpc")
+                return None, expected_size, Result.OK
+            finally:
+                if dst_file is not None:
+                    dst_file.close()
+                # No-op once the stream completed; stops the RPC when we leave it
+                # early on a redirect reply. (Guarded: test fakes are plain async
+                # generators without cancel().)
+                cancel = getattr(stream, "cancel", None)
+                if cancel is not None:
+                    cancel()
+
+        try:
+            redirect_reply, expected_size, grpc_result = await self._throttler_networkdata.run(_throttled_grpc_download())
+        except grpc.RpcError as e:
+            # Mirror _iterate_grpc's UNAUTHENTICATED handling for the raw stream.
+            if e.code() != grpc.StatusCode.UNAUTHENTICATED or not await self._try_refresh_auth():
+                raise
+            redirect_reply, expected_size, grpc_result = await self._throttler_networkdata.run(_throttled_grpc_download())
+
+        if redirect_reply is None:
+            return grpc_result
+
+        session = await self._ensure_aiohttp_session()
+        redirect_headers = {header.name: header.value for header in redirect_reply.redirect.additional_headers}
+        try:
+            await self._download_redirect_to_file(
+                session=session,
+                redirect_target_url=redirect_reply.redirect.redirect_target_url,
+                headers=redirect_headers,
+                file_path=file_path,
+                expected_size=expected_size,
+            )
+        except (aiohttp.ClientError, asyncio.TimeoutError) as e:
+            raise StorageOperationError(f"{redirect_reply.redirect.redirect_target_url} failed to download: {e}") from e
+        logger.debug("Done downloading from webserver")
+        return Result.OK
 
     async def write_file(self, file_url: str, content: bytes, comment: str) -> Result:
         await self._ensure_grpc_stubs()
         if not self._fileobject_api:
             raise StorageOperationError("Failed to initialize Storage API backend!")
         resource_address = await self._sanitize_address_for_storage_service(file_url)
-        result = await self.write_file_content(resource_address, content)
+        result, sent_hash = await self._write_source_content(resource_address, _WriteSource.from_bytes(content))
         if result == Result.OK:
-            nucleus_hash, _ = calc_nucleus_hash_from_stream(io.BytesIO(content))
-            await self._set_nucleus_hash(resource_address, nucleus_hash)
+            if sent_hash is None:
+                sent_hash, _ = calc_nucleus_hash_from_stream(io.BytesIO(content))
+            await self._set_nucleus_hash(resource_address, sent_hash)
         return result
 
     async def write_file_content(self, resource_address: str, content: bytes) -> Result:
         """Upload the contents of a file object at the specified address."""
+        result, _ = await self._write_source_content(resource_address, _WriteSource.from_bytes(content))
+        return result
+
+    async def _write_source_content(self, resource_address: str, source: _WriteSource) -> Tuple[Result, Optional[str]]:
+        """Upload the source's content; returns the result and the nucleus hash of the bytes actually sent.
+
+        The hash is computed from the bytes each transport streams out, so the
+        stored hash can never go stale relative to the uploaded content, even if
+        the source file changes undetectably while queued (OMPE-74369). It is
+        None when the transferred bytes could not be observed (e.g. a request
+        body that was not read sequentially); callers then hash separately.
+        """
         max_attempts = self._parse_positive_int_env(
             _UPLOAD_RETRIES_ENV_VAR,
             3,
@@ -2518,21 +3295,24 @@ class StorageAPIStorageGRPC(StorageAPIStorage):
 
         for attempt in range(1, max_attempts + 1):
             try:
-                return await self._write_file_content_once(resource_address, content)
+                return await self._write_file_content_once(resource_address, source)
             except grpc.RpcError as e:
-                if attempt == max_attempts or not self._is_retryable_write_grpc_error(e):
+                if attempt == max_attempts or not self._is_retryable_grpc_error(e):
                     raise StorageOperationError(f"Error calling Write for {resource_address}: {str(e)}") from e
                 delay = base_delay * (2 ** (attempt - 1))
-                logger.warning(f"[{resource_address}] gRPC write attempt {attempt}/{max_attempts} failed: {e}. Retrying in {delay:.1f}s...")
+                logger.info(f"[{resource_address}] gRPC write attempt {attempt}/{max_attempts} failed: {e}. Retrying in {delay:.1f}s...")
+                Stats.get().increment(StatType.GRPC_RETRY)
                 await asyncio.sleep(delay)
 
-        raise AssertionError("write_file_content retry loop exited without returning or raising")
+        raise AssertionError("_write_source_content retry loop exited without returning or raising")
 
-    async def _write_file_content_once(self, resource_address: str, content: bytes) -> Result:
-        """Upload once using a fresh request stream."""
+    async def _write_file_content_once(self, resource_address: str, source: "_WriteSource") -> Tuple[Result, Optional[str]]:
+        """Upload once using a fresh request stream; see _write_source_content for the return contract."""
         assert self._fileobject_msgs is not None
         assert self._fileobject_types is not None
-        content_length = len(content)
+        content_length = source.size
+        # Fresh per attempt: hashes the bytes this attempt actually sends.
+        sent_hasher = IncrementalNucleusHasher()
         async with _write_message_queue_async() as (requests, request_iterator):
             await requests.put(
                 self._fileobject_msgs.WriteRequest(
@@ -2550,50 +3330,98 @@ class StorageAPIStorageGRPC(StorageAPIStorage):
             # A service may immediately respond with a "resource info" message, meaning that a 0-byte object write has
             # been performed immediately without the need for any further actions on the client end.
             if flow_control_message.HasField("resource_info"):
-                return Result.OK if content_length == 0 else Result.ERROR
+                if content_length == 0:
+                    # The server wrote the object without the client ever opening the
+                    # source; make sure it is still the 0-byte file that was advertised
+                    # (OMPE-74369).
+                    source.ensure_unchanged()
+                    empty_hash, _ = sent_hasher.finalize()
+                    return Result.OK, empty_hash
+                return Result.ERROR, None
 
             # If we receive a "write chunks accepted" message, stream the chunks and finally await for a "resource info"
             # response message.
             if flow_control_message.HasField("write_chunks_accepted"):
-                chunk_size = 1024 * 1024
                 Chunk = self._fileobject_types.Chunk
                 WReq = self._fileobject_msgs.WriteRequest
 
-                def chunk_generator():
-                    i = 0
-                    while i < len(content):
-                        yield Chunk(chunk=content[i : i + chunk_size])
-                        i += chunk_size
+                async def _stream_chunks() -> None:
+                    # The source is opened and read only while this task holds ONE
+                    # NetworkDataTransfer slot for the whole data transfer; previously
+                    # the chunk loop ran unthrottled with the entire file in memory
+                    # (OMPE-74369). Nothing in here may re-acquire networkdata.
+                    with source.open() as f_src:
+                        while True:
+                            data = f_src.read(_STORAGEAPI_WRITE_CHUNK_SIZE)
+                            if not data:
+                                break
+                            sent_hasher.update(data)
+                            await requests.put(WReq(chunk=Chunk(chunk=data)))
 
-                for chunk in chunk_generator():
-                    await requests.put(WReq(chunk=chunk))
+                await self._throttler_networkdata.run(_stream_chunks())
                 # End chunk transmission.
                 await requests.put(None)
                 resource_info_response = await anext(aiter(write_responses))
                 if resource_info_response.HasField("resource_info"):
-                    return Result.OK
+                    sent_hash, _ = sent_hasher.finalize()
+                    return Result.OK, sent_hash
                 else:
                     # Resource info message is expected.
-                    return Result.ERROR
+                    return Result.ERROR, None
 
         # Write redirect and multipart upload methods don't operate over the same stream of Write requests, so we should
         # close the write stream.
         if flow_control_message.HasField("write_redirect"):
-            result = await self._write_via_redirect(flow_control_message.write_redirect, content)
-            if 200 <= result.status < 300:
-                return Result.OK
+            redirect_response = await self._write_via_redirect(flow_control_message.write_redirect, source, sent_hasher)
+            if 200 <= redirect_response.status < 300:
+                await self._complete_redirect_upload(resource_address, flow_control_message.write_redirect, redirect_response)
+                if sent_hasher.is_valid and sent_hasher.size == content_length:
+                    sent_hash, _ = sent_hasher.finalize()
+                    return Result.OK, sent_hash
+                return Result.OK, None
             else:
                 raise StorageOperationError(
-                    f"Failed to write to redirect URL {flow_control_message.write_redirect.redirect_target_url}: {result.status}"
+                    f"Failed to write to redirect URL {flow_control_message.write_redirect.redirect_target_url}: {redirect_response.status}"
                 )
 
         if flow_control_message.HasField("multipart_upload"):
-            return await self._write_via_multipart(flow_control_message.multipart_upload, resource_address, content)
+            multipart_result = await self._write_via_multipart(flow_control_message.multipart_upload, resource_address, source, sent_hasher)
+            if multipart_result == Result.OK and sent_hasher.is_valid and sent_hasher.size == content_length:
+                sent_hash, _ = sent_hasher.finalize()
+                return multipart_result, sent_hash
+            return multipart_result, None
 
         # "Unexpected flow control message."
-        return Result.ERROR
+        return Result.ERROR, None
 
-    async def _write_via_redirect(self, parameters, content: bytes) -> aiohttp.ClientResponse:
+    async def _complete_redirect_upload(self, resource_address: str, parameters, response) -> None:
+        """Synchronously register a redirect upload via CompleteRedirectUpload.
+
+        The RPC is optional in the protocol, but servers that otherwise learn of
+        uploads only through storage-event pipelines can lag by minutes, leaving
+        the object invisible to Stat/List ("phantom"). Failure is non-fatal —
+        we fall back to the previous fire-and-forget behavior.
+        """
+        try:
+            headers = [
+                self._fileobject_types.Header(name=name, value=response.headers[name])
+                for name in getattr(parameters, "completion_header_names", [])
+                if name in response.headers
+            ]
+            await self._run_grpc(
+                self._throttler_roundtrip,
+                self._fileobject_api.CompleteRedirectUpload,
+                self._fileobject_msgs.CompleteRedirectUploadRequest(
+                    destination_resource_address=_encode_resource_address_for_storage_service(resource_address),
+                    additional_headers=headers,
+                ),
+            )
+        except grpc.RpcError as e:
+            logger.info(f"CompleteRedirectUpload not accepted for {resource_address} ({e.code()}); " "relying on server-side registration")
+
+    async def _write_via_redirect(
+        self, parameters, source: "_WriteSource", sent_hasher: Optional[IncrementalNucleusHasher] = None
+    ) -> aiohttp.ClientResponse:
         max_attempts = self._parse_positive_int_env(
             _UPLOAD_RETRIES_ENV_VAR,
             3,
@@ -2608,28 +3436,51 @@ class StorageAPIStorageGRPC(StorageAPIStorage):
                 method = self._upload_method_to_string(parameters.method)
 
                 async def _upload_request():
-                    async with session.request(
-                        method=method,
-                        url=parameters.redirect_target_url,
-                        headers=headers,
-                        data=content,
-                    ) as response:
-                        response.raise_for_status()
-                        # Read the response to ensure it's complete
-                        await response.read()
-                        return response
+                    # Open the payload only while holding the NetworkDataTransfer slot
+                    # (OMPE-74369); a fresh open per attempt rewinds for the retry loop.
+                    with source.open_payload() as payload:
+                        reader: Optional[_HashingPayloadReader] = None
+                        data: Union[bytes, BinaryIO] = payload
+                        if not isinstance(payload, (bytes, bytearray)):
+                            # Always wrap file payloads: the wrapper hashes the bytes
+                            # aiohttp actually reads, and it keeps the request headers
+                            # independent of the local filename (see the class note).
+                            reader = _HashingPayloadReader(payload)
+                            data = reader
+                        async with session.request(
+                            method=method,
+                            url=_presigned_url(parameters.redirect_target_url),
+                            headers=headers,
+                            data=data,
+                        ) as response:
+                            response.raise_for_status()
+                            # Read the response to ensure it's complete
+                            await response.read()
+                            # Feed the shared hasher only for the attempt that succeeded.
+                            if sent_hasher is not None:
+                                if reader is None:
+                                    sent_hasher.update(payload)
+                                elif reader.hasher.is_valid and reader.hasher.size == source.size:
+                                    sent_hasher.copy_state_from(reader.hasher)
+                                else:
+                                    sent_hasher.invalidate()
+                            return response
 
                 return await self._throttler_networkdata.run(_upload_request())
             except (aiohttp.ClientError, asyncio.TimeoutError) as e:
                 if attempt == max_attempts:
                     raise StorageOperationError(f"Failure to HTTP upload data to {parameters.redirect_target_url}: {str(e)}") from e
                 delay = base_delay * (2 ** (attempt - 1))
-                logger.warning(
+                logger.info(
                     f"[{parameters.redirect_target_url}] upload attempt {attempt}/{max_attempts} failed: {e}. " f"Retrying in {delay:.1f}s…"
                 )
+                Stats.get().increment(StatType.GRPC_RETRY)
                 await asyncio.sleep(delay)
+        raise AssertionError("_write_via_redirect retry loop exited without returning or raising")
 
-    async def _write_via_multipart(self, parameters, resource_address: str, content: bytes) -> Result:
+    async def _write_via_multipart(
+        self, parameters, resource_address: str, source: "_WriteSource", sent_hasher: Optional[IncrementalNucleusHasher] = None
+    ) -> Result:
         if not self._fileobject_api:
             raise StorageOperationError("Failed to initialize Storage API backend!")
         # Calculate the number of parts
@@ -2640,7 +3491,7 @@ class StorageAPIStorageGRPC(StorageAPIStorage):
             part_size = min(part_size, parameters.maximum_size_per_part)
         if part_size == 0:
             raise StorageOperationError(f"Cannot upload multipart upload, allowed part_size calculated as 0")
-        total_part_count = ceil(len(content) / part_size)
+        total_part_count = ceil(source.size / part_size)
         if parameters.HasField("maximum_parts_number"):
             if total_part_count > parameters.maximum_parts_number:
                 # TODO - we'd need to change the default buffer size of 1 MByte now...
@@ -2665,15 +3516,15 @@ class StorageAPIStorageGRPC(StorageAPIStorage):
                 )
                 redirects.extend(response.part_write_redirects)
 
-            def part_generator() -> Generator[Tuple[int, bytes], None, None]:
-                i = 0
-                while i * part_size < len(content):
-                    yield i, content[i * part_size : (i + 1) * part_size]
-                    i += 1
-
             completed_parts = []
-            for part_number, part in part_generator():
-                upload_response = await self._write_via_redirect(redirects[part_number], part)
+            for part_number in range(total_part_count):
+                # Each part is a bounded view of the source; the part's bytes are read
+                # from disk only inside _write_via_redirect's throttled request, so at
+                # most part_size bytes per held slot are in memory (OMPE-74369). Parts
+                # are uploaded in order, so the shared hasher sees the sent bytes in
+                # file order.
+                part_source = source.slice(part_number * part_size, part_size)
+                upload_response = await self._write_via_redirect(redirects[part_number], part_source, sent_hasher)
                 if not (200 <= upload_response.status < 300):
                     raise StorageOperationError(f"Got unexpected response from part upload: {upload_response.status}")
                 return_headers = []
@@ -2767,9 +3618,39 @@ class StorageAPIStorageGRPC(StorageAPIStorage):
             if stat_result == Result.OK:
                 return Result.ERROR_ALREADY_EXISTS
         file_path = get_path_from_url(src_url)
-        with open(file_path, "rb") as f:
-            content = f.read()
-        return await self.write_file(dst_url, content, message if message else "")
+        await self._ensure_grpc_stubs()
+        if not self._fileobject_api:
+            raise StorageOperationError("Failed to initialize Storage API backend!")
+        resource_address = await self._sanitize_address_for_storage_service(dst_url)
+        try:
+            # No pre-hash pass and nothing opened before throttling (OMPE-74369):
+            # only the path travels on, the transfer opens it once a
+            # NetworkDataTransfer slot is held, and the nucleus hash is computed
+            # from the bytes the transfer actually sends — so the stored hash can
+            # never go stale relative to the uploaded content, and the file is
+            # read exactly once. The stat snapshot taken here still rejects
+            # detectably-changed sources early (see _WriteSource).
+            source = _WriteSource.from_path(file_path)
+            result, sent_hash = await self._write_source_content(resource_address, source)
+        except FileNotFoundError:
+            return Result.ERROR_NOT_FOUND
+        except PermissionError as e:
+            logger.error(f"Storage API upload_file, permission error {src_url}: {e}")
+            return Result.ERROR_ACCESS_DENIED
+        if result == Result.OK:
+            if sent_hash is None:
+                # The transferred bytes could not be observed (e.g. the request body
+                # was not read sequentially). Never hash the mutable path after the
+                # fact — that could store a hash of different bytes than were
+                # uploaded. Leave the hash metadata unset instead; a missing nucleus
+                # hash is an accepted state (like writes without a metadata service).
+                # An overwritten destination may still carry the previous object's
+                # hash, which must not be left describing the new content.
+                logger.warning(f"Not storing a nucleus hash for {dst_url}: the uploaded bytes could not be hashed while streaming")
+                await self._delete_nucleus_hash(resource_address)
+            else:
+                await self._set_nucleus_hash(resource_address, sent_hash)
+        return result
 
     async def download_file(self, src_url: str, dst_url: str, overwrite: bool) -> Result:
         if not is_file_url(dst_url):

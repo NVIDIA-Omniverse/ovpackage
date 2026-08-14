@@ -99,34 +99,40 @@ async def count_command(
 async def count(catalog_file: str, context: CommandParameters = CommandParameters()) -> None:
     catalog = await Catalog.load(catalog_file)
     num_files = 0
+    num_unknown_size = 0
     size = 0
+    size_via_hash = 0
     via_hash: Dict[str, CatalogItem] = {}
     extension_size_hist = {}
     for item in catalog.items:
-        size += item.size if item.size is not None else 0
+        if item.size is None:
+            num_unknown_size += 1
+        item_size = item.size if item.size is not None else 0
+        size += item_size
         num_files += 1
 
-        filename, extension = os.path.splitext(item.relative_path)
+        _, extension = os.path.splitext(item.relative_path)
         if extension not in extension_size_hist:
             extension_size_hist[extension] = [0, 0]
-        extension_size_hist[extension][0] += item.size if item.size is not None else 0
+        extension_size_hist[extension][0] += item_size
 
         if item.hash in via_hash:
             logger.info(f"Found duplicate: {item} is duplicate of {via_hash[item.hash]}")
         else:
-            extension_size_hist[extension][1] += item.size if item.size is not None else 0
+            # A new (non-duplicate) hash, or a hashless item: a hashless item
+            # cannot be proven a duplicate, so it counts as its own unique
+            # storage entry, consistent with the per-extension histogram.
+            extension_size_hist[extension][1] += item_size
+            size_via_hash += item_size
         if item.hash is not None:
             # Only items with hashes can be put into the duplicate list
             via_hash[item.hash] = item
 
-    size_via_hash = 0
-    for hash in via_hash.keys():
-        item_not_none: CatalogItem = via_hash[hash]
-        size_via_hash += item_not_none.size if item_not_none.size is not None else 0
-
     print(f"number of files: {num_files}")
     print(f"size on disk: {format_size(size)}")
     print(f"size in storage: {format_size(size_via_hash)}")
+    if num_unknown_size > 0:
+        print(f"number of files with unknown size: {num_unknown_size}")
 
     print("\nvia extension (disk/storage):")
     for ext in extension_size_hist.keys():

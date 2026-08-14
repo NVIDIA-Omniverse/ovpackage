@@ -67,6 +67,7 @@ from wrapp.utils.utils import (
     FailedCommand,
     StorageOperationError,
     get_base_directory_from_url,
+    validate_non_empty_string,
 )
 from wrapp.utils.wrapp_init_for_cmd import wrapp_init_for_cmd
 
@@ -111,7 +112,6 @@ class TracebackNode:
         message: str = "",
         source: Optional["TracebackNode"] = None,
         repository: Optional["TracebackNode"] = None,
-        is_error=False,
     ):
         self.package_location_type = package_location_type
         self.path = path
@@ -199,6 +199,10 @@ async def traceback(wrapp_file: str, visited_paths: Optional[Set[str]] = None) -
     Returns:
         A TracebackNode representing the root of the traceback tree
     """
+    validate_non_empty_string("wrapp_file", wrapp_file)
+    if visited_paths is not None and not isinstance(visited_paths, set):
+        raise FailedCommand(f"visited_paths must be a set, got {type(visited_paths).__name__}")
+
     # Initialize visited paths set if not provided
     if visited_paths is None:
         visited_paths = set()
@@ -230,6 +234,19 @@ async def traceback(wrapp_file: str, visited_paths: Optional[Set[str]] = None) -
                 message = f"Source package missing: Could not find wrapp file at {wrapp_file}"
                 logger.warning(message)
                 return TracebackNode(PackageLocationType.ERROR, path=wrapp_file, message=message)
+
+    if self_repository:
+        # A repository package's name/version is its structural identity: the wrapp file must live
+        # at the path matching that identity. A path-vs-identity mismatch is genuine corruption,
+        # regardless of the repository/source pointers.
+        expected_wrapp_file = wrapp_file_in_repo(Repository(repo_url=self_repository), package.name, package.version)
+        if not await wrapp_urls_are_equivalent(expected_wrapp_file, wrapp_file):
+            message = (
+                f"Package metadata at {wrapp_file} does not match its repository path "
+                f"(metadata declares {package.name} {package.version})"
+            )
+            logger.warning(message)
+            return TracebackNode(PackageLocationType.ERROR, path=wrapp_file, message=message)
 
     node_type = None
     source_node = None
@@ -268,8 +285,13 @@ async def traceback(wrapp_file: str, visited_paths: Optional[Set[str]] = None) -
         source_node = await traceback(expected_wrapp_file, visited_paths.copy())
     else:
         if not node_type:
-            message = f"Primary source  at {wrapp_file}"
-            logger.info(message)
-            node_type = PackageLocationType.SOURCE
+            if self_repository:
+                message = f"Primary repository at {wrapp_file}"
+                logger.info(message)
+                node_type = PackageLocationType.REPOSITORY
+            else:
+                message = f"Primary source at {wrapp_file}"
+                logger.info(message)
+                node_type = PackageLocationType.SOURCE
 
     return TracebackNode(package_location_type=node_type, path=wrapp_file, source=source_node, repository=repo_node, message=message)

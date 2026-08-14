@@ -38,6 +38,11 @@ from wrapp.utils.router import (
     g_nucleus_enabled,
     g_storage_api_enabled,
 )
+from wrapp.utils.stats import (
+    Stats,
+    StatType,
+)
+from wrapp.utils.storage_interface import Result
 from wrapp.utils.utils import (
     StorageInitializationError,
     StorageMissingDependenciesError,
@@ -46,10 +51,12 @@ from wrapp.utils.utils import (
 
 try:
     import grpc
+    from google.protobuf.timestamp_pb2 import Timestamp
 
     from wrapp.utils.config import WrappConfig
     from wrapp.utils.storage_impls.storageapi import (
         _CAP_PB2,
+        _DISABLE_ENUMERATE_ENV_VAR,
         _FF_SVC_PB2,
         _FO_PB2,
         _FO_SVC_PB2,
@@ -57,6 +64,7 @@ try:
         _MD_PB2,
         _STORAGE_API_VERSION_ENV_VARS,
         NUCLEUS_HASH_METADATA_KEY,
+        StorageAPIListEntry,
         StorageAPIStorageGRPC,
         cap_pb2_v1alpha,
         cap_pb2_v1beta,
@@ -322,6 +330,405 @@ async def test_negotiate_fails_when_pinned_metadata_unavailable():
     with patch.object(backend, "_run_grpc", side_effect=fake_run_grpc):
         with pytest.raises(StorageInitializationError, match="WRAPP_STORAGE_API_METADATA"):
             await backend._negotiate_versions()
+
+
+@pytest.mark.asyncio
+async def test_negotiate_skips_metadata_when_disabled_via_env(caplog):
+    """WRAPP_STORAGE_API_DISABLE_METADATA skips wiring up the Metadata stub
+    even when the server advertises it, so subsequent writes don't trigger
+    UpdateMetadata calls."""
+    backend = _make_backend(env_overrides={"WRAPP_STORAGE_API_DISABLE_METADATA": "True"})
+    backend._channel = MagicMock()
+    caplog.set_level(logging.INFO, logger="omni.wrapp")
+
+    response = _make_list_services_response(
+        {
+            "fileobject": ["v1alpha", "v1beta"],
+            "filefolder": ["v1beta", "v1alpha"],
+            "metadata": ["v1alpha"],
+        },
+        cap_pb2_v1beta,
+    )
+
+    async def fake_run_grpc(throttler, method, request, **kwargs):
+        return response
+
+    with patch.object(backend, "_run_grpc", side_effect=fake_run_grpc):
+        await backend._negotiate_versions()
+
+    assert backend._metadata_version is None
+    assert backend._metadata_msgs is None
+    assert backend._metadata_api is None
+    assert "WRAPP_STORAGE_API_DISABLE_METADATA" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_negotiate_disable_metadata_overrides_pinned_version():
+    """Disable flag wins over a pinned metadata version: even if the server
+    doesn't advertise metadata, no StorageInitializationError is raised."""
+    backend = _make_backend(
+        env_overrides={
+            "WRAPP_STORAGE_API_DISABLE_METADATA": "True",
+            "WRAPP_STORAGE_API_METADATA": "v1alpha",
+        }
+    )
+    backend._channel = MagicMock()
+
+    response = _make_list_services_response(
+        {
+            "fileobject": ["v1alpha", "v1beta"],
+            "filefolder": ["v1beta", "v1alpha"],
+        },
+        cap_pb2_v1beta,
+    )
+
+    async def fake_run_grpc(throttler, method, request, **kwargs):
+        return response
+
+    with patch.object(backend, "_run_grpc", side_effect=fake_run_grpc):
+        await backend._negotiate_versions()
+
+    assert backend._metadata_api is None
+
+
+# ---------------------------------------------------------------------------
+# Metadata retry policy tests
+# ---------------------------------------------------------------------------
+
+
+def _make_grpc_error(code: grpc.StatusCode, details: str = "") -> grpc.RpcError:
+    err = grpc.RpcError()
+    err.code = lambda: code
+    err.details = lambda: details
+    return err
+
+
+def _wire_metadata_stubs(backend) -> None:
+    """Stub out enough of the metadata service for set/get/delete to be exercised."""
+    backend._metadata_msgs = MagicMock()
+    backend._metadata_msgs.UpdateMetadataRequest = MagicMock(return_value="update-req")
+    backend._metadata_msgs.GetMetadataRequest = MagicMock(return_value="get-req")
+    backend._metadata_msgs.DeleteMetadataRequest = MagicMock(return_value="delete-req")
+    backend._metadata_api = MagicMock()
+    backend._metadata_api.UpdateMetadata = AsyncMock()
+    backend._metadata_api.GetMetadata = AsyncMock()
+    backend._metadata_api.DeleteMetadata = AsyncMock()
+
+
+@pytest.mark.asyncio
+async def test_set_nucleus_hash_retries_on_unavailable(caplog):
+    """UNAVAILABLE on the metadata UpdateMetadata path should be retried with
+    exponential backoff (1s, 2s, …), matching write_file_content."""
+    backend = _make_backend()
+    _wire_metadata_stubs(backend)
+    # Per-attempt retries log at INFO; only the final-give-up path is WARNING.
+    caplog.set_level(logging.INFO, logger="omni.wrapp")
+
+    call_count = 0
+    sleeps: list[float] = []
+
+    async def fake_run_grpc(throttler, method, request, **kwargs):
+        nonlocal call_count
+        call_count += 1
+        if call_count < 3:
+            raise _make_grpc_error(grpc.StatusCode.UNAVAILABLE, "upstream request timeout")
+        return SimpleNamespace()  # third attempt succeeds
+
+    async def fake_sleep(d):
+        sleeps.append(d)
+
+    with (
+        patch.object(backend, "_run_grpc", side_effect=fake_run_grpc),
+        patch("wrapp.utils.storage_impls.storageapi.asyncio.sleep", side_effect=fake_sleep),
+    ):
+        await backend._set_nucleus_hash("https://example/blob", "deadbeef")
+
+    assert call_count == 3
+    assert sleeps == [1.0, 2.0]
+    # No final WARNING when retries eventually succeed
+    warning_records = [r for r in caplog.records if r.levelno >= logging.WARNING]
+    assert not any("Failed to store nucleus hash metadata" in r.message for r in warning_records)
+    # Per-attempt retry messages are present at INFO level
+    info_records = [r for r in caplog.records if r.levelno == logging.INFO]
+    assert any("attempt 1/3" in r.getMessage() for r in info_records)
+
+
+@pytest.mark.asyncio
+async def test_set_nucleus_hash_warns_after_exhausting_retries(caplog):
+    """If every attempt times out the user gets exactly one final warning
+    (best-effort semantics preserved)."""
+    backend = _make_backend()
+    _wire_metadata_stubs(backend)
+    caplog.set_level(logging.WARNING, logger="omni.wrapp")
+
+    call_count = 0
+
+    async def fake_run_grpc(throttler, method, request, **kwargs):
+        nonlocal call_count
+        call_count += 1
+        raise _make_grpc_error(grpc.StatusCode.UNAVAILABLE, "upstream request timeout")
+
+    with (
+        patch.object(backend, "_run_grpc", side_effect=fake_run_grpc),
+        patch("wrapp.utils.storage_impls.storageapi.asyncio.sleep", new=AsyncMock()),
+    ):
+        await backend._set_nucleus_hash("https://example/blob", "deadbeef")
+
+    assert call_count == 3  # default attempts
+    assert "Failed to store nucleus hash metadata for https://example/blob" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_set_nucleus_hash_does_not_retry_non_retryable_codes(caplog):
+    """Non-retryable codes (e.g. PERMISSION_DENIED) fail on the first attempt."""
+    backend = _make_backend()
+    _wire_metadata_stubs(backend)
+    caplog.set_level(logging.WARNING, logger="omni.wrapp")
+
+    call_count = 0
+
+    async def fake_run_grpc(throttler, method, request, **kwargs):
+        nonlocal call_count
+        call_count += 1
+        raise _make_grpc_error(grpc.StatusCode.PERMISSION_DENIED, "no access")
+
+    with (
+        patch.object(backend, "_run_grpc", side_effect=fake_run_grpc),
+        patch("wrapp.utils.storage_impls.storageapi.asyncio.sleep", new=AsyncMock()),
+    ):
+        await backend._set_nucleus_hash("https://example/blob", "deadbeef")
+
+    assert call_count == 1
+    assert "Failed to store nucleus hash metadata" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_metadata_retries_env_var_caps_attempts():
+    """WRAPP_STORAGE_API_METADATA_RETRIES=1 disables retries entirely."""
+    backend = _make_backend(env_overrides={"WRAPP_STORAGE_API_METADATA_RETRIES": "1"})
+    _wire_metadata_stubs(backend)
+
+    call_count = 0
+
+    async def fake_run_grpc(throttler, method, request, **kwargs):
+        nonlocal call_count
+        call_count += 1
+        raise _make_grpc_error(grpc.StatusCode.UNAVAILABLE, "upstream request timeout")
+
+    with (
+        patch.object(backend, "_run_grpc", side_effect=fake_run_grpc),
+        patch("wrapp.utils.storage_impls.storageapi.asyncio.sleep", new=AsyncMock()),
+    ):
+        await backend._set_nucleus_hash("https://example/blob", "deadbeef")
+
+    assert call_count == 1
+
+
+@pytest.mark.asyncio
+async def test_get_nucleus_hash_retries_on_unavailable():
+    """GetMetadata path retries the same retryable codes as set."""
+    backend = _make_backend()
+    _wire_metadata_stubs(backend)
+
+    call_count = 0
+    success_response = SimpleNamespace(user_metadata={})
+
+    async def fake_run_grpc(throttler, method, request, **kwargs):
+        nonlocal call_count
+        call_count += 1
+        if call_count < 2:
+            raise _make_grpc_error(grpc.StatusCode.UNAVAILABLE, "upstream request timeout")
+        return success_response
+
+    with (
+        patch.object(backend, "_run_grpc", side_effect=fake_run_grpc),
+        patch("wrapp.utils.storage_impls.storageapi.asyncio.sleep", new=AsyncMock()),
+    ):
+        result = await backend._get_nucleus_hash("https://example/blob")
+
+    assert call_count == 2
+    assert result is None  # empty user_metadata → no hash, but no error
+
+
+@pytest.mark.asyncio
+async def test_get_nucleus_hash_not_found_does_not_retry():
+    """NOT_FOUND/UNIMPLEMENTED should short-circuit to None without retrying."""
+    backend = _make_backend()
+    _wire_metadata_stubs(backend)
+
+    call_count = 0
+
+    async def fake_run_grpc(throttler, method, request, **kwargs):
+        nonlocal call_count
+        call_count += 1
+        raise _make_grpc_error(grpc.StatusCode.NOT_FOUND, "no such resource")
+
+    with (
+        patch.object(backend, "_run_grpc", side_effect=fake_run_grpc),
+        patch("wrapp.utils.storage_impls.storageapi.asyncio.sleep", new=AsyncMock()),
+    ):
+        result = await backend._get_nucleus_hash("https://example/blob")
+
+    assert call_count == 1
+    assert result is None
+
+
+@pytest.mark.asyncio
+async def test_delete_nucleus_hash_builds_encoded_request():
+    """_delete_nucleus_hash targets the encoded address with the nucleus hash key."""
+    backend = _make_backend()
+    _wire_metadata_stubs(backend)
+
+    captured = {}
+
+    async def fake_run_grpc(throttler, method, request, **kwargs):
+        captured["method"] = method
+        captured["request"] = request
+        return SimpleNamespace()
+
+    with patch.object(backend, "_run_grpc", side_effect=fake_run_grpc):
+        await backend._delete_nucleus_hash("https://example/My Blob.usd")
+
+    assert captured["method"] is backend._metadata_api.DeleteMetadata
+    assert captured["request"] == "delete-req"
+    backend._metadata_msgs.DeleteMetadataRequest.assert_called_once_with(
+        uri="https://example/My%20Blob.usd",
+        user_metadata_key=NUCLEUS_HASH_METADATA_KEY,
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("code", [grpc.StatusCode.NOT_FOUND, grpc.StatusCode.UNIMPLEMENTED])
+async def test_delete_nucleus_hash_tolerates_missing_key(caplog, code):
+    """NOT_FOUND / UNIMPLEMENTED mean 'nothing to delete' and are silently accepted."""
+    backend = _make_backend()
+    _wire_metadata_stubs(backend)
+    caplog.set_level(logging.WARNING, logger="omni.wrapp")
+
+    async def fake_run_grpc(throttler, method, request, **kwargs):
+        raise _make_grpc_error(code, "no such key")
+
+    with patch.object(backend, "_run_grpc", side_effect=fake_run_grpc):
+        await backend._delete_nucleus_hash("https://example/blob")
+
+    assert "Failed to delete nucleus hash metadata" not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_delete_nucleus_hash_warns_on_other_errors(caplog):
+    """Any other failure is best-effort: one warning, no exception."""
+    backend = _make_backend()
+    _wire_metadata_stubs(backend)
+    caplog.set_level(logging.WARNING, logger="omni.wrapp")
+
+    async def fake_run_grpc(throttler, method, request, **kwargs):
+        raise _make_grpc_error(grpc.StatusCode.PERMISSION_DENIED, "no access")
+
+    with patch.object(backend, "_run_grpc", side_effect=fake_run_grpc):
+        await backend._delete_nucleus_hash("https://example/blob")
+
+    assert "Failed to delete nucleus hash metadata for https://example/blob" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_set_nucleus_hash_skips_when_metadata_disabled():
+    """When the metadata stub is None (disabled or not advertised), no calls are issued."""
+    backend = _make_backend()
+    backend._metadata_api = None
+    backend._metadata_msgs = None
+
+    with patch.object(backend, "_run_grpc", side_effect=AssertionError("must not be called")):
+        await backend._set_nucleus_hash("https://example/blob", "deadbeef")
+        assert await backend._get_nucleus_hash("https://example/blob") is None
+        await backend._delete_nucleus_hash("https://example/blob")
+
+
+@pytest.mark.asyncio
+async def test_metadata_calls_and_retries_are_counted_in_stats():
+    """Successful metadata calls bump SET/GET_METADATA_ASYNC; retries bump
+    GRPC_RETRY so users can see retry pressure separately from logical ops."""
+    backend = _make_backend()
+    _wire_metadata_stubs(backend)
+    Stats.get().clear()
+
+    set_calls = 0
+
+    async def fake_set_run_grpc(throttler, method, request, **kwargs):
+        nonlocal set_calls
+        set_calls += 1
+        if set_calls < 3:
+            raise _make_grpc_error(grpc.StatusCode.UNAVAILABLE, "upstream request timeout")
+        return SimpleNamespace()
+
+    with (
+        patch.object(backend, "_run_grpc", side_effect=fake_set_run_grpc),
+        patch("wrapp.utils.storage_impls.storageapi.asyncio.sleep", new=AsyncMock()),
+    ):
+        await backend._set_nucleus_hash("https://example/blob", "deadbeef")
+
+    assert Stats.get().get_stat(StatType.SET_METADATA_ASYNC) == 1
+    assert Stats.get().get_stat(StatType.GRPC_RETRY) == 2  # 2 sleeps, then success on 3rd
+
+    # GET on a different code path also increments GET_METADATA_ASYNC and GRPC_RETRY independently.
+    Stats.get().clear()
+    get_calls = 0
+
+    async def fake_get_run_grpc(throttler, method, request, **kwargs):
+        nonlocal get_calls
+        get_calls += 1
+        if get_calls < 2:
+            raise _make_grpc_error(grpc.StatusCode.UNAVAILABLE, "upstream request timeout")
+        return SimpleNamespace(user_metadata={})
+
+    with (
+        patch.object(backend, "_run_grpc", side_effect=fake_get_run_grpc),
+        patch("wrapp.utils.storage_impls.storageapi.asyncio.sleep", new=AsyncMock()),
+    ):
+        await backend._get_nucleus_hash("https://example/blob")
+
+    assert Stats.get().get_stat(StatType.GET_METADATA_ASYNC) == 1
+    assert Stats.get().get_stat(StatType.GRPC_RETRY) == 1
+    assert Stats.get().get_stat(StatType.SET_METADATA_ASYNC) == 0
+
+    # DELETE is counted independently as well.
+    Stats.get().clear()
+
+    async def fake_delete_run_grpc(throttler, method, request, **kwargs):
+        return SimpleNamespace()
+
+    with patch.object(backend, "_run_grpc", side_effect=fake_delete_run_grpc):
+        await backend._delete_nucleus_hash("https://example/blob")
+
+    assert Stats.get().get_stat(StatType.DELETE_METADATA_ASYNC) == 1
+    assert Stats.get().get_stat(StatType.SET_METADATA_ASYNC) == 0
+    assert Stats.get().get_stat(StatType.GET_METADATA_ASYNC) == 0
+
+
+@pytest.mark.asyncio
+async def test_disabled_metadata_does_not_count_in_stats():
+    """When the metadata stub is None, no SET/GET_METADATA_ASYNC stats accrue."""
+    backend = _make_backend()
+    backend._metadata_api = None
+    backend._metadata_msgs = None
+    Stats.get().clear()
+
+    await backend._set_nucleus_hash("https://example/blob", "deadbeef")
+    assert await backend._get_nucleus_hash("https://example/blob") is None
+
+    assert Stats.get().get_stat(StatType.SET_METADATA_ASYNC) == 0
+    assert Stats.get().get_stat(StatType.GET_METADATA_ASYNC) == 0
+    assert Stats.get().get_stat(StatType.GRPC_RETRY) == 0
+
+
+def test_metadata_stats_contribute_to_total_storage_calls():
+    """SET/GET_METADATA_ASYNC should be in g_CLIENTLIB_STATS so they fold
+    into 'total calls to storage provider'. GRPC_RETRY stays separate so
+    users can see retry counts standalone."""
+    from wrapp.utils.stats import g_CLIENTLIB_STATS
+
+    assert StatType.SET_METADATA_ASYNC in g_CLIENTLIB_STATS
+    assert StatType.GET_METADATA_ASYNC in g_CLIENTLIB_STATS
+    assert StatType.GRPC_RETRY not in g_CLIENTLIB_STATS
 
 
 @pytest.mark.asyncio
@@ -743,6 +1150,56 @@ async def test_stat_returns_no_hash_when_metadata_unavailable():
     assert entry.nucleus_hash is None
 
 
+@pytest.mark.asyncio
+async def test_stat_retries_on_unavailable():
+    """Transient upstream request timeouts from Stat should not fail catalog."""
+    Stats.get().clear()
+    backend = _make_backend()
+    backend._channel = MagicMock()
+    backend._fileobject_version = "v1beta"
+    backend._fileobject_msgs = fo_svc_pb2_v1beta
+    backend._fileobject_types = fo_pb2_v1beta
+    backend._fileobject_api = MagicMock()
+
+    fake_stat_response = SimpleNamespace(
+        resource_info=SimpleNamespace(
+            resource_identity=SimpleNamespace(encoded_identity="rid1"),
+            metadata=SimpleNamespace(data_object_size=100, last_modified_timestamp=None),
+        )
+    )
+
+    call_count = 0
+    sleeps: list[float] = []
+
+    async def fake_run_grpc(throttler, method, request, **kwargs):
+        nonlocal call_count
+        call_count += 1
+        if call_count < 3:
+            raise _make_grpc_error(grpc.StatusCode.UNAVAILABLE, "upstream request timeout")
+        return fake_stat_response
+
+    async def fake_sleep(delay):
+        sleeps.append(delay)
+
+    with (
+        patch.object(backend, "_ensure_grpc_stubs", new_callable=AsyncMock),
+        patch.object(backend, "_sanitize_address_for_storage_service", side_effect=_passthrough),
+        patch.object(backend, "_run_grpc", side_effect=fake_run_grpc),
+        patch.object(backend, "_get_nucleus_hash", new_callable=AsyncMock, return_value=None),
+        patch("wrapp.utils.storage_impls.storageapi.asyncio.sleep", side_effect=fake_sleep),
+    ):
+        from wrapp.utils.storage_interface import Result
+
+        result, entry = await backend.stat("https://example.com/file.usd")
+
+    assert result == Result.OK
+    assert entry is not None
+    assert entry.version == "rid1"
+    assert call_count == 3
+    assert sleeps == [1.0, 2.0]
+    assert Stats.get().get_stat(StatType.GRPC_RETRY) == 2
+
+
 # ---------------------------------------------------------------------------
 # _compile_route_pattern / wildcard matching tests
 # ---------------------------------------------------------------------------
@@ -808,6 +1265,12 @@ def _make_list_routes_response(patterns):
     return SimpleNamespace(items=items)
 
 
+def _make_top_level_addresses_response(addresses):
+    """Build a fake ListTopLevelAddressesResponse."""
+    items = [SimpleNamespace(top_level_address=a) for a in addresses]
+    return SimpleNamespace(items=items)
+
+
 @pytest.mark.asyncio
 async def test_fetch_routes_success_populates_routes():
     """When ListRoutes succeeds, _routes and _route_regexes are populated."""
@@ -835,18 +1298,57 @@ async def test_fetch_routes_success_populates_routes():
 
 
 @pytest.mark.asyncio
-async def test_fetch_routes_falls_back_on_unimplemented():
-    """When the server returns UNIMPLEMENTED, _fetch_routes returns False."""
+async def test_fetch_routes_retries_retryable_failure(monkeypatch):
+    """Transient ListRoutes failures are retried before falling back to TLAs."""
+    Stats.get().clear()
     backend = _make_backend()
     backend._channel = MagicMock()
     backend._capabilities_version = "v1alpha"
     backend._capabilities_msgs = cap_pb2_v1alpha
     backend._capability_api = MagicMock()
+    routes_response = _make_list_routes_response(["https://example.com/**"])
+    call_count = 0
+    sleep_calls = []
+
+    async def fake_sleep(delay):
+        sleep_calls.append(delay)
 
     async def fake_run_grpc(throttler, method, request, **kwargs):
-        error = grpc.RpcError()
-        error.code = lambda: grpc.StatusCode.UNIMPLEMENTED
-        raise error
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            raise _make_grpc_error(grpc.StatusCode.UNAVAILABLE, "upstream request timeout")
+        return routes_response
+
+    monkeypatch.setattr("wrapp.utils.storage_impls.storageapi.asyncio.sleep", fake_sleep)
+    with (
+        patch.object(backend, "_run_grpc", side_effect=fake_run_grpc),
+        patch("wrapp.utils.router.g_list_routes_enabled", True),
+    ):
+        result = await backend._fetch_routes()
+
+    assert result is True
+    assert backend._routes == ["https://example.com/**"]
+    assert call_count == 2
+    assert sleep_calls == [1.0]
+    assert Stats.get().get_stat(StatType.GRPC_RETRY) == 1
+
+
+@pytest.mark.asyncio
+async def test_fetch_routes_falls_back_on_unimplemented():
+    """When the server returns UNIMPLEMENTED, _fetch_routes returns False."""
+    Stats.get().clear()
+    backend = _make_backend()
+    backend._channel = MagicMock()
+    backend._capabilities_version = "v1alpha"
+    backend._capabilities_msgs = cap_pb2_v1alpha
+    backend._capability_api = MagicMock()
+    call_count = 0
+
+    async def fake_run_grpc(throttler, method, request, **kwargs):
+        nonlocal call_count
+        call_count += 1
+        raise _make_grpc_error(grpc.StatusCode.UNIMPLEMENTED, "not implemented")
 
     with (
         patch.object(backend, "_run_grpc", side_effect=fake_run_grpc),
@@ -857,6 +1359,8 @@ async def test_fetch_routes_falls_back_on_unimplemented():
     assert result is False
     assert backend._routes is None
     assert backend._route_regexes is None
+    assert call_count == 1
+    assert Stats.get().get_stat(StatType.GRPC_RETRY) == 0
 
 
 @pytest.mark.asyncio
@@ -1034,9 +1538,14 @@ async def test_ensure_grpc_stubs_calls_tla_when_routes_fail():
 @pytest.mark.asyncio
 async def test_ensure_grpc_stubs_applies_config_route_override_from_toml(tmp_path):
     """End-to-end: a real wrapp.toml on disk is loaded and the route override
-    is installed by _ensure_grpc_stubs after discovery."""
+    is installed -- both at __init__ time (so `has_known_scope()` returns True
+    before any connection) and reasserted by `_ensure_grpc_stubs` after
+    discovery (in case `_fetch_routes` overwrote `_routes` with what the
+    server advertised)."""
     toml_file = tmp_path / "wrapp.toml"
-    toml_file.write_text('[storage_api.default]\nroutes = ["https://override.example.com/**"]\n')
+    toml_file.write_text(
+        "[storage_api.default]\n" 'discovery_url = "https://discovery.example.com"\n' 'routes = ["https://override.example.com/**"]\n'
+    )
 
     backend = _make_backend(
         env_overrides={"WRAPP_CONFIG_FILE": str(toml_file)},
@@ -1046,12 +1555,24 @@ async def test_ensure_grpc_stubs_applies_config_route_override_from_toml(tmp_pat
     backend._discovery_url = ""
     backend._endpoint = "localhost:50051"
 
-    assert backend.has_known_scope() is False
+    # The override is installed at construction time so the Router can claim
+    # the URLs it covers before any gRPC connection has happened.
+    assert backend.has_known_scope() is True
+    assert backend._routes == ["https://override.example.com/**"]
+    assert backend.is_url_in_scope("https://override.example.com/file.usd") is True
+    assert backend.is_url_in_scope("https://other.example.com/file.usd") is False
+
+    # Simulate the server advertising a different route list; the override
+    # must be reasserted on top of it.
+    async def overwrite_routes_with_server_advertised():
+        backend._routes = ["https://server-advertised.example.com/**"]
+        backend._route_regexes = [backend._compile_route_pattern(p) for p in backend._routes]
+        return True
 
     with (
         patch.object(backend, "_create_grpc_channel", return_value=MagicMock()),
         patch.object(backend, "_negotiate_versions", new_callable=AsyncMock),
-        patch.object(backend, "_fetch_routes", new_callable=AsyncMock, return_value=True),
+        patch.object(backend, "_fetch_routes", side_effect=overwrite_routes_with_server_advertised),
         patch.object(backend, "_fetch_top_level_addresses", new_callable=AsyncMock),
     ):
         await backend._ensure_grpc_stubs()
@@ -1060,6 +1581,7 @@ async def test_ensure_grpc_stubs_applies_config_route_override_from_toml(tmp_pat
     assert backend._routes == ["https://override.example.com/**"]
     assert backend.is_url_in_scope("https://override.example.com/file.usd") is True
     assert backend.is_url_in_scope("https://other.example.com/file.usd") is False
+    assert backend.is_url_in_scope("https://server-advertised.example.com/file.usd") is False
 
 
 @pytest.mark.asyncio
@@ -1079,6 +1601,38 @@ async def test_get_top_level_addresses_fetches_tla_when_missing():
 
     fetch_tla_mock.assert_awaited_once()
     assert result == ["https://example.com/storage"]
+
+
+@pytest.mark.asyncio
+async def test_fetch_top_level_addresses_retries_retryable_failure(monkeypatch):
+    """Transient ListTopLevelAddresses failures are retried before catch-all fallback."""
+    Stats.get().clear()
+    backend = _make_backend()
+    backend._channel = MagicMock()
+    backend._capabilities_msgs = cap_pb2_v1alpha
+    backend._capability_api = MagicMock()
+    tla_response = _make_top_level_addresses_response(["https://example.com/storage/"])
+    call_count = 0
+    sleep_calls = []
+
+    async def fake_sleep(delay):
+        sleep_calls.append(delay)
+
+    async def fake_run_grpc(throttler, method, request, **kwargs):
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            raise _make_grpc_error(grpc.StatusCode.UNAVAILABLE, "upstream request timeout")
+        return tla_response
+
+    monkeypatch.setattr("wrapp.utils.storage_impls.storageapi.asyncio.sleep", fake_sleep)
+    with patch.object(backend, "_run_grpc", side_effect=fake_run_grpc):
+        await backend._fetch_top_level_addresses()
+
+    assert backend._top_level_addresses == ["https://example.com/storage"]
+    assert call_count == 2
+    assert sleep_calls == [1.0]
+    assert Stats.get().get_stat(StatType.GRPC_RETRY) == 1
 
 
 @pytest.mark.asyncio
@@ -1161,15 +1715,16 @@ async def test_write_file_stores_hash():
     async def fake_set_hash(resource_address, nucleus_hash):
         set_hash_calls.append((resource_address, nucleus_hash))
 
-    async def fake_write_content(resource_address, content):
+    async def fake_write_source_content(resource_address, source):
         from wrapp.utils.storage_interface import Result
 
-        return Result.OK
+        # No sent-bytes hash observed -> write_file hashes the content itself.
+        return Result.OK, None
 
     with (
         patch.object(backend, "_ensure_grpc_stubs", new_callable=AsyncMock),
         patch.object(backend, "_sanitize_address_for_storage_service", side_effect=_passthrough),
-        patch.object(backend, "write_file_content", side_effect=fake_write_content),
+        patch.object(backend, "_write_source_content", side_effect=fake_write_source_content),
         patch.object(backend, "_set_nucleus_hash", side_effect=fake_set_hash),
     ):
         from wrapp.utils.storage_interface import Result
@@ -1200,15 +1755,15 @@ async def test_write_file_skips_hash_on_error():
     async def fake_set_hash(resource_address, nucleus_hash):
         set_hash_calls.append((resource_address, nucleus_hash))
 
-    async def fake_write_content(resource_address, content):
+    async def fake_write_source_content(resource_address, source):
         from wrapp.utils.storage_interface import Result
 
-        return Result.ERROR
+        return Result.ERROR, None
 
     with (
         patch.object(backend, "_ensure_grpc_stubs", new_callable=AsyncMock),
         patch.object(backend, "_sanitize_address_for_storage_service", side_effect=_passthrough),
-        patch.object(backend, "write_file_content", side_effect=fake_write_content),
+        patch.object(backend, "_write_source_content", side_effect=fake_write_source_content),
         patch.object(backend, "_set_nucleus_hash", side_effect=fake_set_hash),
     ):
         from wrapp.utils.storage_interface import Result
@@ -1229,15 +1784,15 @@ async def test_write_file_no_metadata_service():
     backend._fileobject_types = fo_pb2_v1beta
     backend._fileobject_api = MagicMock()
 
-    async def fake_write_content(resource_address, content):
+    async def fake_write_source_content(resource_address, source):
         from wrapp.utils.storage_interface import Result
 
-        return Result.OK
+        return Result.OK, None
 
     with (
         patch.object(backend, "_ensure_grpc_stubs", new_callable=AsyncMock),
         patch.object(backend, "_sanitize_address_for_storage_service", side_effect=_passthrough),
-        patch.object(backend, "write_file_content", side_effect=fake_write_content),
+        patch.object(backend, "_write_source_content", side_effect=fake_write_source_content),
     ):
         from wrapp.utils.storage_interface import Result
 
@@ -1452,6 +2007,74 @@ class TestRouterOmniverseRouting:
 
 
 # ---------------------------------------------------------------------------
+# Discovery-URL prefix matching boundary checks
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.xdist_incompatible
+class TestDiscoveryUrlBoundaryMatching:
+    """The Router's discovery-URL fast-path must match the discovery URL itself
+    and its subpaths, but not sibling names that share a common prefix
+    (e.g. ``/discovery2`` must not match ``/discovery``)."""
+
+    @staticmethod
+    def _build_router_with_discovery(discovery_url: str):
+        from wrapp.utils import router as router_mod
+
+        prev_instance = router_mod.Router._instance
+        router_mod.Router._instance = None
+        try:
+            with patch.multiple(
+                router_mod,
+                g_aws_enabled=False,
+                g_azure_enabled=False,
+                g_gcs_enabled=False,
+                g_nucleus_enabled=False,
+                g_storage_api_enabled=False,
+            ):
+                router = router_mod.Router("test", False, ThrottlingParameters())
+        finally:
+            router_mod.Router._instance = prev_instance
+        backend = _make_backend()
+        backend._discovery_url = StorageAPIStorageGRPC._normalize_discovery_url(discovery_url)
+        # Give the backend known (but empty) scope so the fall-through path
+        # in is_storage_api_url rejects URLs not covered by the discovery
+        # check, isolating the boundary logic under test.
+        backend._top_level_addresses = []
+        router._storage_api = backend
+        return router
+
+    def test_exact_discovery_url_matches(self):
+        router = self._build_router_with_discovery("https://disc.example.com/api")
+        assert router.is_storage_api_url("https://disc.example.com/api") is True
+
+    def test_discovery_url_with_trailing_slash_matches(self):
+        router = self._build_router_with_discovery("https://disc.example.com/api")
+        assert router.is_storage_api_url("https://disc.example.com/api/") is True
+
+    def test_discovery_subpath_matches(self):
+        router = self._build_router_with_discovery("https://disc.example.com/api")
+        assert router.is_storage_api_url("https://disc.example.com/api/v1/routes") is True
+
+    def test_sibling_name_does_not_match(self):
+        router = self._build_router_with_discovery("https://disc.example.com/api")
+        assert router.is_storage_api_url("https://disc.example.com/api2") is False
+
+    def test_sibling_with_shared_prefix_does_not_match(self):
+        router = self._build_router_with_discovery("https://disc.example.com/discovery")
+        assert router.is_storage_api_url("https://disc.example.com/discovery-v2") is False
+
+    def test_omniverse_scheme_discovery_url_matches(self):
+        """An ``omniverse://``-scheme discovery URL is owned by the Storage API
+        backend. The discovery fast-path must run before the
+        ``is_nucleus_url`` early-return, otherwise an ``omniverse://`` discovery
+        URL is mis-routed to the Nucleus backend (returns False on master)."""
+        router = self._build_router_with_discovery("omniverse://disc.example.com")
+        assert router.is_storage_api_url("omniverse://disc.example.com") is True
+        assert router.is_storage_api_url("omniverse://disc.example.com/foo") is True
+
+
+# ---------------------------------------------------------------------------
 # wrapp.toml integration: discovery_url + routes overrides
 # ---------------------------------------------------------------------------
 
@@ -1529,7 +2152,7 @@ class TestWrappConfigRouteOverride:
             storage_api_backends=(
                 StorageAPIBackendConfig(
                     name="default",
-                    discovery_url=None,
+                    discovery_url="https://discovery.example.com",
                     routes=tuple(patterns),
                 ),
             ),
@@ -1541,9 +2164,13 @@ class TestWrappConfigRouteOverride:
         assert backend._config_route_overrides == ["omniverse://example.com/**"]
         assert backend._config_route_regexes is not None
         assert len(backend._config_route_regexes) == 1
-        # Pre-connection, scope is not yet "known" — override only takes effect
-        # after _ensure_grpc_stubs runs the override hook.
-        assert backend.has_known_scope() is False
+        # The override is installed into the live route table at construction
+        # time so the Router can claim the URLs it covers before any gRPC
+        # connection has happened.
+        assert backend.has_known_scope() is True
+        assert backend._routes == ["omniverse://example.com/**"]
+        assert backend.is_url_in_scope("omniverse://example.com/foo") is True
+        assert backend.is_url_in_scope("omniverse://other.example.com/foo") is False
 
     def test_apply_override_replaces_routes(self, caplog):
         cfg = self._make_config_with_routes(["omniverse://configured.example.com/**"])
@@ -1615,3 +2242,538 @@ class TestWrappConfigRouteOverride:
 
         _, storage_type = router._get_storage("omniverse://content.ov.nvidia.com/eglanz-test3/")
         assert storage_type == StorageType.StorageAPI
+
+
+# ---------------------------------------------------------------------------
+# list_file_tree (Enumerate) tests
+# ---------------------------------------------------------------------------
+
+
+def _wire_enumerate_stubs(backend) -> None:
+    """Stub fileobject API/messages enough for list_file_tree."""
+    backend._fileobject_msgs = fo_svc_pb2_v1alpha
+    backend._fileobject_types = fo_pb2_v1alpha
+    backend._fileobject_api = MagicMock()
+
+
+def _make_address_info(address: str, *, size=None, mtime_seconds=None):
+    """Build an AddressInfo proto with optional size/timestamp set."""
+    md = fo_pb2_v1alpha.Metadata()
+    if size is not None:
+        md.data_object_size = size
+    if mtime_seconds is not None:
+        md.last_modified_timestamp.CopyFrom(Timestamp(seconds=mtime_seconds))
+    return fo_pb2_v1alpha.AddressInfo(resource_address=address, metadata=md)
+
+
+def _make_list_stat_item(address: str, identity: str, *, size: int = 1, mtime_seconds: int | None = None):
+    if mtime_seconds is None:
+        timestamp = None
+    else:
+        timestamp = Timestamp(seconds=mtime_seconds)
+    return SimpleNamespace(
+        resource_address=address,
+        resource_info=SimpleNamespace(
+            resource_identity=SimpleNamespace(encoded_identity=identity),
+            metadata=SimpleNamespace(data_object_size=size, last_modified_timestamp=timestamp),
+        ),
+    )
+
+
+def _make_storageapi_file_entry(address: str, identity: str, *, size: int | None = 1, mtime_seconds: int | None = None):
+    modification_time = Timestamp(seconds=mtime_seconds).ToDatetime() if mtime_seconds is not None else None
+    return StorageAPIListEntry(
+        resource_address=address,
+        resource_identity=identity,
+        size=size,
+        modification_time=modification_time,
+        is_folder=False,
+    )
+
+
+def _make_storageapi_folder_entry(address: str):
+    return StorageAPIListEntry(
+        resource_address=address,
+        resource_identity=None,
+        size=None,
+        modification_time=None,
+        is_folder=True,
+    )
+
+
+def test_use_enumerate_default_is_on():
+    """No env var, no kwarg → enumerate is enabled (production default)."""
+    backend = _make_backend()
+    assert backend._use_enumerate is True
+    assert backend.supports_list_file_tree() is True
+
+
+def test_use_enumerate_disabled_by_env(caplog):
+    """WRAPP_STORAGE_API_DISABLE_ENUMERATE flips production default off."""
+    caplog.set_level(logging.INFO, logger="omni.wrapp")
+    backend = _make_backend(env_overrides={_DISABLE_ENUMERATE_ENV_VAR: "True"})
+    assert backend._use_enumerate is False
+    assert backend.supports_list_file_tree() is False
+    assert _DISABLE_ENUMERATE_ENV_VAR in caplog.text
+
+
+def test_use_enumerate_explicit_kwarg_overrides_env():
+    """A test passing use_enumerate=False/True wins over the env var."""
+    backend = _make_backend(
+        env_overrides={_DISABLE_ENUMERATE_ENV_VAR: "True"},
+        use_enumerate=True,
+    )
+    assert backend._use_enumerate is True
+
+    backend = _make_backend(use_enumerate=False)
+    assert backend._use_enumerate is False
+
+
+@pytest.mark.asyncio
+async def test_list_file_tree_anchors_prefix_with_trailing_slash():
+    """Enumerate's resource_address is a string prefix on the server, so a
+    request for ".../foo" leaks ".../foo-2/...". list_file_tree must always
+    encode the prefix with a trailing slash."""
+    backend = _make_backend()
+    _wire_enumerate_stubs(backend)
+    captured = {}
+
+    async def fake_iterate_grpc(throttler, method, request, *a, **k):
+        captured["throttler"] = throttler
+        captured["request"] = request
+        if False:
+            yield  # make this an async generator
+        return
+
+    with (
+        patch.object(backend, "_iterate_grpc", side_effect=fake_iterate_grpc),
+        patch.object(backend, "_ensure_grpc_stubs", new=AsyncMock()),
+        patch.object(
+            backend,
+            "_sanitize_address_for_storage_service",
+            new=AsyncMock(return_value="https://srv.example/bucket/1k"),
+        ),
+    ):
+        items = [item async for item in backend.list_file_tree("https://srv.example/bucket/1k")]
+
+    assert items == []
+    assert captured["request"].resource_address == "https://srv.example/bucket/1k/"
+    assert captured["throttler"] is backend._throttler_serverdata
+
+
+@pytest.mark.asyncio
+async def test_list_file_tree_input_already_has_trailing_slash():
+    """Idempotent: adding a slash to a slash-terminated input must not double up."""
+    backend = _make_backend()
+    _wire_enumerate_stubs(backend)
+    captured = {}
+
+    async def fake_iterate_grpc(throttler, method, request, *a, **k):
+        captured["request"] = request
+        if False:
+            yield
+        return
+
+    with (
+        patch.object(backend, "_iterate_grpc", side_effect=fake_iterate_grpc),
+        patch.object(backend, "_ensure_grpc_stubs", new=AsyncMock()),
+        patch.object(
+            backend,
+            "_sanitize_address_for_storage_service",
+            new=AsyncMock(return_value="https://srv.example/bucket/1k/"),
+        ),
+    ):
+        async for _ in backend.list_file_tree("https://srv.example/bucket/1k/"):
+            pass
+
+    assert captured["request"].resource_address == "https://srv.example/bucket/1k/"
+
+
+@pytest.mark.asyncio
+async def test_list_file_tree_marks_folder_shaped_addresses():
+    """Folder entries from Enumerate must not be treated as regular files."""
+    backend = _make_backend()
+    _wire_enumerate_stubs(backend)
+    base = "https://srv.example/bucket/1k"
+
+    async def fake_iterate_grpc(throttler, method, request, *a, **k):
+        yield fo_svc_pb2_v1alpha.EnumerateResponse(
+            items=[
+                _make_address_info(f"{base}/file-1", size=1, mtime_seconds=1_700_000_000),
+                _make_address_info(f"{base}/empty_dir/", size=None, mtime_seconds=None),
+                _make_address_info(f"{base}/file-2", size=2, mtime_seconds=1_700_000_001),
+            ]
+        )
+
+    async def fake_stat(address):
+        if address.endswith("/file-1"):
+            return Result.OK, _make_storageapi_file_entry(address, "identity-file-1", size=1)
+        if address.endswith("/file-2"):
+            return Result.OK, _make_storageapi_file_entry(address, "identity-file-2", size=2)
+        raise AssertionError(f"Unexpected stat call for {address}")
+
+    with (
+        patch.object(backend, "_iterate_grpc", side_effect=fake_iterate_grpc),
+        patch.object(backend, "_ensure_grpc_stubs", new=AsyncMock()),
+        patch.object(backend, "_sanitize_address_for_storage_service", new=AsyncMock(return_value=base)),
+        patch.object(backend, "stat", AsyncMock(side_effect=fake_stat)) as stat_mock,
+    ):
+        items = [item async for item in backend.list_file_tree(base)]
+
+    assert [(item.relative_path, item.is_folder) for item in items] == [
+        ("file-1", False),
+        ("empty_dir", True),
+        ("file-2", False),
+    ]
+    assert stat_mock.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_list_file_tree_marks_prefix_entries_as_folders():
+    """Some Storage API deployments return directory prefixes without a
+    trailing slash. Treat entries that are parents of other entries as folders
+    so catalog does not try to create resource identities for them."""
+    backend = _make_backend()
+    _wire_enumerate_stubs(backend)
+    base = "https://srv.example/bucket/1k"
+
+    async def fake_iterate_grpc(throttler, method, request, *a, **k):
+        yield fo_svc_pb2_v1alpha.EnumerateResponse(
+            items=[
+                _make_address_info(f"{base}/subfolder", size=0, mtime_seconds=1_700_000_000),
+                _make_address_info(f"{base}/subfolder/file.txt", size=42, mtime_seconds=1_700_000_001),
+                _make_address_info(f"{base}/root.txt", size=1, mtime_seconds=1_700_000_002),
+            ]
+        )
+
+    async def fake_stat(address):
+        if address.endswith("/subfolder"):
+            return Result.OK, _make_storageapi_folder_entry(address)
+        if address.endswith("/subfolder/file.txt"):
+            return Result.OK, _make_storageapi_file_entry(address, "identity-nested", size=42)
+        if address.endswith("/root.txt"):
+            return Result.OK, _make_storageapi_file_entry(address, "identity-root", size=1)
+        raise AssertionError(f"Unexpected stat call for {address}")
+
+    with (
+        patch.object(backend, "_iterate_grpc", side_effect=fake_iterate_grpc),
+        patch.object(backend, "_ensure_grpc_stubs", new=AsyncMock()),
+        patch.object(backend, "_sanitize_address_for_storage_service", new=AsyncMock(return_value=base)),
+        patch.object(backend, "stat", AsyncMock(side_effect=fake_stat)) as stat_mock,
+    ):
+        items = [item async for item in backend.list_file_tree(base)]
+
+    assert [(item.relative_path, item.is_folder, item.size) for item in items] == [
+        ("subfolder", True, None),
+        ("subfolder/file.txt", False, 42),
+        ("root.txt", False, 1),
+    ]
+    assert stat_mock.await_count == 3
+
+
+@pytest.mark.asyncio
+async def test_list_file_tree_populates_size_and_mtime_from_metadata():
+    """Enumerate already returns size + last_modified_timestamp on this
+    server. Catalog and ls callers benefit from these fields landing on the
+    yielded ListEntry instead of triggering a separate stat() per file."""
+    from datetime import datetime
+
+    backend = _make_backend()
+    _wire_enumerate_stubs(backend)
+    base = "https://srv.example/bucket/1k"
+
+    async def fake_iterate_grpc(throttler, method, request, *a, **k):
+        yield fo_svc_pb2_v1alpha.EnumerateResponse(
+            items=[
+                _make_address_info(f"{base}/file-with-metadata", size=42, mtime_seconds=1_700_000_000),
+                _make_address_info(f"{base}/file-no-metadata"),  # both fields unset
+            ]
+        )
+
+    async def fake_stat(address):
+        if address.endswith("/file-with-metadata"):
+            return Result.OK, _make_storageapi_file_entry(address, "identity-with-metadata", size=None)
+        if address.endswith("/file-no-metadata"):
+            return Result.OK, _make_storageapi_file_entry(address, "identity-no-metadata", size=None)
+        raise AssertionError(f"Unexpected stat call for {address}")
+
+    with (
+        patch.object(backend, "_iterate_grpc", side_effect=fake_iterate_grpc),
+        patch.object(backend, "_ensure_grpc_stubs", new=AsyncMock()),
+        patch.object(backend, "_sanitize_address_for_storage_service", new=AsyncMock(return_value=base)),
+        patch.object(backend, "stat", AsyncMock(side_effect=fake_stat)),
+    ):
+        items = [item async for item in backend.list_file_tree(base)]
+
+    assert len(items) == 2
+    by_path = {item._resource_address: item for item in items}
+
+    assert by_path["file-with-metadata"]._data_object_size == 42
+    # Match existing convention in StorageAPIListEntry.from_resource_info:
+    # protobuf Timestamp.ToDatetime() returns a naive UTC datetime.
+    assert by_path["file-with-metadata"]._modification_time == datetime.utcfromtimestamp(1_700_000_000)
+
+    # Absent metadata fields must not silently coerce to 0/epoch.
+    assert by_path["file-no-metadata"]._data_object_size is None
+    assert by_path["file-no-metadata"]._modification_time is None
+
+
+@pytest.mark.asyncio
+async def test_list_file_tree_retries_rst_stream_and_skips_duplicates(monkeypatch):
+    Stats.get().clear()
+    backend = _make_backend()
+    _wire_enumerate_stubs(backend)
+    base = "https://srv.example/bucket/1k"
+    call_count = 0
+    sleep_calls = []
+
+    async def fake_sleep(delay):
+        sleep_calls.append(delay)
+
+    async def fake_iterate_grpc(throttler, method, request, *a, **k):
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            yield fo_svc_pb2_v1alpha.EnumerateResponse(items=[_make_address_info(f"{base}/file-1", size=1, mtime_seconds=1_700_000_000)])
+            raise _make_grpc_error(grpc.StatusCode.INTERNAL, "Received RST_STREAM with error code 0")
+
+        yield fo_svc_pb2_v1alpha.EnumerateResponse(
+            items=[
+                _make_address_info(f"{base}/file-1", size=1, mtime_seconds=1_700_000_000),
+                _make_address_info(f"{base}/file-2", size=2, mtime_seconds=1_700_000_001),
+            ]
+        )
+
+    async def fake_stat(address):
+        if address.endswith("/file-1"):
+            return Result.OK, _make_storageapi_file_entry(address, "identity-file-1", size=1)
+        if address.endswith("/file-2"):
+            return Result.OK, _make_storageapi_file_entry(address, "identity-file-2", size=2)
+        raise AssertionError(f"Unexpected stat call for {address}")
+
+    monkeypatch.setattr("wrapp.utils.storage_impls.storageapi.asyncio.sleep", fake_sleep)
+    with (
+        patch.object(backend, "_iterate_grpc", side_effect=fake_iterate_grpc),
+        patch.object(backend, "_ensure_grpc_stubs", new=AsyncMock()),
+        patch.object(backend, "_sanitize_address_for_storage_service", new=AsyncMock(return_value=base)),
+        patch.object(backend, "stat", AsyncMock(side_effect=fake_stat)),
+    ):
+        items = [item async for item in backend.list_file_tree(base)]
+
+    assert [item.relative_path for item in items] == ["file-1", "file-2"]
+    assert call_count == 2
+    assert sleep_calls == [1.0]
+    assert Stats.get().get_stat(StatType.GRPC_RETRY) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "grpc_code, expected_result",
+    [
+        # NOT_FOUND is the only Enumerate error that must map to ERROR_NOT_FOUND so
+        # callers treat an absent .metadata folder as an empty listing.
+        (grpc.StatusCode.NOT_FOUND, Result.ERROR_NOT_FOUND),
+        # Any other non-retryable gRPC error must keep the default Result.ERROR;
+        # this guards the remap against being widened to non-NOT_FOUND codes.
+        (grpc.StatusCode.PERMISSION_DENIED, Result.ERROR),
+    ],
+)
+async def test_list_file_tree_maps_enumerate_grpc_error_codes(grpc_code, expected_result):
+    """list_file_tree surfaces an Enumerate NOT_FOUND as StorageOperationError with
+    result == Result.ERROR_NOT_FOUND, and any other non-retryable gRPC error as a
+    StorageOperationError with the default Result.ERROR (not ERROR_NOT_FOUND)."""
+    backend = _make_backend()
+    _wire_enumerate_stubs(backend)
+    base = "https://srv.example/bucket/1k"
+
+    async def fake_iterate_grpc(throttler, method, request, *a, **k):
+        # NOT_FOUND and PERMISSION_DENIED are not in _RETRYABLE_GRPC_STATUS_CODES,
+        # so the retry loop raises on the first attempt without sleeping.
+        raise _make_grpc_error(grpc_code, "boom")
+        yield  # pragma: no cover - unreachable; makes this an async generator
+
+    with (
+        patch.object(backend, "_iterate_grpc", side_effect=fake_iterate_grpc),
+        patch.object(backend, "_ensure_grpc_stubs", new=AsyncMock()),
+        patch.object(backend, "_sanitize_address_for_storage_service", new=AsyncMock(return_value=base)),
+    ):
+        with pytest.raises(StorageOperationError) as exc:
+            [item async for item in backend.list_file_tree(base)]
+
+    assert exc.value.result == expected_result
+
+
+@pytest.mark.asyncio
+async def test_list_directory_retries_rst_stream_and_skips_duplicates(monkeypatch):
+    Stats.get().clear()
+    backend = _make_backend()
+    backend._filefolder_api = MagicMock()
+    backend._filefolder_msgs = ff_svc_pb2_v1beta
+    base = "https://srv.example/bucket/1k"
+    call_count = 0
+    sleep_calls = []
+
+    async def fake_sleep(delay):
+        sleep_calls.append(delay)
+
+    async def fake_iterate_grpc(throttler, method, request, *a, **k):
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            yield SimpleNamespace(
+                subfolder_addresses=[],
+                entries=[_make_list_stat_item(f"{base}/file-1", "identity-1")],
+            )
+            raise _make_grpc_error(grpc.StatusCode.INTERNAL, "Received RST_STREAM with error code 0")
+
+        yield SimpleNamespace(
+            subfolder_addresses=[],
+            entries=[
+                _make_list_stat_item(f"{base}/file-1", "identity-1"),
+                _make_list_stat_item(f"{base}/file-2", "identity-2"),
+            ],
+        )
+
+    monkeypatch.setattr("wrapp.utils.storage_impls.storageapi.asyncio.sleep", fake_sleep)
+    with (
+        patch.object(backend, "_iterate_grpc", side_effect=fake_iterate_grpc),
+        patch.object(backend, "_ensure_grpc_stubs", new=AsyncMock()),
+        patch.object(backend, "_sanitize_address_for_storage_service", new=AsyncMock(return_value=base)),
+    ):
+        items = [item async for item in backend.list_directory(base)]
+
+    assert [item.relative_path for item in items] == ["file-1", "file-2"]
+    assert [item.version for item in items] == ["identity-1", "identity-2"]
+    assert call_count == 2
+    assert sleep_calls == [1.0]
+    assert Stats.get().get_stat(StatType.GRPC_RETRY) == 1
+
+
+@pytest.mark.asyncio
+async def test_make_resource_identity_lazy_stats_when_missing():
+    """Entries from Enumerate carry no resource_identity (AddressInfo proto
+    has only address+metadata). make_resource_identity must fall back to a
+    single Stat to fetch one so catalog operations don't crash, and must
+    patch the identity back onto the entry so a follow-up call doesn't
+    re-stat."""
+    from wrapp.utils.storage_impls.storageapi import StorageAPIListEntry
+    from wrapp.utils.storage_interface import Result
+
+    Stats.get().clear()
+    backend = _make_backend()
+    enumerate_entry = StorageAPIListEntry(
+        resource_address="file-1",
+        resource_identity=None,
+        size=1,
+        modification_time=None,
+        is_folder=False,
+    )
+
+    stat_entry = StorageAPIListEntry(
+        resource_address="file-1",
+        resource_identity="encoded-identity-from-stat",
+        size=1,
+        modification_time=None,
+        is_folder=False,
+    )
+    stat_entry.nucleus_hash = "sha-256-flat;1048576;from-stat"
+
+    stat_mock = AsyncMock(return_value=(Result.OK, stat_entry))
+
+    with patch.object(backend, "stat", stat_mock):
+        _u1, _r1, ident1 = await backend.make_resource_identity("https://srv.example/bucket/1k/file-1", enumerate_entry, "file-1")
+        # Second call on the same entry should hit the cached identity and
+        # not issue another Stat.
+        _u2, _r2, ident2 = await backend.make_resource_identity("https://srv.example/bucket/1k/file-1", enumerate_entry, "file-1")
+
+    assert ident1.to_string() == "encoded-identity-from-stat"
+    assert ident2.to_string() == "encoded-identity-from-stat"
+    assert stat_mock.await_count == 1
+    assert enumerate_entry._resource_identity == "encoded-identity-from-stat"
+    assert enumerate_entry.nucleus_hash == "sha-256-flat;1048576;from-stat"
+    assert Stats.get().get_stat(StatType.STAT) == 1
+
+
+@pytest.mark.asyncio
+async def test_make_resource_identity_with_existing_identity_does_not_stat():
+    """Entries that already carry an identity (from list_directory's
+    ListStat path) must not pay an extra Stat round-trip."""
+    from wrapp.utils.storage_impls.storageapi import StorageAPIListEntry
+
+    backend = _make_backend()
+    entry = StorageAPIListEntry(
+        resource_address="file-1",
+        resource_identity="already-have-it",
+        size=1,
+        modification_time=None,
+        is_folder=False,
+    )
+
+    stat_mock = AsyncMock()
+    with patch.object(backend, "stat", stat_mock):
+        _u, _r, ident = await backend.make_resource_identity("https://srv.example/bucket/1k/file-1", entry, "file-1")
+
+    assert ident.to_string() == "already-have-it"
+    stat_mock.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_make_resource_identity_raises_when_stat_cannot_recover():
+    """If the fallback Stat itself fails to produce an identity (storage
+    doesn't support it, or the URL no longer exists), surface a clear
+    TypeError so the catalog code's NotImplementedError/TypeError fallback
+    path takes over."""
+    from wrapp.utils.storage_impls.storageapi import StorageAPIListEntry
+    from wrapp.utils.storage_interface import Result
+
+    backend = _make_backend()
+    entry = StorageAPIListEntry(
+        resource_address="file-1",
+        resource_identity=None,
+        size=1,
+        modification_time=None,
+        is_folder=False,
+    )
+
+    stat_mock = AsyncMock(return_value=(Result.ERROR_NOT_FOUND, None))
+    with patch.object(backend, "stat", stat_mock):
+        with pytest.raises(TypeError, match="Cannot generate ResourceIdentity"):
+            await backend.make_resource_identity("https://srv.example/bucket/1k/file-1", entry, "file-1")
+
+
+@pytest.mark.asyncio
+async def test_list_file_tree_stats_ambiguous_enumerate_entries():
+    """Enumerate returns AddressInfo, not ResourceInfo, so WRAPP must classify
+    ambiguous addresses before yielding them as files."""
+    backend = _make_backend()
+    _wire_enumerate_stubs(backend)
+    base = "https://srv.example/bucket/1k"
+
+    async def fake_iterate_grpc(throttler, method, request, *a, **k):
+        yield fo_svc_pb2_v1alpha.EnumerateResponse(
+            items=[
+                _make_address_info(f"{base}/leaf-folder", size=0, mtime_seconds=1_700_000_000),
+                _make_address_info(f"{base}/file.txt", size=1, mtime_seconds=1_700_000_001),
+            ]
+        )
+
+    async def fake_stat(address):
+        if address.endswith("/leaf-folder"):
+            return Result.OK, _make_storageapi_folder_entry(address)
+        if address.endswith("/file.txt"):
+            return Result.OK, _make_storageapi_file_entry(address, "identity-file", size=1)
+        raise AssertionError(f"Unexpected stat call for {address}")
+
+    with (
+        patch.object(backend, "_iterate_grpc", side_effect=fake_iterate_grpc),
+        patch.object(backend, "_ensure_grpc_stubs", new=AsyncMock()),
+        patch.object(backend, "_sanitize_address_for_storage_service", new=AsyncMock(return_value=base)),
+        patch.object(backend, "stat", AsyncMock(side_effect=fake_stat)) as stat_mock,
+    ):
+        items = [item async for item in backend.list_file_tree(base)]
+
+    assert [(item.relative_path, item.is_folder, item.version) for item in items] == [
+        ("leaf-folder", True, ""),
+        ("file.txt", False, "identity-file"),
+    ]
+    assert stat_mock.await_count == 2

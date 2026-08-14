@@ -14,8 +14,11 @@
 # limitations under the License.
 
 import asyncio
+import io
 import logging
 import os
+import sys
+import time
 from datetime import (
     datetime,
     timezone,
@@ -31,8 +34,16 @@ import pytest
 import wrapp
 from wrapp.datastructures.command_context import ThrottlingParameters
 from wrapp.utils.coro import force_wrapp_thread
+from wrapp.utils.nucleus_hash import (
+    IncrementalNucleusHasher,
+    calc_nucleus_hash_from_stream,
+)
 from wrapp.utils.router import g_storage_api_enabled
 from wrapp.utils.scheduler_task_node import SchedulerTreeNode
+from wrapp.utils.stats import (
+    Stats,
+    StatType,
+)
 from wrapp.utils.storage import (
     Router,
     wrapp_read_file_content,
@@ -48,7 +59,10 @@ from wrapp.utils.utils import (
     random_string,
 )
 
-from .common import StorageBackendForTests
+from .common import (
+    StorageBackendForTests,
+    count_open_fds_under,
+)
 
 try:
     import grpc
@@ -56,6 +70,7 @@ try:
     from wrapp.utils.storage_impls.storageapi import (
         StorageAPIListEntry,
         StorageAPIStorageGRPC,
+        _WriteSource,
     )
 except (ImportError, ModuleNotFoundError, StorageMissingDependenciesError) as e:
     pytest.skip(f"Missing dependencies for StorageAPI tests: {e}", allow_module_level=True)
@@ -321,6 +336,75 @@ def _storageapi_with_fake_write() -> StorageAPIStorageGRPC:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "completion_error_code",
+    [None, grpc.StatusCode.UNIMPLEMENTED, grpc.StatusCode.PERMISSION_DENIED],
+    ids=["success", "unimplemented", "permission-denied"],
+)
+async def test_STORAGEAPI_redirect_upload_completes_with_requested_response_headers_OMPE101972(completion_error_code):
+    storage = _storageapi_with_fake_write()
+    completion_rpc = object()
+    storage._fileobject_api.CompleteRedirectUpload = completion_rpc
+    storage._fileobject_msgs.CompleteRedirectUploadRequest = lambda destination_resource_address, additional_headers: SimpleNamespace(
+        destination_resource_address=destination_resource_address,
+        additional_headers=additional_headers,
+    )
+    storage._fileobject_types.Header = lambda name, value: SimpleNamespace(name=name, value=value)
+
+    redirect_parameters = SimpleNamespace(
+        redirect_target_url="https://upload.example/file.usd",
+        completion_header_names=["etag", "x-version-id", "absent"],
+    )
+    flow_control_message = _FakeWriteResponse("write_redirect")
+    flow_control_message.write_redirect = redirect_parameters
+    events = []
+    completion_requests = []
+
+    async def _fake_iterate_grpc(_throttler, _grpc_method, request_iterator):
+        initial_request = await anext(aiter(request_iterator))
+        assert initial_request.params.destination_resource_address == "omniverse://server.example/Material%20Library/file.usd"
+        yield flow_control_message
+
+    async def _fake_write_via_redirect(parameters, source, sent_hasher):
+        assert parameters is redirect_parameters
+        with source.open_payload() as payload:
+            assert payload == b"content"
+        assert sent_hasher is not None
+        events.append("http-upload-complete")
+        return SimpleNamespace(
+            status=204,
+            headers={
+                "etag": "etag-value",
+                "x-version-id": "version-value",
+                "unrequested": "ignored-value",
+            },
+        )
+
+    async def _fake_run_grpc(throttler, grpc_method, request):
+        assert throttler is storage._throttler_roundtrip
+        assert grpc_method is completion_rpc
+        events.append("complete-redirect-upload")
+        completion_requests.append(request)
+        if completion_error_code is not None:
+            raise _FakeGrpcError(completion_error_code, "optional RPC unavailable")
+
+    storage._iterate_grpc = _fake_iterate_grpc
+    storage._write_via_redirect = _fake_write_via_redirect
+    storage._run_grpc = _fake_run_grpc
+
+    result = await storage.write_file_content("omniverse://server.example/Material Library/file.usd", b"content")
+
+    assert result == Result.OK
+    assert events == ["http-upload-complete", "complete-redirect-upload"]
+    assert len(completion_requests) == 1
+    assert completion_requests[0].destination_resource_address == "omniverse://server.example/Material%20Library/file.usd"
+    assert [(header.name, header.value) for header in completion_requests[0].additional_headers] == [
+        ("etag", "etag-value"),
+        ("x-version-id", "version-value"),
+    ]
+
+
+@pytest.mark.asyncio
 async def test_STORAGEAPI_write_file_content_retries_stream_timeout(monkeypatch):
     storage = _storageapi_with_fake_write()
     call_count = 0
@@ -428,6 +512,599 @@ async def test_STORAGEAPI_write_file_content_does_not_retry_non_timeout_unknown(
         await storage.write_file_content("omniverse://server.example/repo/file.usd", b"abc")
 
     assert call_count == 1
+
+
+def _path_to_file_url(path: str) -> str:
+    """Convert a filesystem path to a file:// URL, handling Windows correctly."""
+    abs_path = os.path.abspath(path)
+    if sys.platform == "win32":
+        return f"file:///{abs_path.replace(os.sep, '/')}"
+    return f"file://{abs_path}"
+
+
+class _FakeFlowControlMessage:
+    """Write flow-control response carrying an arbitrary transport-selection field."""
+
+    def __init__(self, field_name: str, value=None):
+        self._field_name = field_name
+        if value is not None:
+            setattr(self, field_name, value)
+
+    def HasField(self, name: str):
+        return name == self._field_name
+
+
+class _FakeWriteRedirectParams:
+    def __init__(self, target_url: str):
+        self.redirect_target_url = target_url
+        self.additional_headers = []
+        self.method = 0
+        self.completion_header_names = []
+
+
+class _FakeUploadResponse:
+    status = 200
+    headers = {}
+
+    def raise_for_status(self):
+        pass
+
+    async def read(self):
+        return b""
+
+
+def _storageapi_for_upload_tests(file_transfer_jobs: int = 2) -> StorageAPIStorageGRPC:
+    """StorageAPI backend prepared for driving upload_file without a real server."""
+    storage = StorageAPIStorageGRPC(
+        "0.0.0-test", False, throttling_params=ThrottlingParameters(file_transfer_jobs=file_transfer_jobs, jobs=8)
+    )
+    storage._fileobject_api = SimpleNamespace(Write=object(), UploadPart=object(), CompleteMultipartUpload=object())
+    storage._fileobject_msgs = SimpleNamespace(
+        WriteParameters=_FakeWriteParameters,
+        WriteRequest=_FakeWriteRequest,
+        UploadPartRequest=lambda **kwargs: SimpleNamespace(**kwargs),
+        CompleteMultipartUploadRequest=lambda **kwargs: SimpleNamespace(**kwargs),
+        CompletedUploadPart=lambda **kwargs: SimpleNamespace(**kwargs),
+    )
+    storage._fileobject_types = SimpleNamespace(Chunk=_FakeChunk, Header=lambda **kwargs: SimpleNamespace(**kwargs))
+    storage._ensure_grpc_stubs = AsyncMock()
+    storage._sanitize_address_for_storage_service = AsyncMock(side_effect=lambda url: url)
+    storage._set_nucleus_hash = AsyncMock()
+    storage._delete_nucleus_hash = AsyncMock()
+    storage._complete_redirect_upload = AsyncMock()
+    return storage
+
+
+@pytest.mark.skipif(not os.path.isdir("/proc/self/fd"), reason="FD sampling requires /proc/self/fd (Linux)")
+@pytest.mark.asyncio
+async def test_storageapi_upload_grpc_chunks_bounds_open_source_files_OMPE_74369(tmp_path, monkeypatch):
+    """gRPC-chunk uploads open the source and stream only under a held NetworkDataTransfer slot.
+
+    Previously upload_file read the whole file into memory before any throttling and
+    the chunk loop ran with no slot held. Now at most file_transfer_jobs source files
+    are open at once and the streaming phase itself holds the slot.
+    """
+    monkeypatch.setattr("wrapp.utils.storage_impls.storageapi._STORAGEAPI_WRITE_CHUNK_SIZE", 4)
+    n_uploads = 6
+    file_transfer_jobs = 2
+    storage = _storageapi_for_upload_tests(file_transfer_jobs)
+
+    consume_may_proceed = asyncio.Event()
+    received = {}
+
+    async def _fake_iterate_grpc(_throttler, _grpc_method, request_iterator):
+        # Consume the request stream in a background task like the real gRPC machinery,
+        # but gated: with chunk size 4 and 60-byte files the Queue(5) fills, so the
+        # admitted producers block holding their slot with the source file open -- a
+        # deterministic sampling point.
+        initial_request = await anext(aiter(request_iterator))
+        chunks = []
+        drained = asyncio.Event()
+
+        async def _drain():
+            await consume_may_proceed.wait()
+            async for request in request_iterator:
+                chunks.append(request.chunk.chunk)
+            drained.set()
+
+        drain_task = asyncio.create_task(_drain())
+        try:
+            yield _FakeWriteResponse("write_chunks_accepted")
+            await drained.wait()
+            received[initial_request.params.destination_resource_address] = b"".join(chunks)
+            yield _FakeWriteResponse("resource_info")
+        finally:
+            drain_task.cancel()
+            try:
+                await drain_task
+            except asyncio.CancelledError:
+                pass
+
+    storage._iterate_grpc = _fake_iterate_grpc
+
+    content_by_address = {}
+    uploads = []
+    for i in range(n_uploads):
+        src = tmp_path / f"src{i}.bin"
+        data = bytes([i]) * 60  # 15 chunks of 4 bytes >> request queue capacity 5
+        src.write_bytes(data)
+        dst_url = f"storageapi://server/dst{i}.bin"
+        content_by_address[dst_url] = data
+        uploads.append(asyncio.create_task(storage.upload_file(_path_to_file_url(str(src)), dst_url, overwrite=True)))
+
+    # Let the event loop run until the two slot-holders block on the full queue.
+    for _ in range(2000):
+        await asyncio.sleep(0)
+        if count_open_fds_under(str(tmp_path), ".bin") >= file_transfer_jobs:
+            break
+    # Give any (incorrectly) unbounded extra tasks a chance to slip past the throttler.
+    for _ in range(100):
+        await asyncio.sleep(0)
+
+    assert count_open_fds_under(str(tmp_path), ".bin") == file_transfer_jobs
+    # The whole chunk-streaming phase runs under held slots.
+    assert len(storage._throttler_networkdata.processing_tasks) == file_transfer_jobs
+
+    consume_may_proceed.set()
+    results = await asyncio.gather(*uploads)
+    assert all(r == Result.OK for r in results)
+    assert received == content_by_address
+    # The stored hash is computed from the bytes each stream actually sent.
+    hash_by_address = {call.args[0]: call.args[1] for call in storage._set_nucleus_hash.await_args_list}
+    for address, data in content_by_address.items():
+        expected_hash, _ = calc_nucleus_hash_from_stream(io.BytesIO(data))
+        assert hash_by_address[address] == expected_hash
+    storage._delete_nucleus_hash.assert_not_awaited()
+
+
+@pytest.mark.skipif(not os.path.isdir("/proc/self/fd"), reason="FD sampling requires /proc/self/fd (Linux)")
+@pytest.mark.asyncio
+async def test_storageapi_upload_redirect_streams_file_object_OMPE_74369(tmp_path):
+    """Redirect uploads pass an open file object to aiohttp instead of the file's bytes.
+
+    The file is opened only inside the throttled request (bounding FDs) and streamed
+    by aiohttp, so the whole file is never materialized in memory.
+    """
+    n_uploads = 6
+    file_transfer_jobs = 2
+    storage = _storageapi_for_upload_tests(file_transfer_jobs)
+    storage._upload_method_to_string = lambda _method: "PUT"
+
+    uploads_may_proceed = asyncio.Event()
+    recorded = []
+
+    class _FakeRequestContext:
+        def __init__(self, data):
+            self._data = data
+
+        async def __aenter__(self):
+            recorded.append(
+                {
+                    "data": self._data,
+                    "is_bytes": isinstance(self._data, (bytes, bytearray)),
+                    "pos": self._data.tell() if hasattr(self._data, "tell") else None,
+                }
+            )
+            await uploads_may_proceed.wait()
+            return _FakeUploadResponse()
+
+        async def __aexit__(self, *_exc):
+            return False
+
+    class _FakeSession:
+        def request(self, method, url, headers, data):
+            return _FakeRequestContext(data)
+
+    storage._ensure_aiohttp_session = AsyncMock(return_value=_FakeSession())
+
+    async def _fake_iterate_grpc(_throttler, _grpc_method, request_iterator):
+        await anext(aiter(request_iterator))
+        yield _FakeFlowControlMessage("write_redirect", _FakeWriteRedirectParams("https://upload.example.com/obj"))
+
+    storage._iterate_grpc = _fake_iterate_grpc
+
+    uploads = []
+    for i in range(n_uploads):
+        src = tmp_path / f"src{i}.bin"
+        src.write_bytes(b"payload-%d" % i)
+        uploads.append(
+            asyncio.create_task(storage.upload_file(_path_to_file_url(str(src)), f"storageapi://server/dst{i}.bin", overwrite=True))
+        )
+
+    for _ in range(2000):
+        await asyncio.sleep(0)
+        if len(recorded) >= file_transfer_jobs:
+            break
+    for _ in range(100):
+        await asyncio.sleep(0)
+
+    assert len(recorded) == file_transfer_jobs
+    assert count_open_fds_under(str(tmp_path), ".bin") == file_transfer_jobs
+
+    uploads_may_proceed.set()
+    results = await asyncio.gather(*uploads)
+    assert all(r == Result.OK for r in results)
+    assert len(recorded) == n_uploads
+    for entry in recorded:
+        # An open file object at position 0, not bytes: aiohttp streams it and derives
+        # Content-Length via fstat; the content was never read into memory by wrapp.
+        assert not entry["is_bytes"]
+        assert entry["pos"] == 0
+        assert hasattr(entry["data"], "read")
+        assert hasattr(entry["data"], "fileno")
+        # The wrapper hides the local filename so aiohttp cannot derive MIME-type /
+        # Content-Disposition headers from it (wire parity with a bytes body).
+        assert not hasattr(entry["data"], "name")
+    # The fake session never read the bodies, so the sent bytes were not observed:
+    # no hash may be stored (never hash the mutable path after the fact), and any
+    # previous hash on the overwritten destinations must be removed.
+    storage._set_nucleus_hash.assert_not_awaited()
+    deleted_addresses = {call.args[0] for call in storage._delete_nucleus_hash.await_args_list}
+    assert deleted_addresses == {f"storageapi://server/dst{i}.bin" for i in range(n_uploads)}
+
+
+@pytest.mark.asyncio
+async def test_storageapi_upload_multipart_reads_parts_lazily_OMPE_74369(tmp_path):
+    """Multipart uploads read each part from disk as bounded bytes, never the whole file."""
+    storage = _storageapi_for_upload_tests()
+    storage._upload_method_to_string = lambda _method: "PUT"
+
+    content = b"0123456789"  # part size 4 -> parts of 4, 4, 2 bytes
+    max_part_size = 4
+    src = tmp_path / "src.bin"
+    src.write_bytes(content)
+
+    recorded = []
+
+    class _FakeRequestContext:
+        def __init__(self, data):
+            self._data = data
+
+        async def __aenter__(self):
+            recorded.append(self._data)
+            return _FakeUploadResponse()
+
+        async def __aexit__(self, *_exc):
+            return False
+
+    class _FakeSession:
+        def request(self, method, url, headers, data):
+            return _FakeRequestContext(data)
+
+    storage._ensure_aiohttp_session = AsyncMock(return_value=_FakeSession())
+
+    class _FakeMultipartParams:
+        first_part_write_redirect = _FakeWriteRedirectParams("https://upload.example.com/part0")
+        maximum_size_per_part = max_part_size
+        upload_id = "upload-id"
+
+        def HasField(self, name: str):
+            return name == "maximum_size_per_part"
+
+    async def _fake_iterate_grpc(_throttler, _grpc_method, request_iterator):
+        await anext(aiter(request_iterator))
+        yield _FakeFlowControlMessage("multipart_upload", _FakeMultipartParams())
+
+    storage._iterate_grpc = _fake_iterate_grpc
+
+    grpc_calls = []
+
+    async def _fake_run_grpc(_throttler, grpc_method, request):
+        grpc_calls.append((grpc_method, request))
+        if grpc_method is storage._fileobject_api.UploadPart:
+            return SimpleNamespace(
+                part_write_redirects=[
+                    _FakeWriteRedirectParams(f"https://upload.example.com/part{n}") for n in range(1, request.part_count + 1)
+                ]
+            )
+        return SimpleNamespace()
+
+    storage._run_grpc = _fake_run_grpc
+
+    result = await storage.upload_file(_path_to_file_url(str(src)), "storageapi://server/dst.bin", overwrite=True)
+
+    assert result == Result.OK
+    # Three bounded parts, each read from disk only for its own throttled request.
+    assert recorded == [content[0:4], content[4:8], content[8:10]]
+    assert all(isinstance(part, bytes) and len(part) <= max_part_size for part in recorded)
+    assert grpc_calls[-1][0] is storage._fileobject_api.CompleteMultipartUpload
+    # The stored hash covers the sent parts, in order.
+    expected_hash, _ = calc_nucleus_hash_from_stream(io.BytesIO(content))
+    storage._set_nucleus_hash.assert_awaited_once_with("storageapi://server/dst.bin", expected_hash)
+
+
+@pytest.mark.asyncio
+async def test_storageapi_upload_file_does_not_materialize_content_OMPE_74369(tmp_path):
+    """upload_file passes a path-backed source along; it never reads the file into memory."""
+    storage = _storageapi_for_upload_tests()
+
+    captured = []
+    sent_hash = "sha-256-flat;1048576;fakehash"
+
+    async def _fake_write_source_content(resource_address, source):
+        captured.append((resource_address, source))
+        return Result.OK, sent_hash
+
+    storage._write_source_content = _fake_write_source_content
+
+    async def _must_not_be_called(*_args, **_kwargs):
+        raise AssertionError("upload_file must not route through the bytes-based write_file")
+
+    storage.write_file = _must_not_be_called
+
+    content = b"0123456789" * 100
+    src = tmp_path / "src.bin"
+    src.write_bytes(content)
+
+    result = await storage.upload_file(_path_to_file_url(str(src)), "storageapi://server/dst.bin", overwrite=True)
+
+    assert result == Result.OK
+    assert len(captured) == 1
+    address, source = captured[0]
+    assert address == "storageapi://server/dst.bin"
+    # Path-backed: the content stays on disk until a transfer slot is held.
+    # get_path_from_url returns forward slashes on Windows; compare normalized.
+    assert source._path is not None and os.path.normpath(source._path) == os.path.normpath(str(src))
+    assert source._data is None
+    assert source.size == len(content)
+    # The stored hash is the one computed from the bytes the transfer sent.
+    storage._set_nucleus_hash.assert_awaited_once_with("storageapi://server/dst.bin", sent_hash)
+
+
+def test_storageapi_write_source_rejects_changed_file_OMPE_74369(tmp_path):
+    """A path-backed source refuses to open a file that changed since it was hashed.
+
+    Otherwise the upload would send bytes that no longer match the nucleus hash
+    computed before throttling and the advertised data_object_size.
+    """
+    src = tmp_path / "src.bin"
+    src.write_bytes(b"original")
+    source = _WriteSource.from_path(str(src))
+    part = source.slice(0, 4)
+
+    src.write_bytes(b"changed content with a different size")
+
+    with pytest.raises(StorageOperationError, match="changed while the upload was queued"):
+        with source.open():
+            pass
+    with pytest.raises(StorageOperationError, match="changed while the upload was queued"):
+        part.read_bytes()
+    with pytest.raises(StorageOperationError, match="changed while the upload was queued"):
+        with source.open_payload():
+            pass
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="detection of a same-size rewrite relies on POSIX ctime semantics")
+def test_storageapi_write_source_rejects_same_size_rewrite_with_restored_mtime_OMPE_74369(tmp_path):
+    """Even a same-size rewrite that restores mtime is rejected via the ctime check."""
+    src = tmp_path / "src.bin"
+    src.write_bytes(b"original")
+    st = os.stat(src)
+    source = _WriteSource.from_path(str(src))
+
+    # ctime is set from a coarse kernel clock: a rewrite within the same tick
+    # keeps the original ctime and is legitimately indistinguishable. Repeat
+    # until the clock has advanced so the test exercises the detectable case.
+    for _ in range(500):
+        src.write_bytes(b"ORIGINAL")  # same size, different bytes
+        os.utime(src, ns=(st.st_atime_ns, st.st_mtime_ns))  # restore mtime
+        if os.stat(src).st_ctime_ns != st.st_ctime_ns:
+            break
+        time.sleep(0.01)
+    else:
+        pytest.skip("filesystem ctime granularity too coarse to observe the rewrite")
+
+    with pytest.raises(StorageOperationError, match="changed while the upload was queued"):
+        with source.open():
+            pass
+
+
+def test_incremental_nucleus_hasher_matches_stream_hash_OMPE_74369():
+    """Feeding arbitrary chunk sizes yields exactly calc_nucleus_hash_from_stream's result."""
+    one_mib = 1024 * 1024
+    pattern = b"0123456789abcdef" * 4096  # 64 KiB
+    for size in (0, 1, one_mib - 1, one_mib, one_mib + 1, 2 * one_mib + 12345):
+        data = (pattern * (size // len(pattern) + 1))[:size]
+        expected = calc_nucleus_hash_from_stream(io.BytesIO(data))
+        hasher = IncrementalNucleusHasher()
+        step = 65537  # deliberately misaligned with the 1 MiB hash blocks
+        for i in range(0, len(data), step):
+            hasher.update(data[i : i + step])
+        assert hasher.finalize() == expected
+        # finalize() is idempotent
+        assert hasher.finalize() == expected
+
+
+@pytest.mark.asyncio
+async def test_storageapi_upload_stores_hash_of_sent_bytes_even_when_change_is_undetectable_OMPE_74369(tmp_path):
+    """A source change that evades stat detection cannot make the stored hash stale.
+
+    Simulates the Windows corner (in-place same-size rewrite with restored
+    mtime): the stat snapshot passes, the changed bytes are uploaded — and the
+    stored hash is the hash of exactly those uploaded bytes.
+    """
+    storage = _storageapi_for_upload_tests()
+
+    received = {}
+
+    async def _fake_iterate_grpc(_throttler, _grpc_method, request_iterator):
+        initial_request = await anext(aiter(request_iterator))
+        chunks = []
+        drained = asyncio.Event()
+
+        async def _drain():
+            async for request in request_iterator:
+                chunks.append(request.chunk.chunk)
+            drained.set()
+
+        drain_task = asyncio.create_task(_drain())
+        try:
+            yield _FakeWriteResponse("write_chunks_accepted")
+            await drained.wait()
+            received[initial_request.params.destination_resource_address] = b"".join(chunks)
+            yield _FakeWriteResponse("resource_info")
+        finally:
+            drain_task.cancel()
+            try:
+                await drain_task
+            except asyncio.CancelledError:
+                pass
+
+    storage._iterate_grpc = _fake_iterate_grpc
+
+    original = b"original"
+    changed = b"CHANGED!"  # same size
+    src = tmp_path / "src.bin"
+    src.write_bytes(original)
+    source = _WriteSource.from_path(str(src))
+    src.write_bytes(changed)
+    source._snapshot = None  # the rewrite is undetectable via stat on this platform
+
+    result, sent_hash = await storage._write_source_content("storageapi://server/dst.bin", source)
+
+    assert result == Result.OK
+    assert received["storageapi://server/dst.bin"] == changed
+    expected_hash, _ = calc_nucleus_hash_from_stream(io.BytesIO(changed))
+    assert sent_hash == expected_hash
+
+
+@pytest.mark.asyncio
+async def test_storageapi_redirect_upload_hash_matches_streamed_bytes_OMPE_74369(tmp_path):
+    """A redirect upload's stored hash is computed from the streamed request body."""
+    storage = _storageapi_for_upload_tests()
+    storage._upload_method_to_string = lambda _method: "PUT"
+
+    bodies = []
+
+    class _ReadingRequestContext:
+        def __init__(self, data):
+            self._data = data
+
+        async def __aenter__(self):
+            # Consume the body the way aiohttp does: sequential bounded reads.
+            chunks = []
+            while True:
+                chunk = self._data.read(65536)
+                if not chunk:
+                    break
+                chunks.append(chunk)
+            bodies.append(b"".join(chunks))
+            return _FakeUploadResponse()
+
+        async def __aexit__(self, *_exc):
+            return False
+
+    class _FakeSession:
+        def request(self, method, url, headers, data):
+            return _ReadingRequestContext(data)
+
+    storage._ensure_aiohttp_session = AsyncMock(return_value=_FakeSession())
+
+    async def _fake_iterate_grpc(_throttler, _grpc_method, request_iterator):
+        await anext(aiter(request_iterator))
+        yield _FakeFlowControlMessage("write_redirect", _FakeWriteRedirectParams("https://upload.example.com/obj"))
+
+    storage._iterate_grpc = _fake_iterate_grpc
+
+    content = (b"0123456789abcdef" * 4096) * 32 + b"tail"  # > 2 MiB, crosses hash-block boundaries
+    src = tmp_path / "src.bin"
+    src.write_bytes(content)
+
+    result = await storage.upload_file(_path_to_file_url(str(src)), "storageapi://server/dst.bin", overwrite=True)
+
+    assert result == Result.OK
+    assert bodies == [content]
+    expected_hash, _ = calc_nucleus_hash_from_stream(io.BytesIO(content))
+    storage._set_nucleus_hash.assert_awaited_once_with("storageapi://server/dst.bin", expected_hash)
+
+
+@pytest.mark.asyncio
+async def test_storageapi_zero_byte_upload_validates_changed_source_OMPE_74369(tmp_path):
+    """A zero-byte upload completed server-side re-validates the source it never opened."""
+    storage = _storageapi_for_upload_tests()
+
+    server_may_respond = asyncio.Event()
+
+    async def _fake_iterate_grpc(_throttler, _grpc_method, request_iterator):
+        initial_request = await anext(aiter(request_iterator))
+        assert initial_request.params.data_object_size == 0
+        await server_may_respond.wait()
+        yield _FakeWriteResponse("resource_info")
+
+    storage._iterate_grpc = _fake_iterate_grpc
+
+    src = tmp_path / "src.bin"
+    src.write_bytes(b"")
+    upload = asyncio.create_task(storage.upload_file(_path_to_file_url(str(src)), "storageapi://server/dst.bin", overwrite=True))
+    # Let the upload snapshot the empty file and wait on the server response...
+    for _ in range(100):
+        await asyncio.sleep(0)
+    # ...then grow the source before the server confirms the 0-byte write.
+    src.write_bytes(b"no longer empty")
+    server_may_respond.set()
+
+    with pytest.raises(StorageOperationError, match="changed while the upload was queued"):
+        await upload
+
+    # An unchanged 0-byte source still uploads fine.
+    src2 = tmp_path / "src2.bin"
+    src2.write_bytes(b"")
+    result = await storage.upload_file(_path_to_file_url(str(src2)), "storageapi://server/dst2.bin", overwrite=True)
+    assert result == Result.OK
+
+
+@pytest.mark.asyncio
+async def test_storageapi_redirect_download_opens_destination_inside_slot_OMPE_74369(tmp_path):
+    """The redirect download opens its destination only once it holds the transfer slot."""
+    storage = StorageAPIStorageGRPC("0.0.0-test", False, throttling_params=ThrottlingParameters(file_transfer_jobs=1, jobs=8))
+    payload = b"redirect-payload"
+
+    class _FakeContent:
+        def iter_chunked(self, _n):
+            async def _gen():
+                yield payload
+
+            return _gen()
+
+    class _FakeGetResponse:
+        content = _FakeContent()
+
+        def raise_for_status(self):
+            pass
+
+    class _FakeGetContext:
+        async def __aenter__(self):
+            return _FakeGetResponse()
+
+        async def __aexit__(self, *_exc):
+            return False
+
+    class _FakeSession:
+        def get(self, _url, headers=None):
+            return _FakeGetContext()
+
+    slot_may_release = asyncio.Event()
+
+    async def _occupy_slot():
+        await slot_may_release.wait()
+
+    holder = asyncio.create_task(storage._throttler_networkdata.run(_occupy_slot()))
+
+    dst = tmp_path / "dst.bin"
+    download = asyncio.create_task(
+        storage._download_redirect_single_stream_to_file(
+            _FakeSession(), "https://download.example.com/obj", {}, str(dst), expected_size=len(payload)
+        )
+    )
+    for _ in range(200):
+        await asyncio.sleep(0)
+    # The single slot is occupied: the pending download must not have created the destination.
+    assert not dst.exists()
+
+    slot_may_release.set()
+    await holder
+    await download
+    assert dst.read_bytes() == payload
 
 
 @pytest.mark.asyncio
@@ -541,25 +1218,204 @@ class _FakeRangeSession:
 @pytest.mark.asyncio
 async def test_storageapi_download_to_file_streams_grpc_chunks_to_disk(tmp_path):
     storage = StorageAPIStorageGRPC("0.0.0-test", False, throttling_params=ThrottlingParameters())
-    storage._fileobject_api = SimpleNamespace(ReadFromAddress=object())
-    storage._fileobject_msgs = SimpleNamespace(
-        ReadFromAddressRequest=lambda resource_address: SimpleNamespace(resource_address=resource_address)
-    )
-    storage._ensure_grpc_stubs = AsyncMock()
-    storage._sanitize_address_for_storage_service = AsyncMock(return_value="omniverse://server.example/repo/file.bin")
 
-    async def _fake_iterate_grpc(*_args, **_kwargs):
+    async def _fake_read_from_address(_request, metadata=None):
         yield _FakeReply("resource_info", size=11)
         yield _FakeReply("chunk", chunk=b"hello ")
         yield _FakeReply("chunk", chunk=b"world")
 
-    storage._iterate_grpc = _fake_iterate_grpc
+    storage._fileobject_api = SimpleNamespace(ReadFromAddress=_fake_read_from_address)
+    storage._fileobject_msgs = SimpleNamespace(
+        ReadFromAddressRequest=lambda resource_address: SimpleNamespace(resource_address=resource_address)
+    )
+    storage._ensure_grpc_stubs = AsyncMock()
+    storage._grpc_metadata = AsyncMock(return_value=None)
+    storage._sanitize_address_for_storage_service = AsyncMock(return_value="omniverse://server.example/repo/file.bin")
 
     dst_path = tmp_path / "downloaded.bin"
     result = await storage._download_to_file("omniverse://server.example/repo/file.bin", str(dst_path))
 
     assert result == Result.OK
     assert dst_path.read_bytes() == b"hello world"
+
+
+@pytest.mark.asyncio
+async def test_storageapi_download_to_file_retries_grpc_stream_reset(monkeypatch, tmp_path):
+    Stats.get().clear()
+    storage = StorageAPIStorageGRPC("0.0.0-test", False, throttling_params=ThrottlingParameters())
+    call_count = 0
+    sleep_calls = []
+    dst_path = tmp_path / "downloaded.bin"
+    dst_path.write_bytes(b"old")
+
+    async def _fake_sleep(delay):
+        assert dst_path.read_bytes() == b"old"
+        sleep_calls.append(delay)
+
+    async def _fake_read_from_address(_request, metadata=None):
+        nonlocal call_count
+        call_count += 1
+        yield _FakeReply("resource_info", size=5)
+        if call_count == 1:
+            yield _FakeReply("chunk", chunk=b"bad")
+            raise _FakeGrpcError(grpc.StatusCode.UNAVAILABLE, "recvmsg:Connection reset by peer")
+        yield _FakeReply("chunk", chunk=b"hello")
+
+    storage._fileobject_api = SimpleNamespace(ReadFromAddress=_fake_read_from_address)
+    storage._fileobject_msgs = SimpleNamespace(
+        ReadFromAddressRequest=lambda resource_address: SimpleNamespace(resource_address=resource_address)
+    )
+    storage._ensure_grpc_stubs = AsyncMock()
+    storage._grpc_metadata = AsyncMock(return_value=None)
+    storage._sanitize_address_for_storage_service = AsyncMock(return_value="omniverse://server.example/repo/file.bin")
+    monkeypatch.setattr("wrapp.utils.storage_impls.storageapi.asyncio.sleep", _fake_sleep)
+
+    result = await storage._download_to_file("omniverse://server.example/repo/file.bin", str(dst_path))
+
+    assert result == Result.OK
+    assert dst_path.read_bytes() == b"hello"
+    assert list(tmp_path.glob("*.wrapp-download-*.tmp")) == []
+    assert call_count == 2
+    assert sleep_calls == [1.0]
+    assert Stats.get().get_stat(StatType.GRPC_RETRY) == 1
+
+
+@pytest.mark.skipif(not os.path.isdir("/proc/self/fd"), reason="FD sampling requires /proc/self/fd (Linux)")
+@pytest.mark.asyncio
+async def test_storageapi_grpc_download_bounds_open_destination_files_OMPE_74369(tmp_path):
+    """gRPC-chunk downloads hold one networkdata slot for the whole stream.
+
+    The destination is opened only under that held slot, so at most
+    file_transfer_jobs destination files are open at once. Previously the slot
+    was acquired per reply and released in between, leaving the fd bounded only
+    by admission rate.
+    """
+    n_downloads = 6
+    file_transfer_jobs = 2
+    payload = b"grpc-chunk-payload"
+
+    reached_streams = 0
+    streams_may_finish = asyncio.Event()  # never set until the assert -> streams hang holding their slot
+
+    storage = StorageAPIStorageGRPC(
+        "0.0.0-test", False, throttling_params=ThrottlingParameters(file_transfer_jobs=file_transfer_jobs, jobs=8)
+    )
+
+    async def _fake_read_from_address(_request, metadata=None):
+        nonlocal reached_streams
+        yield _FakeReply("resource_info", size=len(payload))
+        yield _FakeReply("chunk", chunk=payload[:4])
+        reached_streams += 1
+        # Keep the stream alive cooperatively (empty chunks) instead of blocking:
+        # a per-reply-throttled implementation would interleave all 6 downloads
+        # here and open all 6 destinations, while the single-held-slot
+        # implementation admits only file_transfer_jobs streams at all.
+        while not streams_may_finish.is_set():
+            await asyncio.sleep(0)
+            yield _FakeReply("chunk", chunk=b"")
+        yield _FakeReply("chunk", chunk=payload[4:])
+
+    storage._fileobject_api = SimpleNamespace(ReadFromAddress=_fake_read_from_address)
+    storage._fileobject_msgs = SimpleNamespace(
+        ReadFromAddressRequest=lambda resource_address: SimpleNamespace(resource_address=resource_address)
+    )
+    storage._ensure_grpc_stubs = AsyncMock()
+    storage._grpc_metadata = AsyncMock(return_value=None)
+    storage._sanitize_address_for_storage_service = AsyncMock(side_effect=lambda url: url)
+
+    downloads = []
+    for i in range(n_downloads):
+        dst = tmp_path / f"dst{i}.bin"
+        downloads.append(
+            asyncio.create_task(storage.download_file(f"storageapi://server/file{i}.bin", _path_to_file_url(str(dst)), overwrite=True))
+        )
+
+    for _ in range(2000):
+        await asyncio.sleep(0)
+        if reached_streams >= file_transfer_jobs:
+            break
+    # Give any (incorrectly) unbounded extra tasks a chance to slip past the throttler.
+    for _ in range(100):
+        await asyncio.sleep(0)
+
+    assert reached_streams == file_transfer_jobs
+    # Downloads write to <dst>.wrapp-download-<token>.tmp before the final os.replace.
+    assert count_open_fds_under(str(tmp_path), ".tmp") == file_transfer_jobs
+    assert len(storage._throttler_networkdata.processing_tasks) == file_transfer_jobs
+
+    streams_may_finish.set()
+    results = await asyncio.gather(*downloads)
+    assert all(r == Result.OK for r in results)
+    for i in range(n_downloads):
+        assert (tmp_path / f"dst{i}.bin").read_bytes() == payload
+
+
+@pytest.mark.asyncio
+async def test_storageapi_grpc_redirect_reply_is_handled_outside_the_slot_OMPE_74369(tmp_path):
+    """A redirect reply ends the throttled stream before the redirect download runs.
+
+    The redirect download acquires its own networkdata slots; with
+    file_transfer_jobs=1 it would deadlock (or trip the same-throttler re-entry
+    guard) if the stream's slot were still held.
+    """
+    payload = b"redirect payload"
+    storage = StorageAPIStorageGRPC("0.0.0-test", False, throttling_params=ThrottlingParameters(file_transfer_jobs=1, jobs=8))
+
+    async def _fake_read_from_address(_request, metadata=None):
+        yield _FakeReply("resource_info", size=len(payload))
+        yield _FakeReply("redirect", redirect_url="https://download.example/file", headers={})
+
+    storage._fileobject_api = SimpleNamespace(ReadFromAddress=_fake_read_from_address)
+    storage._fileobject_msgs = SimpleNamespace(
+        ReadFromAddressRequest=lambda resource_address: SimpleNamespace(resource_address=resource_address)
+    )
+    storage._ensure_grpc_stubs = AsyncMock()
+    storage._grpc_metadata = AsyncMock(return_value=None)
+    storage._sanitize_address_for_storage_service = AsyncMock(side_effect=lambda url: url)
+    storage._ensure_aiohttp_session = AsyncMock(return_value=object())
+
+    observed_slots = []
+
+    async def _fake_download_redirect_to_file(*, session, redirect_target_url, headers, file_path, expected_size):
+        observed_slots.append(len(storage._throttler_networkdata.processing_tasks))
+        with open(file_path, "wb") as f:
+            f.write(payload)
+
+    storage._download_redirect_to_file = _fake_download_redirect_to_file
+
+    dst = tmp_path / "dst.bin"
+    result = await storage.download_file("storageapi://server/file.bin", _path_to_file_url(str(dst)), overwrite=True)
+
+    assert result == Result.OK
+    assert dst.read_bytes() == payload
+    # The stream's slot was released before the redirect download started.
+    assert observed_slots == [0]
+
+
+@pytest.mark.asyncio
+async def test_storageapi_grpc_download_fails_on_size_mismatch_OMPE_74369(tmp_path):
+    """A chunk stream that ends cleanly but short of the declared size fails the download."""
+    storage = StorageAPIStorageGRPC("0.0.0-test", False, throttling_params=ThrottlingParameters())
+
+    async def _fake_read_from_address(_request, metadata=None):
+        yield _FakeReply("resource_info", size=10)
+        yield _FakeReply("chunk", chunk=b"short")  # 5 of the declared 10 bytes
+
+    storage._fileobject_api = SimpleNamespace(ReadFromAddress=_fake_read_from_address)
+    storage._fileobject_msgs = SimpleNamespace(
+        ReadFromAddressRequest=lambda resource_address: SimpleNamespace(resource_address=resource_address)
+    )
+    storage._ensure_grpc_stubs = AsyncMock()
+    storage._grpc_metadata = AsyncMock(return_value=None)
+    storage._sanitize_address_for_storage_service = AsyncMock(return_value="omniverse://server.example/repo/file.bin")
+
+    dst_path = tmp_path / "downloaded.bin"
+    result = await storage._download_to_file("omniverse://server.example/repo/file.bin", str(dst_path))
+
+    assert result == Result.ERROR
+    # The partial temp file was removed and no destination was created.
+    assert not dst_path.exists()
+    assert list(tmp_path.glob("*.wrapp-download-*.tmp")) == []
 
 
 @pytest.mark.asyncio
@@ -594,6 +1450,78 @@ async def test_storageapi_read_file_content_uses_optimized_redirect_download(tmp
     assert download_calls == [
         (storage._ensure_aiohttp_session.return_value, "https://download.example/file", {"authorization": "Bearer token"}, len(payload))
     ]
+
+
+@pytest.mark.asyncio
+async def test_storageapi_read_file_content_retries_grpc_stream_reset(monkeypatch):
+    Stats.get().clear()
+    storage = StorageAPIStorageGRPC("0.0.0-test", False, throttling_params=ThrottlingParameters())
+    storage._fileobject_api = SimpleNamespace(ReadFromAddress=object())
+    storage._fileobject_msgs = SimpleNamespace(
+        ReadFromAddressRequest=lambda resource_address: SimpleNamespace(resource_address=resource_address)
+    )
+    storage._ensure_grpc_stubs = AsyncMock()
+    storage._sanitize_address_for_storage_service = AsyncMock(return_value="omniverse://server.example/repo/file.bin")
+    call_count = 0
+    sleep_calls = []
+
+    async def _fake_sleep(delay):
+        sleep_calls.append(delay)
+
+    async def _fake_iterate_grpc(*_args, **_kwargs):
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            raise _FakeGrpcError(grpc.StatusCode.UNAVAILABLE, "recvmsg:Connection reset by peer")
+        yield _FakeReply("resource_info", size=2)
+        yield _FakeReply("chunk", chunk=b"ok")
+
+    monkeypatch.setattr("wrapp.utils.storage_impls.storageapi.asyncio.sleep", _fake_sleep)
+    storage._iterate_grpc = _fake_iterate_grpc
+
+    result, content = await storage.read_file_content("omniverse://server.example/repo/file.bin")
+
+    assert result == Result.OK
+    assert content == b"ok"
+    assert call_count == 2
+    assert sleep_calls == [1.0]
+    assert Stats.get().get_stat(StatType.GRPC_RETRY) == 1
+
+
+@pytest.mark.asyncio
+async def test_storageapi_read_file_content_respects_read_retries_env(monkeypatch):
+    Stats.get().clear()
+    monkeypatch.setenv("WRAPP_STORAGE_API_READ_RETRIES", "1")
+    storage = StorageAPIStorageGRPC("0.0.0-test", False, throttling_params=ThrottlingParameters())
+    assert storage._read_max_attempts == 1
+    storage._fileobject_api = SimpleNamespace(ReadFromAddress=object())
+    storage._fileobject_msgs = SimpleNamespace(
+        ReadFromAddressRequest=lambda resource_address: SimpleNamespace(resource_address=resource_address)
+    )
+    storage._ensure_grpc_stubs = AsyncMock()
+    storage._sanitize_address_for_storage_service = AsyncMock(return_value="omniverse://server.example/repo/file.bin")
+    call_count = 0
+    sleep_calls = []
+
+    async def _fake_sleep(delay):
+        sleep_calls.append(delay)
+
+    async def _fake_iterate_grpc(*_args, **_kwargs):
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            raise _FakeGrpcError(grpc.StatusCode.UNAVAILABLE, "recvmsg:Connection reset by peer")
+        yield _FakeReply("resource_info", size=0)
+
+    monkeypatch.setattr("wrapp.utils.storage_impls.storageapi.asyncio.sleep", _fake_sleep)
+    storage._iterate_grpc = _fake_iterate_grpc
+
+    with pytest.raises(StorageOperationError, match="Error calling read"):
+        await storage.read_file_content("omniverse://server.example/repo/file.bin")
+
+    assert call_count == 1
+    assert sleep_calls == []
+    assert Stats.get().get_stat(StatType.GRPC_RETRY) == 0
 
 
 @pytest.mark.asyncio
@@ -633,6 +1561,42 @@ async def test_storageapi_read_resource_identity_uses_optimized_redirect_downloa
             len(payload),
         )
     ]
+
+
+@pytest.mark.asyncio
+async def test_storageapi_read_resource_identity_retries_grpc_stream_reset(monkeypatch):
+    Stats.get().clear()
+    storage = StorageAPIStorageGRPC("0.0.0-test", False, throttling_params=ThrottlingParameters())
+    storage._fileobject_api = SimpleNamespace(Read=object())
+    storage._fileobject_msgs = SimpleNamespace(ReadRequest=lambda resource_identity: SimpleNamespace(resource_identity=resource_identity))
+    storage._fileobject_types = SimpleNamespace(
+        ResourceIdentity=lambda encoded_identity: SimpleNamespace(encoded_identity=encoded_identity)
+    )
+    storage._ensure_grpc_stubs = AsyncMock()
+    call_count = 0
+    sleep_calls = []
+
+    async def _fake_sleep(delay):
+        sleep_calls.append(delay)
+
+    async def _fake_iterate_grpc(*_args, **_kwargs):
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            raise _FakeGrpcError(grpc.StatusCode.UNAVAILABLE, "recvmsg:Connection reset by peer")
+        yield _FakeReply("metadata", size=8)
+        yield _FakeReply("chunk", chunk=b"identity")
+
+    monkeypatch.setattr("wrapp.utils.storage_impls.storageapi.asyncio.sleep", _fake_sleep)
+    storage._iterate_grpc = _fake_iterate_grpc
+
+    result, content = await storage.read_resource_identity("encoded-identity")
+
+    assert result == Result.OK
+    assert content == b"identity"
+    assert call_count == 2
+    assert sleep_calls == [1.0]
+    assert Stats.get().get_stat(StatType.GRPC_RETRY) == 1
 
 
 @pytest.mark.asyncio
@@ -693,6 +1657,65 @@ async def test_storageapi_redirect_download_retries_transient_failure(monkeypatc
         redirect_target_url="https://download.example/file",
         headers={"authorization": "Bearer token"},
         file_path=str(tmp_path / "retry.bin"),
+        expected_size=10,
+    )
+
+    assert storage._probe_redirect_range_download_size.await_count == 2
+    storage._download_redirect_single_stream_to_file.assert_awaited_once()
+    assert sleep_calls == [1.0]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "retries_env_var",
+    ["WRAPP_STORAGE_API_DOWNLOAD_RETRIES", "WRAPP_STORAGEAPI_DOWNLOAD_RETRIES"],
+)
+async def test_storageapi_redirect_download_retries_configurable(monkeypatch, tmp_path, retries_env_var):
+    storage = StorageAPIStorageGRPC("0.0.0-test", False, throttling_params=ThrottlingParameters())
+    storage._enable_range_download = True
+    storage._probe_redirect_range_download_size = AsyncMock(side_effect=[asyncio.TimeoutError(), None])
+    storage._download_redirect_single_stream_to_file = AsyncMock()
+    sleep_calls = []
+
+    async def _fake_sleep(delay):
+        sleep_calls.append(delay)
+
+    monkeypatch.setenv(retries_env_var, "2")
+    monkeypatch.setattr("wrapp.utils.storage_impls.storageapi.asyncio.sleep", _fake_sleep)
+
+    await storage._download_redirect_to_file(
+        session=object(),
+        redirect_target_url="https://download.example/file",
+        headers={"authorization": "Bearer token"},
+        file_path=str(tmp_path / "retry-configurable.bin"),
+        expected_size=10,
+    )
+
+    assert storage._probe_redirect_range_download_size.await_count == 2
+    storage._download_redirect_single_stream_to_file.assert_awaited_once()
+    assert sleep_calls == [1.0]
+
+
+@pytest.mark.asyncio
+async def test_storageapi_redirect_download_ignores_upload_retries(monkeypatch, tmp_path):
+    storage = StorageAPIStorageGRPC("0.0.0-test", False, throttling_params=ThrottlingParameters())
+    storage._enable_range_download = True
+    storage._probe_redirect_range_download_size = AsyncMock(side_effect=[asyncio.TimeoutError(), None])
+    storage._download_redirect_single_stream_to_file = AsyncMock()
+    sleep_calls = []
+
+    async def _fake_sleep(delay):
+        sleep_calls.append(delay)
+
+    monkeypatch.setenv("WRAPP_STORAGE_API_UPLOAD_RETRIES", "1")
+    monkeypatch.setenv("WRAPP_STORAGE_API_DOWNLOAD_RETRIES", "2")
+    monkeypatch.setattr("wrapp.utils.storage_impls.storageapi.asyncio.sleep", _fake_sleep)
+
+    await storage._download_redirect_to_file(
+        session=object(),
+        redirect_target_url="https://download.example/file",
+        headers={"authorization": "Bearer token"},
+        file_path=str(tmp_path / "retry-download-not-upload.bin"),
         expected_size=10,
     )
 
@@ -809,7 +1832,12 @@ async def test_STORAGEAPI_list_file_tree_does_not_double_decode():
     storage._fileobject_api = SimpleNamespace(Enumerate=object())
     storage._fileobject_msgs = SimpleNamespace(EnumerateRequest=lambda resource_address: SimpleNamespace(resource_address=resource_address))
     storage._sanitize_address_for_storage_service = AsyncMock(return_value="omniverse://server/repo")
-    storage.is_folder = AsyncMock(return_value=(Result.OK, False))
+    storage.stat = AsyncMock(
+        return_value=(
+            Result.OK,
+            StorageAPIListEntry("Mini%20map/file.usd", "identity-1", None, None, is_folder=False),
+        )
+    )
 
     # The server returns ``%2520`` which is the double-encoded form of ``%20``.
     # After a single decode this should become ``%20`` (a literal percent-sign
@@ -826,11 +1854,15 @@ async def test_STORAGEAPI_list_file_tree_does_not_double_decode():
     async for entry in storage.list_file_tree("omniverse://server/repo"):
         entries.append(entry)
 
-    assert len(entries) == 1
+    assert len(entries) == 2
+    folder_entry = next(entry for entry in entries if entry.is_folder)
+    assert folder_entry.relative_path == "Mini%20map"
+
+    file_entry = next(entry for entry in entries if not entry.is_folder)
     # Single decode: %2520 -> %20  (correct)
-    assert entries[0].relative_path == "Mini%20map/file.usd"
+    assert file_entry.relative_path == "Mini%20map/file.usd"
     # Double decode would give "Mini map/file.usd" (wrong)
-    assert entries[0].relative_path != "Mini map/file.usd"
+    assert file_entry.relative_path != "Mini map/file.usd"
 
 
 @pytest.mark.asyncio
@@ -860,15 +1892,19 @@ async def test_STORAGEAPI_list_file_tree_encodes_outbound_and_decodes_returned_a
     storage._fileobject_msgs = SimpleNamespace(EnumerateRequest=_FakeEnumerateRequest)
     storage._sanitize_address_for_storage_service = AsyncMock(return_value="omniverse://server/Material Library")
     storage._iterate_grpc = _fake_iterate_grpc
-    # is_folder returns False so the entry is yielded as a file
-    storage.is_folder = AsyncMock(return_value=(Result.OK, False))
+    storage.stat = AsyncMock(
+        return_value=(
+            Result.OK,
+            StorageAPIListEntry("file.usd", "identity-1", None, None, is_folder=False),
+        )
+    )
 
     entries = []
     async for entry in storage.list_file_tree("omniverse://server/Material Library"):
         entries.append(entry)
 
     # Outbound resource_address must be percent-encoded
-    assert captured_request["resource_address"] == "omniverse://server/Material%20Library"
+    assert captured_request["resource_address"] == "omniverse://server/Material%20Library/"
 
     # Exactly one file entry should be returned
     assert len(entries) == 1

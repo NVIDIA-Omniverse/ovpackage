@@ -39,8 +39,37 @@ from wrapp.utils.utils import (
 )
 
 from .common import *
-from .storage_test_helpers import random_bytes
+from .storage_test_helpers import (
+    StorageBackendForTests,
+    random_bytes,
+)
 from .wrapp_sync_funcs import wrapp_url_exists_sync
+
+
+def _make_catalog(relative_paths):
+    return Catalog(
+        root="file:/dummy",
+        items=[CatalogItem(source_path=f"file:/dummy/{p}", relative_path=p) for p in relative_paths],
+    )
+
+
+@pytest.mark.parametrize(
+    "relative_paths,expected",
+    [
+        ([], []),
+        (["foo.psd", "bar.txt", "baz/qux.png"], []),
+        (["foo.psd", "Foo.psd", "bar.txt"], ["foo.psd", "Foo.psd"]),
+        (["foo.psd", "Foo.psd", "bar.txt", "Bar.txt", "unique.png"], ["foo.psd", "Foo.psd", "bar.txt", "Bar.txt"]),
+        (
+            ["SubUSDs/instances/.thumbs/lidar_link.usd.png", "SubUSDs/instances/.thumbs/Lidar_Link.usd.png"],
+            ["SubUSDs/instances/.thumbs/lidar_link.usd.png", "SubUSDs/instances/.thumbs/Lidar_Link.usd.png"],
+        ),
+    ],
+)
+def test_check_case_insensitive_path_conflicts(relative_paths, expected):
+    has_conflicts, paths = _make_catalog(relative_paths).check_case_insensitive_path_conflicts()
+    assert has_conflicts is bool(expected)
+    assert sorted(paths) == sorted(expected)
 
 
 @pytest.fixture
@@ -239,7 +268,9 @@ async def test_catalog_hash_cache(cli_runner, test_folder_url, authenticator, lo
     os.remove(cachefile)
 
 
-def test_catalog_without_hub(test_folder_url, authenticator, local_tmp_folder, client_cache_size_unchanged, large_data_set_for_catalog):
+def test_catalog_without_hub(
+    test_folder_url, authenticator, local_tmp_folder, client_cache_size_unchanged, large_data_set_for_catalog, storage_backend
+):
     host = urlparse(test_folder_url).netloc
     source_url = large_data_set_for_catalog
     one_file = "Carbon_Fiber_ANI_01.mdl"
@@ -247,7 +278,8 @@ def test_catalog_without_hub(test_folder_url, authenticator, local_tmp_folder, c
     if wrapp_url_exists_sync(test_catalog_name):
         os.remove(test_catalog_name)
     params = ["catalog", source_url, test_catalog_name, "--local-hash"]
-    run_wrapp_without_hub(params)
+    with client_cache_size_unchanged(storage_backend.storage_type() == StorageBackendForTests.NUCLEUS):
+        run_wrapp_without_hub(params)
     assert wrapp_url_exists_sync(test_catalog_name)
     with open(test_catalog_name) as jsonfile:
         data = json.load(jsonfile)

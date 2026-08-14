@@ -1,0 +1,95 @@
+{
+    "$defs": {
+        "ManifestFileEntry": {
+            "properties": {
+                "relative_path": {
+                    "type": "string"
+                },
+                "resource_info": {
+                    "$ref": "#/$defs/ManifestResourceInfo"
+                }
+            },
+            "required": [
+                "relative_path",
+                "resource_info"
+            ],
+            "type": "object"
+        },
+        "ManifestMinimalFileEntry": {
+            "properties": {
+                "relative_path": {
+                    "type": "string"
+                },
+                "resource_identity": {
+                    "type": "string"
+                }
+            },
+            "required": [
+                "relative_path",
+                "resource_identity"
+            ],
+            "type": "object"
+        },
+        "ManifestResourceInfo": {
+            "properties": {
+                "modified_time": {
+                    "type": "string"
+                },
+                "resource_identity": {
+                    "type": "string"
+                },
+                "size": {
+                    "type": "integer"
+                }
+            },
+            "required": [
+                "resource_identity",
+                "size",
+                "modified_time"
+            ],
+            "type": "object"
+        },
+        "WRAPPModelVersion": {
+            "properties": {
+                "version_string": {
+                    "pattern": "[0-9]+(\\.[0-9]+)?",
+                    "type": "string"
+                }
+            },
+            "required": [
+                "version_string"
+            ],
+            "type": "object"
+        }
+    },
+    "additionalProperties": true,
+    "properties": {
+        "files": {
+            "items": {
+                "anyOf": [
+                    {
+                        "$ref": "#/$defs/ManifestFileEntry"
+                    },
+                    {
+                        "$ref": "#/$defs/ManifestMinimalFileEntry"
+                    }
+                ]
+            },
+            "type": "array"
+        },
+        "format_version": {
+            "$ref": "#/$defs/WRAPPModelVersion",
+            "default": {
+                "version_string": "1.0"
+            }
+        },
+        "storage_api_version": {
+            "default": "v1alpha",
+            "type": "string"
+        }
+    },
+    "required": [
+        "files"
+    ],
+    "type": "object"
+}

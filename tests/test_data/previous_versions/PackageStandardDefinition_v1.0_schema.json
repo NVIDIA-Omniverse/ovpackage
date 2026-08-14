@@ -1,0 +1,61 @@
+{
+    "$defs": {
+        "PackageStandardMetadataEntry": {
+            "properties": {
+                "hash": {
+                    "additionalProperties": {
+                        "type": "string"
+                    },
+                    "type": "object"
+                },
+                "name": {
+                    "type": "string"
+                }
+            },
+            "required": [
+                "name",
+                "hash"
+            ],
+            "type": "object"
+        }
+    },
+    "additionalProperties": true,
+    "properties": {
+        "content_hash": {
+            "additionalProperties": {
+                "type": "string"
+            },
+            "type": "object"
+        },
+        "format_version": {
+            "default": "1.0",
+            "type": "string"
+        },
+        "license": {
+            "type": "string"
+        },
+        "metadata": {
+            "items": {
+                "$ref": "#/$defs/PackageStandardMetadataEntry"
+            },
+            "type": "array"
+        },
+        "package_hash": {
+            "additionalProperties": {
+                "type": "string"
+            },
+            "type": "object"
+        },
+        "package_id": {
+            "type": "string"
+        }
+    },
+    "required": [
+        "package_id",
+        "license",
+        "metadata",
+        "content_hash",
+        "package_hash"
+    ],
+    "type": "object"
+}

@@ -25,15 +25,20 @@ Environment variables:
 - WRAPP_GCS_PROJECT: GCS project ID (optional)
 - WRAPP_GCS_CREDENTIALS_FILE: Path to service account key file (optional)
 """
+import logging
 import os
 import sys
 import tempfile
+import time
 import uuid
 
 import pytest
 
 from wrapp import __version__
-from wrapp.datastructures.command_context import CommandParameters
+from wrapp.datastructures.command_context import (
+    CommandParameters,
+    ThrottlingParameters,
+)
 from wrapp.utils.coro import sync_calls_async_on_wrapp_thread
 from wrapp.utils.router import g_gcs_enabled
 from wrapp.utils.storage import (
@@ -63,6 +68,9 @@ def path_to_file_url(path: str) -> str:
 try:
     # isort: off
     from wrapp.utils.storage_impls.gcs_storage import (
+        DEFAULT_RETRY,
+        GCSStorage,
+        _log_gcs_retry,
         is_gcs_url,
     )
 
@@ -289,3 +297,191 @@ async def test_read_nonexistent_file(test_bucket):
     result, content = await wrapp_read_file_content(f"{test_bucket}/no-such-file-{uuid.uuid4().hex}.txt")
     assert result == Result.ERROR_NOT_FOUND
     assert content == b""
+
+
+def test_gcs_retry_object_configured_from_env(monkeypatch):
+    """The GCS client retry object is built from the WRAPP_GCS_RETRY_* / timeout env vars.
+
+    Regression guard for OMPE-98951: the GCS backend must expose the google-cloud-storage
+    retry/back-off as configurable env vars, and must attach an on_error hook so transient
+    errors are logged as warnings.
+    """
+    monkeypatch.setenv("WRAPP_GCS_TIMEOUT_SECONDS", "321.0")
+    monkeypatch.setenv("WRAPP_GCS_RETRY_INITIAL_SECONDS", "2.5")
+    monkeypatch.setenv("WRAPP_GCS_RETRY_MAXIMUM_SECONDS", "45.0")
+    monkeypatch.setenv("WRAPP_GCS_RETRY_MULTIPLIER", "3.0")
+
+    storage = GCSStorage(__version__, False, ThrottlingParameters())
+
+    # WRAPP_GCS_TIMEOUT_SECONDS maps to the retry deadline.
+    assert storage._retry.timeout == 321.0
+    assert storage._retry._initial == 2.5
+    assert storage._retry._maximum == 45.0
+    assert storage._retry._multiplier == 3.0
+    # on_error must be wired so the SDK's internal retries are logged as warnings.
+    assert storage._retry._on_error is _log_gcs_retry
+    # Reuse the SDK's transient-error predicate so we retry exactly what GCS considers retryable.
+    assert storage._retry._predicate is DEFAULT_RETRY._predicate
+
+
+def test_gcs_retry_object_uses_sdk_defaults_when_unset(monkeypatch):
+    """With no env overrides the GCS retry falls back to google-cloud-storage's own defaults.
+
+    WRAPP must not impose its own defaults: an unset knob must match the library's DEFAULT_RETRY
+    value exactly. The on_error hook is still attached so transient errors are logged.
+    """
+    for var in (
+        "WRAPP_GCS_TIMEOUT_SECONDS",
+        "WRAPP_GCS_RETRY_INITIAL_SECONDS",
+        "WRAPP_GCS_RETRY_MAXIMUM_SECONDS",
+        "WRAPP_GCS_RETRY_MULTIPLIER",
+    ):
+        monkeypatch.delenv(var, raising=False)
+
+    storage = GCSStorage(__version__, False, ThrottlingParameters())
+
+    # Unset knobs must equal the library defaults, not any WRAPP-chosen value.
+    assert storage._retry.timeout == DEFAULT_RETRY.timeout
+    assert storage._retry._initial == DEFAULT_RETRY._initial
+    assert storage._retry._maximum == DEFAULT_RETRY._maximum
+    assert storage._retry._multiplier == DEFAULT_RETRY._multiplier
+    assert storage._retry._on_error is _log_gcs_retry
+
+
+def test_gcs_retry_object_overrides_only_set_env(monkeypatch):
+    """Setting only one knob overrides just that value; the rest stay at the library defaults."""
+    for var in (
+        "WRAPP_GCS_TIMEOUT_SECONDS",
+        "WRAPP_GCS_RETRY_INITIAL_SECONDS",
+        "WRAPP_GCS_RETRY_MAXIMUM_SECONDS",
+        "WRAPP_GCS_RETRY_MULTIPLIER",
+    ):
+        monkeypatch.delenv(var, raising=False)
+    monkeypatch.setenv("WRAPP_GCS_TIMEOUT_SECONDS", "600.0")
+
+    storage = GCSStorage(__version__, False, ThrottlingParameters())
+
+    assert storage._retry.timeout == 600.0
+    assert storage._retry._initial == DEFAULT_RETRY._initial
+    assert storage._retry._maximum == DEFAULT_RETRY._maximum
+    assert storage._retry._multiplier == DEFAULT_RETRY._multiplier
+
+
+def test_gcs_retry_object_ignores_invalid_env(monkeypatch, caplog):
+    """A non-numeric retry env var is ignored (with a warning) instead of crashing backend init."""
+    for var in (
+        "WRAPP_GCS_RETRY_INITIAL_SECONDS",
+        "WRAPP_GCS_RETRY_MAXIMUM_SECONDS",
+        "WRAPP_GCS_RETRY_MULTIPLIER",
+    ):
+        monkeypatch.delenv(var, raising=False)
+    monkeypatch.setenv("WRAPP_GCS_TIMEOUT_SECONDS", "notanumber")
+
+    # Must not raise; the invalid value is skipped and the library default is used.
+    with caplog.at_level(logging.WARNING, logger="omni.wrapp"):
+        storage = GCSStorage(__version__, False, ThrottlingParameters())
+
+    assert storage._retry.timeout == DEFAULT_RETRY.timeout
+    # The warning is the only feedback that a misspelled value was ignored; it must be logged.
+    warnings = [r for r in caplog.records if r.levelno == logging.WARNING and "WRAPP_GCS_TIMEOUT_SECONDS" in r.getMessage()]
+    assert warnings, "expected a WARNING mentioning WRAPP_GCS_TIMEOUT_SECONDS for the ignored invalid value"
+
+
+def test_gcs_request_timeout_configured_from_env(monkeypatch):
+    """WRAPP_GCS_REQUEST_TIMEOUT_SECONDS sets the per-request transport timeout for SDK calls.
+
+    Regression guard for OMPE-98951: the retry deadline alone cannot help a connection too
+    slow to finish a single request within the library's 60s per-request default (the
+    "The write operation timed out" TimeoutError); the per-request timeout itself must be
+    configurable and passed as timeout= to every google-cloud-storage call.
+    """
+    monkeypatch.setenv("WRAPP_GCS_REQUEST_TIMEOUT_SECONDS", "300.0")
+
+    storage = GCSStorage(__version__, False, ThrottlingParameters())
+
+    assert storage._request_timeout == 300.0
+    # The kwargs used for every SDK call must carry the override alongside the retry.
+    assert storage._sdk_call_kwargs["timeout"] == 300.0
+    assert storage._sdk_call_kwargs["retry"] is storage._retry
+
+
+def test_gcs_request_timeout_uses_sdk_default_when_unset(monkeypatch):
+    """With the env var unset, timeout= is not passed so the library's own default applies."""
+    monkeypatch.delenv("WRAPP_GCS_REQUEST_TIMEOUT_SECONDS", raising=False)
+
+    storage = GCSStorage(__version__, False, ThrottlingParameters())
+
+    assert storage._request_timeout is None
+    # WRAPP must not impose its own per-request default: no timeout= kwarg when unset.
+    assert "timeout" not in storage._sdk_call_kwargs
+    assert storage._sdk_call_kwargs["retry"] is storage._retry
+
+
+def test_gcs_request_timeout_ignores_invalid_env(monkeypatch, caplog):
+    """A non-numeric per-request timeout is ignored (with a warning) instead of crashing init."""
+    monkeypatch.setenv("WRAPP_GCS_REQUEST_TIMEOUT_SECONDS", "notanumber")
+
+    # Must not raise; the invalid value is skipped and the library default is used.
+    with caplog.at_level(logging.WARNING, logger="omni.wrapp"):
+        storage = GCSStorage(__version__, False, ThrottlingParameters())
+
+    assert storage._request_timeout is None
+    assert "timeout" not in storage._sdk_call_kwargs
+    # Same warning contract as the retry knobs: the ignored value must be reported.
+    warnings = [r for r in caplog.records if r.levelno == logging.WARNING and "WRAPP_GCS_REQUEST_TIMEOUT_SECONDS" in r.getMessage()]
+    assert warnings, "expected a WARNING mentioning WRAPP_GCS_REQUEST_TIMEOUT_SECONDS for the ignored invalid value"
+
+
+def test_gcs_log_gcs_retry_warns_with_error(caplog):
+    """_log_gcs_retry (the retry on_error hook) logs the transient error as a warning."""
+    with caplog.at_level(logging.WARNING, logger="omni.wrapp"):
+        _log_gcs_retry(ValueError("boom"))
+
+    assert any(r.levelno == logging.WARNING and "boom" in r.getMessage() for r in caplog.records)
+
+
+@pytest.mark.asyncio
+async def test_gcs_retry_error_maps_to_result_error_OMPE_98951(monkeypatch, caplog):
+    """A GCS operation whose retry deadline is exhausted returns Result.ERROR instead of raising.
+
+    Regression guard for OMPE-98951: the endpoint points at an unreachable port, so every
+    request fails with a transient ConnectionError that the SDK retries until the 1-second
+    deadline is exceeded and it raises RetryError ("Timeout of 1.0s exceeded"). Every GCS
+    operation must catch that RetryError and map it to a clean Result.ERROR; if the except
+    clause is narrowed, the RetryError escapes and aborts commands like `wrapp mirror`/
+    `wrapp install` — the original crash.
+
+    The read path additionally pins the retry plumbing itself: the "GCS transient error,
+    retrying" WARNING is emitted only by the _log_gcs_retry on_error hook, which is wired
+    exclusively through self._retry, and the elapsed-time bound checks that the
+    env-configured 1s deadline (not the library's ~120s DEFAULT_RETRY) governed the call.
+    If a call site drops **self._sdk_call_kwargs, the SDK silently falls back to its
+    built-in defaults — still a RetryError, still Result.ERROR — and only these two
+    assertions catch it.
+    """
+    monkeypatch.setenv("WRAPP_GCS_ENDPOINT", "http://localhost:59999")  # nothing listens here
+    monkeypatch.setenv("WRAPP_GCS_TIMEOUT_SECONDS", "1")
+    monkeypatch.setenv("WRAPP_GCS_RETRY_INITIAL_SECONDS", "0.2")
+
+    storage = GCSStorage(__version__, False, ThrottlingParameters())
+
+    with caplog.at_level(logging.WARNING, logger="omni.wrapp"):
+        start = time.monotonic()
+        result, content = await storage.read_file_content("gs://some-bucket/f.txt")
+        elapsed = time.monotonic() - start
+    assert result == Result.ERROR
+    assert content == b""
+    # Emitted only by the _log_gcs_retry on_error hook wired through self._retry; if the
+    # call site does not pass retry=self._retry, no such warning is ever logged.
+    assert any(
+        r.levelno == logging.WARNING and "GCS transient error, retrying" in r.getMessage() for r in caplog.records
+    ), "expected the _log_gcs_retry WARNING; retry=self._retry was not applied to the SDK call"
+    # The env-configured 1s deadline must govern the call, not DEFAULT_RETRY's ~120s.
+    assert elapsed < 30, f"read took {elapsed:.1f}s; the env-configured 1s retry deadline was not applied"
+
+    result, entry = await storage.stat("gs://some-bucket/f.txt")
+    assert result == Result.ERROR
+    assert entry is None
+
+    result = await storage.write_file("gs://some-bucket/f.txt", b"payload", "comment")
+    assert result == Result.ERROR

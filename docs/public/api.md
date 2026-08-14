@@ -88,6 +88,12 @@ The relevant functions with their full parameter specifications:
 
 See the `ovpackage.read_package_info` function docstring for the full Python API reference (signature, parameters, and error handling).
 See the `ovpackage.write_package_info` function docstring for the full Python API reference (signature, parameters, and error handling).
+## Building a manifest
+
+A storage-core manifest for an ovpackage file can be built with the following function, which
+returns a `Manifest` describing the files of the package.
+
+See the `ovpackage.build_manifest` function docstring for the full Python API reference (signature, parameters, and error handling).
 ## Ignore Rules
 
 These classes are used to configure which files should be ignored during package operations
@@ -150,6 +156,13 @@ See the `ovpackage.datastructures.catalog.Tag` class docstring for the full Pyth
 See the `ovpackage.InstalledPackage` class docstring for the full Python API reference.
 See the `ovpackage.datastructures.workspace_analysis.PackageStatusItemType` class docstring for the full Python API reference.
 See the `ovpackage.datastructures.workspace_analysis.PackageStatusItem` class docstring for the full Python API reference.
+The following data objects describe the manifest produced by the build-manifest command,
+which lists the files of a package together with their backend resource metadata.
+
+See the `ovpackage.Manifest` class docstring for the full Python API reference.
+See the `ovpackage.ManifestFileEntry` class docstring for the full Python API reference.
+See the `ovpackage.ManifestMinimalFileEntry` class docstring for the full Python API reference.
+See the `ovpackage.ManifestResourceInfo` class docstring for the full Python API reference.
 ## Patch Operations
 
 See the `ovpackage.Patch` class docstring for the full Python API reference.

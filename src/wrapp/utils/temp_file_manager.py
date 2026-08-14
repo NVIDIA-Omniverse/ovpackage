@@ -124,8 +124,8 @@ class TempFileManager:
         * ``WRAPP_MAX_TEMP_BYTES`` — soft byte limit (default 10 GB)
         * ``WRAPP_MAX_TEMP_FILES`` — hard file count limit (default 500)
         """
-        max_bytes = parse_env_int("WRAPP_MAX_TEMP_BYTES", _DEFAULT_MAX_BYTES)
-        max_files = parse_env_int("WRAPP_MAX_TEMP_FILES", _DEFAULT_MAX_FILES)
+        max_bytes = parse_env_int("WRAPP_MAX_TEMP_BYTES", _DEFAULT_MAX_BYTES, minimum=1)
+        max_files = parse_env_int("WRAPP_MAX_TEMP_FILES", _DEFAULT_MAX_FILES, minimum=1)
         cls._instance = TempFileManager(max_bytes=max_bytes, max_files=max_files)
         logger.debug(
             f"TempFileManager initialized: max_bytes={cls._instance._max_bytes}, "

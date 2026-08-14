@@ -20,7 +20,7 @@ from pydantic import BaseModel
 from wrapp.datastructures.wrapp_file_model import (
     WRAPPFileModel,
     WRAPPModelVersion,
-    all_old_wrapp_file_model_classes,
+    all_old_file_model_classes,
 )
 
 
@@ -35,4 +35,7 @@ class HashCacheFile_v1_0(WRAPPFileModel):
     entries: dict[str, HashCacheEntry_v1_0]
 
 
-all_old_wrapp_file_model_classes[("HashCacheFile", WRAPPModelVersion(version_string="1.0"))] = HashCacheFile_v1_0
+# Versioned classes above are compatibility snapshots. Do not edit an
+# existing class body after it has shipped; add a new class and registry entry
+# for a new file format version instead.
+all_old_file_model_classes[("HashCacheFile", WRAPPModelVersion(version_string="1.0"))] = HashCacheFile_v1_0

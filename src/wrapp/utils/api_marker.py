@@ -13,8 +13,17 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-WRAPP_API_MARKER_NAME="wrapp_public_api"
-
 def wrapp_public_api(func):
-    func.wrapp_public_api = True
+    func._wrapp_public_api = True
     return func
+
+
+def is_wrapp_public_api(obj) -> bool:
+    """Return whether ``obj`` itself carries the ``@wrapp_public_api`` marker.
+
+    Uses the object's OWN namespace (``vars(obj)``, i.e. its ``__dict__`` for a
+    class) so a marker inherited from a decorated base class does NOT count -- only
+    objects that were individually decorated are considered public. Works for both
+    classes and functions.
+    """
+    return bool(vars(obj).get("_wrapp_public_api", False))

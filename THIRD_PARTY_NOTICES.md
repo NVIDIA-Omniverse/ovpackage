@@ -20,9 +20,8 @@ If you discover a missing or incorrect attribution, please update this file.
 
 ## 1. Python build / runtime / optional dependencies
 
-These dependencies are declared in `pyproject.toml` or referenced by the
-README install instructions. They are resolved from PyPI at install time and
-are not vendored.
+These dependencies are declared in `pyproject.toml`. They are resolved from
+PyPI at install time and are not vendored.
 
 ### 1a. Build-system requires (PEP 517)
 
@@ -66,9 +65,9 @@ Notes:
 
 - The `all` optional dependency group is an aggregate convenience extra for
   backend-specific optional dependencies.
-- `typer` is declared with the `all` extra in `pyproject.toml`; transitive
-  packages pulled by PyPI dependency resolution are not listed here because
-  they are not declared directly by this repository.
+- Only directly-declared dependencies are listed; transitive packages pulled
+  in by PyPI dependency resolution are not listed here because they are not
+  declared directly by this repository.
 - License identifiers are normalized from upstream PyPI project metadata.
 
 ---

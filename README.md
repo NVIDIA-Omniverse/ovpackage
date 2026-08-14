@@ -195,4 +195,4 @@ The GitHub workflow in `.github/workflows/tests.yml` runs both the default publi
 
 This project is currently not accepting contributions.
 
-Generated version: `0.1.0`.
+Generated version: `0.2.1`.

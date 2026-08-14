@@ -13,9 +13,14 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import json
 import logging
+from asyncio import Task
+from datetime import (
+    datetime,
+    timezone,
+)
 from typing import (
+    Any,
     List,
     Optional,
 )
@@ -28,13 +33,23 @@ from wrapp.app import (
     print_stats,
 )
 from wrapp.datastructures.authentication import capture_auth
-from wrapp.datastructures.catalog import Catalog
+from wrapp.datastructures.catalog import (
+    Catalog,
+    CatalogItem,
+)
 from wrapp.datastructures.command_context import (
     CommandParameters,
     SchedulerContext,
     WrappSchedulerCLI,
     context_from_params,
     log_exception_and_raise_exit,
+)
+from wrapp.datastructures.manifest import (
+    Manifest,
+    ManifestEntry,
+    ManifestFileEntry,
+    ManifestMinimalFileEntry,
+    ManifestResourceInfo,
 )
 from wrapp.datastructures.package import (
     load_package_setup,
@@ -47,9 +62,9 @@ from wrapp.options import (
     InteractiveAuthFlag,
     JobsNumber,
     JsonLoggingFlag,
+    MinimalFormatFlag,
     OverwriteFlag,
     ProgressReportOption,
-    RecalculateResourceIdentitiesFlag,
     StatsFlag,
     TimeFlag,
     VerboseFlag,
@@ -63,14 +78,15 @@ from wrapp.utils.coro import (
 from wrapp.utils.ensure_scheduler import ensure_scheduler
 from wrapp.utils.storage import (
     Result,
+    wrapp_make_resource_identity,
     wrapp_stat,
-    wrapp_write_file_content,
 )
 from wrapp.utils.utils import (
     FailedCommand,
     FileParseException,
     StorageOperationError,
     get_base_directory_from_url,
+    has_checkpoint,
     is_folder,
 )
 from wrapp.utils.wrapp_init_for_cmd import wrapp_init_for_cmd
@@ -93,7 +109,7 @@ async def build_manifest_command(
     wrapp_file: str = typer.Argument(..., help="URL to the wrapp file"),
     output: str = typer.Argument(..., help="Output JSON file path"),
     overwrite: bool = OverwriteFlag,
-    recalculate_identities: bool = RecalculateResourceIdentitiesFlag,
+    minimal_format: bool = MinimalFormatFlag,
     auth: Optional[List[str]] = AuthOption,
     interactive_auth: bool = InteractiveAuthFlag,
     jobs: int = JobsNumber,
@@ -109,7 +125,7 @@ async def build_manifest_command(
     Build a manifest file from a wrapp file URL. If the wrapp file is in a repository,
     it will run extract-catalog recursive to generate a full catalog. If it is not in
     a repository (workspace file), it will catalog the file tree with the wrapp file
-    as the root. The output is a JSON file with relative paths and download URLs.
+    as the root. The output is a storage-core manifest JSON file.
     """
     context, scheduler_params = context_from_params()
     try:
@@ -126,12 +142,9 @@ async def build_manifest_command(
                 raise StorageOperationError(f"Error checking the output file {output}: {result}")
 
         async with WrappSchedulerCLI(params=scheduler_params) as scheduler:
-            manifest_data = await build_manifest(
-                wrapp_file, recalculate_identities=recalculate_identities, context=context, scheduler=scheduler
-            )
+            manifest_data = await build_manifest(wrapp_file, minimal_format=minimal_format, context=context, scheduler=scheduler)
 
-        # Write the manifest to the output file
-        await _write_manifest_to_file(manifest_data, output, context)
+        await manifest_data.save(context, output)
 
     except FailedCommand as e:
         logging.error(f"Failure to build manifest for wrapp file {wrapp_file}: {e}")
@@ -148,20 +161,19 @@ async def build_manifest_command(
 @wrapp_public_api
 async def build_manifest(
     wrapp_file: str,
-    recalculate_identities: bool = False,
     *,
+    minimal_format: bool = False,
     context: Optional[CommandParameters] = None,
     scheduler: Optional[SchedulerContext] = None,
-) -> List[dict]:
+) -> Manifest:
     """
-    Build a manifest from a wrapp file URL. Returns a list of dictionaries with
-    'relative_path' and 'download_url' keys.
+    Build a storage-core manifest from a wrapp file URL.
 
     :param wrapp_file: URL to the wrapp file
-    :param recalculate_identities: Flag indicating whether to recalculate resource identities for old catalogs
+    :param minimal_format: If true, write only relative_path and resource_identity per file entry
     :param context: Global configuration parameters
     :param scheduler: Optionally pre-constructed SchedulerContext
-    :returns: List of manifest entries with relative_path and download_url
+    :returns: Manifest model containing format_version, storage_api_version, and files
     :raises FailedCommand: When prerequisites not matched
     :raises StorageOperationError: Raised when network or file operations fail
     """
@@ -197,7 +209,6 @@ async def build_manifest(
             repository_url,
             recursive=True,
             add_wrapp_files=True,
-            recalculate_identities=recalculate_identities,
             context=context,
             scheduler=scheduler,
         )
@@ -206,14 +217,83 @@ async def build_manifest(
         logger.info("wrapp file is in workspace, cataloging file tree")
         catalog = await _catalog_workspace_file_tree(wrapp_file, context, scheduler)
 
-    # Convert catalog to manifest format
-    manifest_data = []
-    for item in catalog.items:
-        if item.resource_identity:
-            manifest_data.append({"relative_path": item.relative_path, "resource_identity": item.resource_identity})
-        else:
-            manifest_data.append({"relative_path": item.relative_path, "resource_identity": item.source_path})
-    return manifest_data
+    return await _manifest_from_catalog(catalog, minimal_format=minimal_format, scheduler=scheduler)
+
+
+async def _manifest_from_catalog(catalog: Catalog, *, minimal_format: bool, scheduler: SchedulerContext) -> Manifest:
+    """Convert a WRAPP catalog into the storage-core build-manifest shape."""
+    task_results: dict[Task[Any], ManifestEntry] = {}
+    tasks = []
+    async with scheduler.parent_task_node().create_task_group_node(
+        f"Building manifest entries for {len(catalog.items)} files", task_results
+    ) as task_node:
+        for item in catalog.items:
+            tasks.append(
+                task_node.create_task(
+                    _manifest_entry_from_catalog_item(item, minimal_format=minimal_format),
+                    name="Build manifest entry",
+                )
+            )
+
+    return Manifest(files=[task_results[task] for task in tasks])
+
+
+async def _manifest_entry_from_catalog_item(item: CatalogItem, *, minimal_format: bool) -> ManifestEntry:
+    result, stat_item = await wrapp_stat(item.source_path)
+
+    if result != Result.OK:
+        if not minimal_format:
+            raise StorageOperationError(f"Failed to stat manifest item {item.source_path}: {result}")
+        stat_item = None
+
+    resource_identity = await _resource_identity_for_manifest_item(item, stat_item)
+
+    if minimal_format:
+        return ManifestMinimalFileEntry(relative_path=item.relative_path, resource_identity=resource_identity)
+
+    _validate_manifest_stat(item, stat_item)
+    return ManifestFileEntry(
+        relative_path=item.relative_path,
+        resource_info=ManifestResourceInfo(
+            resource_identity=resource_identity,
+            size=stat_item.size,
+            modified_time=_format_modified_time_utc(stat_item.modified_time),
+        ),
+    )
+
+
+async def _resource_identity_for_manifest_item(item: CatalogItem, stat_item) -> str:
+    if stat_item is not None and stat_item.is_regular_file and has_checkpoint(stat_item):
+        try:
+            _new_absolute_url, _new_relative_path, resource_identity_obj = await wrapp_make_resource_identity(
+                item.source_path, stat_item, item.relative_path
+            )
+            resource_identity = resource_identity_obj.to_string()
+            if resource_identity:
+                return resource_identity
+        except (NotImplementedError, TypeError) as e:
+            logger.debug(f"Storage doesn't support resource_identity for {item.source_path}: {e}")
+
+    return item.resource_identity or item.source_path
+
+
+def _validate_manifest_stat(item: CatalogItem, stat_item) -> None:
+    if stat_item is None:
+        raise StorageOperationError(f"Failed to stat manifest item {item.source_path}")
+    if not stat_item.is_regular_file:
+        raise FailedCommand(f"Manifest item {item.source_path} is not a regular file")
+    if stat_item.size is None:
+        raise FailedCommand(f"Manifest item {item.source_path} has no size metadata")
+    if stat_item.modified_time is None:
+        raise FailedCommand(f"Manifest item {item.source_path} has no modified_time metadata")
+
+
+def _format_modified_time_utc(modified_time: datetime) -> str:
+    if modified_time.tzinfo is None:
+        utc_time = modified_time.replace(tzinfo=timezone.utc)
+    else:
+        utc_time = modified_time.astimezone(timezone.utc)
+    return utc_time.isoformat(timespec="seconds").replace("+00:00", "Z")
 
 
 async def _catalog_workspace_file_tree(wrapp_file: str, context: CommandParameters, scheduler: SchedulerContext) -> Catalog:
@@ -226,13 +306,3 @@ async def _catalog_workspace_file_tree(wrapp_file: str, context: CommandParamete
 
     # Use the existing catalog command to catalog the file tree
     return await catalog(root_dir=wrapp_dir, context=context, scheduler=scheduler)
-
-
-async def _write_manifest_to_file(manifest_data: List[dict], output_file: str, context: CommandParameters) -> None:
-    """
-    Write the manifest data to the output file as JSON.
-    """
-    json_content = json.dumps(manifest_data, indent=2)
-    result = await wrapp_write_file_content(context, output_file, json_content)
-    if result != Result.OK:
-        raise StorageOperationError(f"Failed to write manifest to {output_file}: {result}")

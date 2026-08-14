@@ -52,6 +52,11 @@ from wrapp.datastructures.package import (
     wrapp_file_path,
     write_package_info,
 )
+from wrapp.datastructures.package_standard import (
+    list_package_standard_metadata_files,
+    package_standard_metadata_folder_url,
+    package_standard_sidecar_paths,
+)
 from wrapp.datastructures.two_way_diff import Diff
 from wrapp.options import (
     AuthOption,
@@ -377,6 +382,19 @@ async def uninstall(
                 file_url = join_paths(install_location, delete_file.relative_path)
                 items_to_remove.add(file_url)
                 task_group.create_task(uninstall_item(file_url), name=f"Remove item {file_url}")
+
+        # Package-standard sidecars are companion metadata excluded from the catalog, so they
+        # are not in installed_catalog.items. Install copies them into the install tree, so
+        # remove them explicitly here: the root definition file plus every file in the .metadata
+        # folder (no-op when the package has none - ERROR_NOT_FOUND is ignored).
+        sidecar_paths = package_standard_sidecar_paths(installed_package_file_url)
+        metadata_dir = package_standard_metadata_folder_url(installed_package_file_url)
+        sidecar_urls = [sidecar_paths.definition_url]
+        for rel_path, _ in await list_package_standard_metadata_files(installed_package_file_url):
+            sidecar_urls.append(join_paths(metadata_dir, rel_path))
+        for sidecar_url in sidecar_urls:
+            items_to_remove.add(sidecar_url)
+            task_group.create_task(uninstall_item(sidecar_url), name=f"Remove sidecar {sidecar_url}")
 
     # Then remove the dependency if package was specified
     if package is not None:

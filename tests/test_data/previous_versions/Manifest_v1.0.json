@@ -1,0 +1,20 @@
+{
+  "format_version": {
+    "version_string": "1.0"
+  },
+  "storage_api_version": "v1alpha",
+  "files": [
+    {
+      "relative_path": "asset.usd",
+      "resource_info": {
+        "resource_identity": "resource-identity://asset",
+        "size": 123,
+        "modified_time": "2026-01-02T03:04:05Z"
+      }
+    },
+    {
+      "relative_path": "legacy.txt",
+      "resource_identity": "file:///repo/legacy.txt"
+    }
+  ]
+}

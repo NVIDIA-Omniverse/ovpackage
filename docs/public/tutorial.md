@@ -5,39 +5,75 @@ and API documentation, see the [Commands Reference](commands/index.md).
 
 ## Installation
 
-ovpackage is available from the [NVIDIA published package](this repository)
-in two formats: a standalone CLI package (zip) and a Python wheel for integration into your own Python environment.
+ovpackage is distributed as a Python wheel through the [NVIDIA published package](this repository).
+Installing the wheel into a Python 3.11 or 3.12 environment gives you both the `ovpackage` command-line
+tool and the `ovpackage` Python API. If you have never used Python before, follow the steps below in order.
 
-### Installing the CLI from NGC
+### Prerequisites: Installing Python
 
-The standalone CLI package is the simplest way to get started with ovpackage.
+ovpackage requires Python **3.11 or 3.12** (`>=3.11, <3.13`). Skip this step if you already have a
+compatible version installed.
 
-1. Download the ovpackage zip archive from the [published package](this repository)
-2. Extract the archive to a location of your choice
-3. Add the extracted directory to your system PATH, or run `ovpackage` directly from the extracted location
+- **Windows:** Download the installer from <https://www.python.org/downloads/> and, during setup,
+  check **"Add python.exe to PATH"**.
+- **Linux:** Install it with your distribution's package manager, for example on Ubuntu/Debian:
 
-errors about missing DLLs, download and install it from <https://aka.ms/vs/17/release/vc_redist.x64.exe>.
+  ```bash
+  sudo apt install python3.12 python3.12-venv
+  ```
 
-Verify the installation:
+Confirm Python is available and reports a 3.11.x or 3.12.x version:
+
+```bash
+python --version
+```
+
+### Installing the ovpackage Wheel
+
+2. (Recommended) Create and activate a virtual environment so ovpackage and its dependencies stay
+   isolated from the rest of your system:
+
+   ```bash
+   python -m venv ovpackage-env
+   ```
+
+   Activate it on **Linux**:
+
+   ```bash
+   source ovpackage-env/bin/activate
+   ```
+
+   Or on **Windows (PowerShell)**:
+
+   ```powershell
+   ovpackage-env\Scripts\Activate.ps1
+   ```
+
+3. Install the wheel using pip, specifying `pypi.org` as an extra index URL to resolve the
+   `omniverseclient` dependency:
+
+   ```bash
+   ```
+
+   Replace `<version>` with the actual version number of the downloaded wheel file.
+
+### Using the ovpackage CLI
+
+Installing the wheel places the `ovpackage` command-line tool on your PATH (inside the active
+environment). Verify the installation and explore the available commands:
 
 ```bash
 ovpackage --help
+ovpackage version
 ```
 
-### Installing the Python Package
-
-For programmatic access via the Python API or integration into existing Python projects, install ovpackage
-from the wheel file available on NGC.
-
-2. Install the wheel using pip, specifying `pypi.org` as an extra index URL to resolve the
-   `omniverseclient` dependency:
+Every command has its own help, for example:
 
 ```bash
+ovpackage freeze --help
 ```
 
-Replace `<version>` with the actual version number of the downloaded wheel file.
-
-Verify the installation:
+The same functionality is available programmatically through the Python API:
 
 ```bash
 python -c "import ovpackage; print('ovpackage installed successfully')"

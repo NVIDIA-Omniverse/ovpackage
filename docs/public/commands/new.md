@@ -17,6 +17,14 @@ Example::
 
 `.wrapp` files are JSON files. The file format includes a schema version field and may evolve with new ovpackage versions.
 
+`new` writes the `.wrapp` file and, when `--create-package-standard <LICENSE>`
+(or `--cps`) is given, also drops a package-standard *definition seed* next to it
+— identity only (package id and SPDX license, no BOM, since there is no content
+yet). A later `create` run from the same directory picks up that license
+automatically and generates the full sidecars, so the license only needs to be
+declared once. See package standard sidecars for the compatibility model
+and sidecar behavior.
+
 For CLI options, run `ovpackage new --help`.
 
 ## Python API Reference

@@ -326,18 +326,16 @@ class DependencyGraph:
         return package_records
 
 
-async def _validate_dependency_exists(dependency: Dependency):
-    """Given a dependency from a package file, raise a FailedCommand exception if the dependency is invalid"""
+async def _validate_subpackage_recorded_repository(dependency_setup: PackageInfo):
+    if not dependency_setup.repository:
+        return
 
-    # Check that the dependency still exists in the repo it was installed from
-    dep_repo = Repository(repo_url=dependency.repository)
-    if not await wrapp_url_exists(wrapp_file_in_repo(dep_repo, dependency.package, dependency.version)):
+    subpackage_repo = Repository(repo_url=dependency_setup.repository)
+    subpackage_wrapp_file = wrapp_file_in_repo(subpackage_repo, dependency_setup.name, dependency_setup.version)
+    if not await wrapp_url_exists(subpackage_wrapp_file):
         raise FailedCommand(
-            f"Sub-package does not exist in repository: '{dependency.package}' version '{dependency.version}' not in '{dependency.repository}'"
-        )
-    else:
-        logger.debug(
-            f"Successfully validated dependency '{dependency.package}' version '{dependency.version}' found in '{dependency.repository}'"
+            f"Sub-package does not exist in repository: '{dependency_setup.name}' version '{dependency_setup.version}' "
+            f"not in '{dependency_setup.repository}'"
         )
 
 
@@ -394,38 +392,25 @@ async def _collect_recursive_dependency(
                     f"Detected broken dependency at {dependency_package_file}: Expected package '{dependency.package}' "
                     f"but found '{dependency_setup.name}' at '{dependency_package_file}'"
                 )
+        if not from_repo:
+            await _validate_subpackage_recorded_repository(dependency_setup)
         skip_files: set[str] = set()
         skip_files.add(dependency_package_file)
         if dependency_setup.catalog is None:
             raise FailedCommand(f"Discovered sub package without catalog: {dependency_package_file} - please remove empty package")
-        elif dependency_setup.repository:
-            await _validate_dependency_exists(dependency)
-            if dependency_setup.repository.rstrip("/") != dependency.repository.rstrip("/"):
-                dep_repo = Repository(repo_url=dependency_setup.repository)
-                if not await dep_repo.find_package(dependency_setup.name, dependency_setup.version):
-                    raise FailedCommand(
-                        f"Sub-package does not exist in repository: '{dependency.package}' version '{dependency.version}' not in '{dependency_setup.repository}'"
-                    )
-                else:
-                    logger.debug(
-                        f"Dependency '{dependency.package}' version '{dependency.version}' installed from {dependency.repository} has package referencing repository '{dependency_setup.repository}'. Both exist, but are they accessible for users?"
-                    )
 
-            for item in dependency_setup.catalog.items:
-                absolute_path = join_paths(dependency_install_path, item.relative_path)
-                skip_files.add(absolute_path)
-            results.append(skip_files)
-            more_skip_files = await collect_recursive_dependencies(
-                task_node,
-                LoadedPackage(dependency_package_file, dependency_setup),
-                from_repo=from_repo,
-                dependency_upgrade_allowed=False,
-                check_deps_exist_in_repo=check_deps_exist_in_repo,
-            )
-            results.extend(more_skip_files)
-
-        else:
-            raise FailedCommand("Sub-package dependency has an empty repository field - please remove draft package.")
+        for item in dependency_setup.catalog.items:
+            absolute_path = join_paths(dependency_install_path, item.relative_path)
+            skip_files.add(absolute_path)
+        results.append(skip_files)
+        more_skip_files = await collect_recursive_dependencies(
+            task_node,
+            LoadedPackage(dependency_package_file, dependency_setup),
+            from_repo=from_repo,
+            dependency_upgrade_allowed=False,
+            check_deps_exist_in_repo=check_deps_exist_in_repo,
+        )
+        results.extend(more_skip_files)
 
 
 async def collect_recursive_dependencies(

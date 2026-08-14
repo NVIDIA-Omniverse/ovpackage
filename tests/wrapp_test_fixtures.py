@@ -147,8 +147,7 @@ all_storage_backends = []
 if _check_nucleus_available():
     all_storage_backends.append(StorageBackendForTests.NUCLEUS)
 
-if g_local_file_storage_enabled and _check_nucleus_available():
-    # LOCAL_DIR uses omni.client under the hood via ClientLibTestHelper
+if g_local_file_storage_enabled:
     all_storage_backends.append(StorageBackendForTests.LOCAL_DIR)
 
 if _check_s3_available():
@@ -189,37 +188,13 @@ def storage_backend_type(request) -> StorageBackendForTests:
 def alternate_storage_backend_type(request, storage_backend_type: StorageBackendForTests) -> StorageBackendForTests:
     if request.param.name == storage_backend_type.name:
         pytest.skip("Skipping test where alternate type would be equal storage type")
-    # TODO - disable only while S3 and Storage API can not be activated at the same time
-    if (
-        storage_backend_type in [StorageBackendForTests.STORAGEAPI, StorageBackendForTests.STORAGEAPI_WITH_ENUMERATE]
-        and request.param == StorageBackendForTests.S3
-    ):
-        pytest.skip("Can't test S3 and StorageAPI at the same time")
-    if (
-        request.param in [StorageBackendForTests.STORAGEAPI, StorageBackendForTests.STORAGEAPI_WITH_ENUMERATE]
-        and storage_backend_type == StorageBackendForTests.S3
-    ):
-        pytest.skip("Can't test S3 and StorageAPI at the same time")
-    if (
-        storage_backend_type in [StorageBackendForTests.STORAGEAPI, StorageBackendForTests.STORAGEAPI_WITH_ENUMERATE]
-        and request.param == StorageBackendForTests.AZURE_BLOB_STORE
-    ):
-        pytest.skip("Can't test Azure Blob Store and StorageAPI at the same time")
-    if (
-        request.param in [StorageBackendForTests.STORAGEAPI, StorageBackendForTests.STORAGEAPI_WITH_ENUMERATE]
-        and storage_backend_type == StorageBackendForTests.AZURE_BLOB_STORE
-    ):
-        pytest.skip("Can't test Azure Blob Store and StorageAPI at the same time")
-    if (
-        storage_backend_type in [StorageBackendForTests.STORAGEAPI, StorageBackendForTests.STORAGEAPI_WITH_ENUMERATE]
-        and request.param == StorageBackendForTests.GCS
-    ):
-        pytest.skip("Can't test GCS and StorageAPI at the same time")
-    if (
-        request.param in [StorageBackendForTests.STORAGEAPI, StorageBackendForTests.STORAGEAPI_WITH_ENUMERATE]
-        and storage_backend_type == StorageBackendForTests.GCS
-    ):
-        pytest.skip("Can't test GCS and StorageAPI at the same time")
+    # NOTE: cross-backend pairs involving StorageAPI (StorageAPI <-> S3/Azure/GCS)
+    # used to be skipped because the Storage API backend was a URL catch-all that
+    # would steal s3://, https://, etc. from the dedicated backends. With
+    # scope-limited routing (a connected service only claims the URLs it declares
+    # via ListRoutes / ListTopLevelAddresses), a Storage API service coexists with
+    # the dedicated cloud backends, so those pairs are now exercised whenever both
+    # backends are configured in the environment.
     return request.param
 
 
@@ -334,10 +309,16 @@ def storage_backend_test_helper(
 
     backend = None
     try:
-        if storage_backend_type in [StorageBackendForTests.NUCLEUS, StorageBackendForTests.LOCAL_DIR]:
+        if storage_backend_type == StorageBackendForTests.NUCLEUS:
             from tests.clientlib_test_helpers import ClientLibTestHelper
 
             backend = ClientLibTestHelper(storage_backend_type)
+        elif storage_backend_type == StorageBackendForTests.LOCAL_DIR:
+            from tests.local_file_system_test_helper import (
+                LocalFileSystemTestHelper,
+            )
+
+            backend = LocalFileSystemTestHelper()
         elif storage_backend_type == StorageBackendForTests.S3:
             from tests.s3_test_helpers import S3TestHelper
 
@@ -514,9 +495,11 @@ async def alternate_storage_source_package(alternate_storage_backend_type, alter
                 yield await ClientLibTestHelper.create_source_package_for_clientlib(alternate_storage_test_folder_url)
 
         elif alternate_storage_backend_type == StorageBackendForTests.LOCAL_DIR:
-            from tests.clientlib_test_helpers import ClientLibTestHelper
+            from tests.local_file_system_test_helper import (
+                LocalFileSystemTestHelper,
+            )
 
-            yield await ClientLibTestHelper.create_source_package_for_clientlib(alternate_storage_test_folder_url)
+            yield await LocalFileSystemTestHelper().create_source_package(alternate_storage_test_folder_url)
 
         elif alternate_storage_backend_type == StorageBackendForTests.S3:
             from tests.s3_test_helpers import S3TestHelper
@@ -645,8 +628,12 @@ def cloudfront_like_http_server(local_tmp_folder):
         server_thread.join(timeout=2)
 
 
-@pytest.fixture
-def client_cache_size_unchanged():
+@contextlib.contextmanager
+def _client_cache_size_unchanged(enabled: bool = True):
+    if not enabled:
+        yield
+        return
+
     def dir_size(path: str) -> int:
         total_size = 0
         if os.path.exists(path):
@@ -662,6 +649,11 @@ def client_cache_size_unchanged():
     assert (
         client_lib_cache_size == new_client_lib_cache_size
     ), f"Client library cache changed size from {client_lib_cache_size} to {new_client_lib_cache_size}! Client library cache at {client_lib_cache_path} had size {client_lib_cache_size} before the test, and {new_client_lib_cache_size} after the test! Make sure all get_local_file or open_local_file calls are only executed if hub is enabled (search for is_hub_running for examples)."
+
+
+@pytest.fixture
+def client_cache_size_unchanged():
+    return _client_cache_size_unchanged
 
 
 @pytest.fixture

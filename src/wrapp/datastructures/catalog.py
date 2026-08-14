@@ -18,6 +18,7 @@ import os
 import tempfile
 import warnings
 from bisect import bisect_left
+from collections import defaultdict
 from typing import (
     Any,
     ClassVar,
@@ -279,3 +280,23 @@ class Catalog(WRAPPFileModel):
         :return: The path to use for storing/retrieving the item's data
         """
         return self._get_storage_map_value_for_item(item) or item.relative_path
+
+    def check_case_insensitive_path_conflicts(self) -> tuple[bool, List[str]]:
+        """Check if any catalog items have paths that conflict on a case-insensitive filesystem.
+
+        On case-insensitive systems (Windows, default macOS) paths like 'foo.psd' and 'Foo.psd'
+        reference the same file and would cause conflicts during install, mirror, or import.
+
+        :return: Tuple of (has_conflicts, conflicting_paths) where conflicting_paths is a flat
+                 list of all paths involved in at least one conflict.
+        """
+        path_map: defaultdict[str, List[str]] = defaultdict(list)
+        for item in self.items:
+            path_map[item.relative_path.lower()].append(item.relative_path)
+
+        conflicting_paths: List[str] = []
+        for paths_with_same_lowercase in path_map.values():
+            if len(paths_with_same_lowercase) > 1:
+                conflicting_paths.extend(paths_with_same_lowercase)
+
+        return len(conflicting_paths) > 0, conflicting_paths

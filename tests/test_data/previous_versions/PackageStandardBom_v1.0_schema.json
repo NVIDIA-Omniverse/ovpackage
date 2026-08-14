@@ -1,0 +1,50 @@
+{
+    "$defs": {
+        "PackageStandardBomItem": {
+            "properties": {
+                "hash": {
+                    "anyOf": [
+                        {
+                            "additionalProperties": {
+                                "type": "string"
+                            },
+                            "type": "object"
+                        },
+                        {
+                            "type": "null"
+                        }
+                    ],
+                    "default": null
+                },
+                "relative_path": {
+                    "type": "string"
+                },
+                "size": {
+                    "type": "integer"
+                }
+            },
+            "required": [
+                "relative_path",
+                "size"
+            ],
+            "type": "object"
+        }
+    },
+    "additionalProperties": true,
+    "properties": {
+        "format_version": {
+            "default": "1.0",
+            "type": "string"
+        },
+        "items": {
+            "items": {
+                "$ref": "#/$defs/PackageStandardBomItem"
+            },
+            "type": "array"
+        }
+    },
+    "required": [
+        "items"
+    ],
+    "type": "object"
+}

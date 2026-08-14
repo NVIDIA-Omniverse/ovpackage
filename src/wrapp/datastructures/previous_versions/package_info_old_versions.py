@@ -40,7 +40,7 @@ from wrapp.datastructures.previous_versions.dependency_set_old_versions import (
 from wrapp.datastructures.wrapp_file_model import (
     WRAPPFileModel,
     WRAPPModelVersion,
-    all_old_wrapp_file_model_classes,
+    all_old_file_model_classes,
 )
 
 
@@ -167,10 +167,13 @@ class PackageInfo_V5_2(WRAPPFileModel):
         return PackageInfo_V5_2(**data_dict)
 
 
-all_old_wrapp_file_model_classes[("PackageInfo", WRAPPModelVersion(version_string="1"))] = PackageInfo_V2
-all_old_wrapp_file_model_classes[("PackageInfo", WRAPPModelVersion(version_string="2"))] = PackageInfo_V2
-all_old_wrapp_file_model_classes[("PackageInfo", WRAPPModelVersion(version_string="3.0"))] = PackageInfo_V3_0
-all_old_wrapp_file_model_classes[("PackageInfo", WRAPPModelVersion(version_string="4.0"))] = PackageInfo_V4_0
-all_old_wrapp_file_model_classes[("PackageInfo", WRAPPModelVersion(version_string="5.0"))] = PackageInfo_V5_0
-all_old_wrapp_file_model_classes[("PackageInfo", WRAPPModelVersion(version_string="5.1"))] = PackageInfo_V5_1
-all_old_wrapp_file_model_classes[("PackageInfo", WRAPPModelVersion(version_string="5.2"))] = PackageInfo_V5_2
+# Versioned classes above are compatibility snapshots. Do not edit an
+# existing class body after it has shipped; add a new class and registry entry
+# for a new file format version instead.
+all_old_file_model_classes[("PackageInfo", WRAPPModelVersion(version_string="1"))] = PackageInfo_V2
+all_old_file_model_classes[("PackageInfo", WRAPPModelVersion(version_string="2"))] = PackageInfo_V2
+all_old_file_model_classes[("PackageInfo", WRAPPModelVersion(version_string="3.0"))] = PackageInfo_V3_0
+all_old_file_model_classes[("PackageInfo", WRAPPModelVersion(version_string="4.0"))] = PackageInfo_V4_0
+all_old_file_model_classes[("PackageInfo", WRAPPModelVersion(version_string="5.0"))] = PackageInfo_V5_0
+all_old_file_model_classes[("PackageInfo", WRAPPModelVersion(version_string="5.1"))] = PackageInfo_V5_1
+all_old_file_model_classes[("PackageInfo", WRAPPModelVersion(version_string="5.2"))] = PackageInfo_V5_2

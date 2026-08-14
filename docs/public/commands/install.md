@@ -19,10 +19,22 @@ For that, just specify a different version number. This command will validate th
 else it will fail with conflicts (to override, just delete the package at the install location and run install again, or you can use the
 `create-patch`/`apply-patch` commands).
 
+ovpackage also detects package catalog paths that differ only by letter case, such
+as `textures/Foo.psd` and `textures/foo.psd`. Installs to case-insensitive
+destinations are refused to prevent one file from overwriting the other, while
+installs are allowed when the destination storage reports case-sensitive
+behavior. Search for `Cross platform case insensitive path conflicts found` in
+the install output or logs when diagnosing this case-only path conflict.
+
 Use `--hash-cache-file` (`--hcf`) to speed up repeated installs by caching file
 hashes between runs. See generic parameters for details.
 Legacy pickle cache files (ovpackage `<=2.1.0`) are rejected; see [CLI](../cli.md) for JSON format and
 one-time migration guidance.
+
+If the source package has SimReady package-standard sidecars, `install` carries
+them to the installed `.wrapp` file verbatim, preserving package-standard
+identity; it does not create or regenerate sidecars. See
+package standard sidecars.
 
 For usage examples, see the [Tutorial](../tutorial.md). For CLI options, run `ovpackage install --help`.
 

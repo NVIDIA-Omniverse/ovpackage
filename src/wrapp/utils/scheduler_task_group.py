@@ -102,16 +102,35 @@ class SchedulerTaskGroup:
         self, coroutine: Coroutine[Any, Any, _TaskReturnType], *, name: Optional[str] = None, context: Optional[contextvars.Context] = None
     ) -> asyncio.Task[_TaskReturnType]:
         if self._state not in [TaskGroupState.Entered, TaskGroupState.Waiting]:
+            coroutine.close()
             raise RuntimeError(f"SchedulerTaskGroup has not yet been entered, or has already been completed (state={self._state})!")
 
-        async def _store_result(coro: Coroutine[Any, Any, _TaskReturnType]):
-            current_task = asyncio.current_task()
-            assert current_task is not None, "This should never happen - we run this function only with create_task"
-            r = await coro
-            if self._task_results is not None:
-                self._task_results[current_task] = r
+        # Schedule the coroutine directly on the asyncio TaskGroup; its result, if any, is collected by
+        # the done callback below. If scheduling is rejected, close() the coroutine so a coroutine we
+        # accepted but never ran is not later reported as "coroutine ... was never awaited".
+        #
+        # The coroutine is passed as-is and is never wrapped in a result-storing coroutine. The TaskGroup
+        # cancels not-yet-started tasks when a sibling fails; asyncio discards a directly-scheduled
+        # coroutine cleanly in that case, whereas a wrapper coroutine would be cancelled at its own entry
+        # and leak the wrapped coroutine un-awaited.
+        try:
+            t: asyncio.Task = self._asyncio_task_group.create_task(coroutine, name=name, context=context)
+        except BaseException:
+            coroutine.close()
+            raise
 
-        t: asyncio.Task = self._asyncio_task_group.create_task(_store_result(coroutine), name=name, context=context)
+        if self._task_results is not None:
+            task_results = self._task_results
+
+            def _store_result(task: asyncio.Task[_TaskReturnType]) -> None:
+                # Record the result of a task that completed successfully. A cancelled or failed task has
+                # no result to record - the task group propagates its exception - so it is skipped; the
+                # cancelled() check also guards exception()/result() from re-raising.
+                if not task.cancelled() and task.exception() is None:
+                    task_results[task] = task.result()
+
+            t.add_done_callback(_store_result)
+
         self._task_set.add(t)
         return t
 

@@ -4,6 +4,10 @@
 
 The publish-redirect command creates redirect packages in a redirect repository for all packages found in one or more source repositories. Redirect packages contain only `.wrapp` files (no data files) with `source_path` entries pointing to the original source locations. This enables CloudFront/CDN URL redirection while preserving data access to the original storage locations.
 
+`publish-redirect` does not generate SimReady package-standard sidecars for
+redirect packages; sidecars are produced by `create`. See
+package standard sidecars.
+
 Basic usage::
 
     ovpackage publish-redirect --source-repo omniverse://dev.example.com --redirect-repo omniverse://cdn.example.com

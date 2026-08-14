@@ -19,6 +19,7 @@ from ._version import __version__
 _compat.apply_ovpackage_env_aliases()
 from .api import *
 from .commands import *
+from .commands.check import CheckResult
 from .commands.traceback import (
     PackageLocationType,
     TracebackNode,
@@ -31,6 +32,7 @@ from .datastructures.authentication import (
 from .datastructures.catalog import (
     Catalog,
     CatalogItem,
+    StorageMap,
 )
 from .datastructures.command_context import (
     CommandParameters,
@@ -45,6 +47,12 @@ from .datastructures.ignore import (
     IgnorePredicate,
 )
 from .datastructures.installed_package import InstalledPackage
+from .datastructures.manifest import (
+    Manifest,
+    ManifestFileEntry,
+    ManifestMinimalFileEntry,
+    ManifestResourceInfo,
+)
 from .datastructures.package import (
     Dependency,
     DependencySet,
@@ -55,12 +63,20 @@ from .datastructures.package import (
 )
 from .datastructures.patch import (
     Patch,
+    PatchOpBase,
 )
+from .datastructures.workspace_analysis import (
+    PackageStatusItem,
+    PackageStatusItemType,
+)
+from .options import LsOutputFormat
 from .utils.cli_progress_printer import ProgressReportVerbosity
 from .utils.progress_report import ProgressReport
 from .utils.utils import (
     FailedCommand,
     FailedCommandValueError,
+    FailedPatchCommand,
+    FileParseException,
     InvalidConfigurationError,
     StorageOperationError,
 )

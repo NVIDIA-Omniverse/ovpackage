@@ -225,9 +225,14 @@ async def test_wrapp_copy_fallback_counts_read_and_write_stats(wrapp_init, monke
     fake_read = _FakeReadStorage()
     fake_write = _FakeWriteStorage()
 
-    monkeypatch.setattr(router, "storage_types_for_copy", lambda *_: (StorageType.S3, StorageType.StorageAPI))
-    monkeypatch.setattr(router, "storage_for_read", lambda *_: fake_read)
-    monkeypatch.setattr(router, "storage_for_write", lambda *_: fake_write)
+    # wrapp_copy routes both URLs in one pass via storages_for_copy, returning
+    # (read_storage, read_type, write_storage, write_type). S3 -> StorageAPI is a
+    # cross-storage copy, exercising the download-to-temp + upload fallback.
+    monkeypatch.setattr(
+        router,
+        "storages_for_copy",
+        lambda *_: (fake_read, StorageType.S3, fake_write, StorageType.StorageAPI),
+    )
 
     Stats.get().clear()
     result = await wrapp_copy("s3://source-bucket/source.txt", "https://target.example.com/destination.txt")
@@ -235,6 +240,71 @@ async def test_wrapp_copy_fallback_counts_read_and_write_stats(wrapp_init, monke
     assert Stats.get().get_stat(StatType.COPY_ASYNC) == 1
     assert Stats.get().get_stat(StatType.READ_FILE_ASYNC) == 1
     assert Stats.get().get_stat(StatType.WRITE_FILE_ASYNC) == 1
+
+
+class _FakeStorageApiService:
+    """Minimal Storage API-like backend for exercising wrapp_copy dispatch."""
+
+    def __init__(self):
+        self.copy_called = False
+
+    async def copy(self, src_url: str, dst_url: str, overwrite: bool, message: str = "") -> Result:
+        self.copy_called = True
+        return Result.OK
+
+    async def stat(self, url: str):
+        return Result.ERROR_NOT_FOUND, None
+
+    async def download_file(self, src_url: str, dst_url: str, overwrite: bool) -> Result:
+        dst_path = get_path_from_url(dst_url)
+        os.makedirs(os.path.dirname(dst_path), exist_ok=True)
+        with open(dst_path, "wb" if overwrite else "xb") as f:
+            f.write(b"test-data")
+        return Result.OK
+
+    async def upload_file(self, src_url: str, dst_url: str, overwrite: bool, message: Optional[str] = None) -> Result:
+        assert os.path.exists(get_path_from_url(src_url))
+        return Result.OK
+
+
+@pytest.mark.asyncio
+async def test_wrapp_copy_between_two_storage_api_services_uses_temp_file(wrapp_init, monkeypatch):
+    """A copy between two *different* Storage API services must NOT invoke the
+    source service's server-side copy() (which would resolve the destination
+    against the wrong server); it must go through the download+upload path."""
+    router = Router.me()
+    service_a = _FakeStorageApiService()
+    service_b = _FakeStorageApiService()
+    monkeypatch.setattr(
+        router,
+        "storages_for_copy",
+        lambda *_: (service_a, StorageType.StorageAPI, service_b, StorageType.StorageAPI),
+    )
+
+    Stats.get().clear()
+    result = await wrapp_copy("https://a.example.com/src.txt", "https://b.example.com/dst.txt")
+    assert result == Result.OK
+    assert service_a.copy_called is False  # cross-instance: no server-side copy
+    assert Stats.get().get_stat(StatType.READ_FILE_ASYNC) == 1
+    assert Stats.get().get_stat(StatType.WRITE_FILE_ASYNC) == 1
+
+
+@pytest.mark.asyncio
+async def test_wrapp_copy_within_one_storage_api_service_uses_server_side_copy(wrapp_init, monkeypatch):
+    """A copy within a single Storage API service keeps Case 1 and uses the
+    backend's (server-side) copy()."""
+    router = Router.me()
+    service = _FakeStorageApiService()
+    monkeypatch.setattr(
+        router,
+        "storages_for_copy",
+        lambda *_: (service, StorageType.StorageAPI, service, StorageType.StorageAPI),
+    )
+
+    Stats.get().clear()
+    result = await wrapp_copy("https://a.example.com/src.txt", "https://a.example.com/dst.txt")
+    assert result == Result.OK
+    assert service.copy_called is True  # same instance: server-side copy
 
 
 # Make sure that WRAPP gracefully handles missing storage backends by unconditionally checking all of them.
@@ -299,6 +369,26 @@ async def test_missing_backends(wrapp_init, local_tmp_folder):
             await list_repo("azure://some_account/some_container")
     # If this fires, there is a new storage backend which needs a test here (the three above + local + invalid)
     assert len(StorageType) == 7
+
+
+def test_file_url_without_local_backend_reports_backend_diagnostics_opme_95748(wrapp_init, monkeypatch):
+    router = Router.me()
+    monkeypatch.setattr(router, "_local_file_storage", None)
+    monkeypatch.setattr(router, "_clientlib", None)
+    monkeypatch.setitem(
+        router._storage_info,
+        StorageType.Local,
+        "DISABLED: failed to import aiofiles. Required dependencies: aiofiles. "
+        "Install with 'pip install aiofiles'. Exception: No module named 'aiofiles'",
+    )
+
+    with pytest.raises(StorageOperationError) as exc_info:
+        router.storage_for_read("file:///tmp/wrapp-minimal-repro")
+
+    message = str(exc_info.value)
+    assert "cannot be handled by any of the enabled storage backends" in message
+    assert "Local File System: DISABLED: failed to import aiofiles" in message
+    assert "Install with 'pip install aiofiles'" in message
 
 
 # =============================================================================

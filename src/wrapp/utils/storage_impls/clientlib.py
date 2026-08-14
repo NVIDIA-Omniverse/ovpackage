@@ -72,7 +72,7 @@ except ImportError as e:
     raise StorageMissingDependenciesError(error_msg) from e
 
 
-# If this version is changed, also change the client-library version in the gitlab job build-and-test-linux-old-client-lib
+# If this version is changed, also change the client-library version in the gitlab job test-nucleus-linux-old-client-lib
 g_min_client_library_expected_version_str = "2.53.2"
 g_client_library_version_check_done = False
 g_client_library_was_shutdown = False

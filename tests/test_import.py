@@ -21,6 +21,7 @@ from wrapp import (
     export_package,
     import_package,
 )
+from wrapp.commands.import_ import read_package_standard_metadata_from_package
 from wrapp.datastructures.catalog import (
     Catalog,
     CatalogItem,
@@ -140,3 +141,37 @@ async def test_import_fails_when_tar_entry_missing(test_folder_url, authenticato
         tar.addfile(info, io.BytesIO(wrapp_content))
     with pytest.raises(StorageOperationError, match="Failed to extract"):
         await import_package(output, test_folder_url)
+
+
+def _tar_with_members(local_tmp_folder, name, members):
+    output = join_paths(local_tmp_folder, name)
+    with tarfile.open(name=output, mode="w") as tar:
+        for member_name, data in members.items():
+            info = tarfile.TarInfo(name=member_name)
+            info.size = len(data)
+            tar.addfile(info, io.BytesIO(data))
+    return output
+
+
+def test_read_package_standard_metadata_from_package_rejects_traversal(local_tmp_folder):
+    # A crafted archive member ".metadata/../../evil.json" keys to rel_path "../../evil.json";
+    # tar member names are attacker-controlled and join_paths does not collapse "..", so it must be
+    # rejected before any write URL is constructed instead of escaping the package .metadata folder.
+    output = _tar_with_members(local_tmp_folder, "malicious_metadata.tar", {".metadata/../../evil.json": b"pwned"})
+    with tarfile.open(output, "r") as tar:
+        with pytest.raises(FailedCommand, match="Unsafe package-standard .metadata"):
+            read_package_standard_metadata_from_package(tar)
+
+
+def test_read_package_standard_metadata_from_package_accepts_nested(local_tmp_folder):
+    # Legitimate flat and nested .metadata sidecars still read, keyed relative to the .metadata folder.
+    output = _tar_with_members(
+        local_tmp_folder,
+        "good_metadata.tar",
+        {".metadata/extra.json": b'{"k": 1}', ".metadata/sub/deep.json": b'{"deep": true}'},
+    )
+    with tarfile.open(output, "r") as tar:
+        assert read_package_standard_metadata_from_package(tar) == {
+            "extra.json": b'{"k": 1}',
+            "sub/deep.json": b'{"deep": true}',
+        }

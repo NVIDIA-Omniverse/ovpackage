@@ -1096,9 +1096,24 @@ class AzureBlobStorage(StorageInterface):
             # Get local file path
             src_path = get_path_from_url(src_url)
 
-            # Calculate nucleus hash
+            # Calculate nucleus hash and snapshot the hashed handle's stat, so the
+            # deferred upload can detect a source that changed while queued.
+            #
+            # KNOWN LIMITATION (OMPE-74369): this detection is stat-based and
+            # best-effort. It catches size changes, normal rewrites (mtime), and
+            # write-and-rename saves (inode), but an IN-PLACE same-size rewrite
+            # with a restored/clamped mtime is undetectable on Windows (st_ctime_ns
+            # is the creation time there; on POSIX the ctime check catches it
+            # unless the rewrite lands in the same coarse clock tick). Unlike the
+            # Storage API backend, the hash cannot be computed from the uploaded
+            # bytes here: the Azure SDK uploads blocks from the seekable stream
+            # concurrently and out of order (SubStream), so there is no ordered
+            # byte stream to hash inline. In that corner the blob may end up with
+            # hash metadata that does not match its content. (The S3 backend has
+            # no change detection at all.)
             with open(src_path, "rb") as f_src:
                 nucleus_hash, _ = calc_nucleus_hash_from_stream(f_src)
+                src_stat = os.fstat(f_src.fileno())
 
             # Parse destination URL
             account_name, container_name, blob_name = parse_azure_url(dst_url)
@@ -1128,15 +1143,34 @@ class AzureBlobStorage(StorageInterface):
             # Sanitize metadata to ensure it meets Azure Blob Storage requirements
             sanitized_metadata = sanitize_azure_metadata(metadata)
 
-            with open(src_path, "rb") as f_src:
-                await self._throttler_networkdata.run(
-                    blob_client.upload_blob(
+            async def _throttled_upload() -> None:
+                # Open the source only while holding a NetworkDataTransfer slot, so at
+                # most file_transfer_jobs source files are open at once (OMPE-74369).
+                # upload_blob is awaited directly: this task already holds the slot and
+                # must not re-enter the same throttler.
+                with open(src_path, "rb") as f_src:
+                    # ctime_ns is included because a same-size rewrite can restore
+                    # mtime but cannot restore ctime on POSIX; see the KNOWN
+                    # LIMITATION note at the snapshot above for what this cannot
+                    # catch.
+                    current_stat = os.fstat(f_src.fileno())
+                    if (current_stat.st_size, current_stat.st_mtime_ns, current_stat.st_ctime_ns, current_stat.st_ino) != (
+                        src_stat.st_size,
+                        src_stat.st_mtime_ns,
+                        src_stat.st_ctime_ns,
+                        src_stat.st_ino,
+                    ):
+                        # Uploading now would store the pre-change nucleus hash for
+                        # post-change bytes; fail cleanly instead.
+                        raise IOError(f"Source file {src_path} changed while the upload was queued")
+                    await blob_client.upload_blob(
                         f_src,
                         overwrite=True,
                         metadata=sanitized_metadata,
                         max_concurrency=WRAPP_AZURE_UPLOAD_MAX_CONCURRENCY,
                     )
-                )
+
+            await self._throttler_networkdata.run(_throttled_upload())
 
             return Result.OK
 
@@ -1183,13 +1217,21 @@ class AzureBlobStorage(StorageInterface):
             dst_dir = os.path.dirname(dst_path)
             os.makedirs(dst_dir, exist_ok=True)
 
-            # Download blob
-            with open(dst_path, "wb" if overwrite else "xb") as f_dst:
-                download_stream = await self._throttler_roundtrip.run(
-                    blob_client.download_blob(max_concurrency=WRAPP_AZURE_DOWNLOAD_MAX_CONCURRENCY)
-                )
-                blob_data = await self._throttler_networkdata.run(download_stream.readall())
-                f_dst.write(blob_data)
+            async def _throttled_download() -> None:
+                # Hold exactly one NetworkDataTransfer slot for the whole file and open
+                # the destination only inside it, so at most file_transfer_jobs
+                # destination files are open at once (OMPE-74369). The nested roundtrip
+                # throttle for the initial GET is a *different* throttler; nothing in
+                # here may re-acquire networkdata.
+                with open(dst_path, "wb" if overwrite else "xb") as f_dst:
+                    download_stream = await self._throttler_roundtrip.run(
+                        blob_client.download_blob(max_concurrency=WRAPP_AZURE_DOWNLOAD_MAX_CONCURRENCY)
+                    )
+                    # Stream to the file instead of readall(): peak memory is the SDK's
+                    # first-chunk buffer (max_single_get_size), not the whole blob.
+                    await download_stream.readinto(f_dst)
+
+            await self._throttler_networkdata.run(_throttled_download())
 
             return Result.OK
 

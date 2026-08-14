@@ -15,11 +15,14 @@
 
 import asyncio
 import concurrent.futures
+import gc
 import os
 import signal
 import sys
 import threading
 import time
+import warnings
+from contextlib import contextmanager
 from typing import Optional
 
 import pytest
@@ -62,6 +65,16 @@ except ImportError:
 # When S3 is enabled with a local endpoint override (e.g. MinIO), it will intercept
 # virtual-hosted-style S3 HTTP URLs but fail to resolve real AWS data.
 _s3_local_endpoint = g_aws_enabled and bool(os.getenv("WRAPP_S3_ENDPOINT"))
+
+
+@contextmanager
+def _assert_no_unawaited_coroutine_warning():
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always", RuntimeWarning)
+        yield
+        gc.collect()
+    unawaited = [warning for warning in caught if "was never awaited" in str(warning.message)]
+    assert unawaited == []
 
 
 @pytest.mark.asyncio
@@ -148,6 +161,48 @@ async def test_scheduling_node_direct_nesting(sth):
             "subjob_2_task_0.2",
         ]
     )
+
+
+@pytest.mark.asyncio
+async def test_scheduling_rejected_tasks_close_coroutines(sth):
+    async with sth as s:
+        tn_initialized = s.root_task_node().create_task_group_node()
+        with _assert_no_unawaited_coroutine_warning():
+            with pytest.raises(RuntimeError, match=r"state=.*Initialized"):
+                # Passing a freshly-created coroutine to create_task() in the Initialized
+                # state must reject the task and close the coroutine, otherwise Python later
+                # reports "coroutine was never awaited" when it is garbage-collected.
+                tn_initialized.create_task(sth.task_func(0.1))
+
+    async with sth as s:
+        async with s.root_task_node().create_task_group_node() as tn_completed:
+            tn_completed.create_task(sth.task_func(0.1))
+        with _assert_no_unawaited_coroutine_warning():
+            with pytest.raises(RuntimeError, match=r"state=.*Completed"):
+                # The same cleanup is required after the task group has completed: even though
+                # create_task() raises, ownership of the coroutine has already been handed to
+                # the scheduler API, so the rejected coroutine must be closed here.
+                tn_completed.create_task(sth.task_func(0.1))
+
+
+@pytest.mark.asyncio
+async def test_scheduling_task_cancelled_before_start_closes_coroutine(sth):
+    # create_task() accepts the task, but the task is cancelled before the event loop ever steps it -
+    # which is exactly what asyncio.TaskGroup does to the sibling tasks it has not started yet when
+    # another task in the group fails. The scheduled coroutine must not be left un-awaited in that case,
+    # otherwise it is garbage-collected with a spurious "coroutine was never awaited" RuntimeWarning,
+    # which then flakily fails unrelated tests that assert no warnings are emitted.
+    async def scenario():
+        async with sth as s:
+            async with s.root_task_node().create_task_group_node() as tn:
+                # Cancel the task synchronously, before yielding to the event loop, so it has not been
+                # stepped yet when it is cancelled.
+                assert tn.create_task(sth.task_func(0.1), name="cancel_before_start").cancel()
+
+    with _assert_no_unawaited_coroutine_warning():
+        # Run the scenario in its own frame so the task group (and the cancelled task it holds) are
+        # released before the warning check forces a garbage collection.
+        await scenario()
 
 
 @pytest.mark.asyncio
@@ -439,7 +494,9 @@ def test_scheduling_task_ctrl_c_with_aborted_shutdown(sth):
 
 
 @pytest.mark.timeout(30, func_only=True)
-@pytest.mark.skipif(sys.platform == "win32", reason="os.kill(SIGINT) sends CTRL_C_EVENT to all console processes on Windows, crashing xdist workers")
+@pytest.mark.skipif(
+    sys.platform == "win32", reason="os.kill(SIGINT) sends CTRL_C_EVENT to all console processes on Windows, crashing xdist workers"
+)
 def test_wrapp_thread_ctrl_c_cancels_scheduler_tasks(wrapp_init):
     """Ctrl+C during a command on WrappEventLoopThread must cancel all scheduler tasks.
 

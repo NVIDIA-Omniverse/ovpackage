@@ -291,17 +291,61 @@ def validate_package_and_version(package_name: str, version: str) -> None:
 
 @force_wrapp_thread
 @wrapp_public_api
-async def write_package_info(package_url: str, package: PackageInfo, context: Optional[CommandParameters] = None) -> str:
+async def write_package_info(
+    package_url: str,
+    package: PackageInfo,
+    context: Optional[CommandParameters] = None,
+    *,
+    create_package_standard_license: Optional[str] = None,
+    package_standard_content_hashes: Optional[Dict[str, Dict[str, str]]] = None,
+) -> str:
     """Given a destination URL including the file name and a package info, write the given information in the current JSON format.
 
     :param package_url: Destination path for the wrapp file to be created, including the file name
     :param package: PackageInfo object to be stored
     :param context: optional CommandParameters() object to control the storage operation
+    :param create_package_standard_license: SPDX license identifier; when set, package-standard sidecars are generated
+        for the written package (used by ``create`` only)
+    :param package_standard_content_hashes: precomputed ``{relative_path: {hash_name: value}}`` map (from cataloging) used
+        to build the package-standard BOM without re-reading the payload
     :returns: The filename written to
 
     On failure, this will raise a StorageOperationError.
     """
-    await package.save(context=context if context else CommandParameters(), destination=package_url)
+    return await _write_package_info(
+        package_url,
+        package,
+        context,
+        create_package_standard_license=create_package_standard_license,
+        package_standard_content_hashes=package_standard_content_hashes,
+    )
+
+
+@force_wrapp_thread
+async def _write_package_info(
+    package_url: str,
+    package: PackageInfo,
+    context: Optional[CommandParameters] = None,
+    *,
+    package_standard_seed_url: Optional[str] = None,
+    create_package_standard_license: Optional[str] = None,
+    package_standard_content_hashes: Optional[Dict[str, Dict[str, str]]] = None,
+) -> str:
+    resolved_context = context if context else CommandParameters()
+    await package.save(context=resolved_context, destination=package_url)
+    if not resolved_context.dry_run:
+        from wrapp.datastructures.package_standard import (
+            copy_package_standard_sidecars,
+            write_package_standard_sidecars,
+        )
+
+        if package_standard_seed_url is not None:
+            # Non-create paths (install/mirror) carry existing sidecars verbatim, never regenerate.
+            await copy_package_standard_sidecars(package_standard_seed_url, package_url, resolved_context)
+        elif create_package_standard_license is not None:
+            await write_package_standard_sidecars(
+                package_url, package, resolved_context, create_package_standard_license, package_standard_content_hashes
+            )
     return package_url
 
 

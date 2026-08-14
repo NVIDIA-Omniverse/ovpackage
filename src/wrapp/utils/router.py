@@ -44,6 +44,7 @@ from wrapp.utils.storage_interface import (
 )
 from wrapp.utils.task_throttler import TaskThrottler
 from wrapp.utils.utils import (
+    FailedCommand,
     StorageInitializationError,
     StorageMissingDependenciesError,
     StorageOperationError,
@@ -242,21 +243,34 @@ class Router:
             self._storage_info[StorageType.GCS] = f"DISABLED: {e}"
             logger.error(f"Failed to initialize Google Cloud Storage backend: {e}")
 
-        self._storage_api = None
+        # Storage API supports multiple simultaneously-connected services: the
+        # env-configured ``default`` instance plus any additional named
+        # ``[storage_api.<name>]`` services from wrapp.toml. They are kept in an
+        # ordered dict (default first, then wrapp.toml file order); routing order
+        # is also the deterministic winner order on a scope conflict.
+        self._storage_apis: Dict[str, "StorageAPIStorageGRPC"] = {}  # type: ignore[name-defined]
         try:
             if g_storage_api_enabled:
                 # Import StorageAPIStorageGRPC locally to avoid import errors if dependencies are missing
+                from wrapp.utils.config import load_wrapp_config
                 from wrapp.utils.storage_impls.storageapi import StorageAPIStorageGRPC
 
-                self._storage_api = StorageAPIStorageGRPC(wrapp_version, debug_level, throttling_parameters)
-                target = self._storage_api._discovery_url or self._storage_api._endpoint
-                if target:
-                    self._storage_info[StorageType.StorageAPI] = f"Storage API initialized ({target})"
-                else:
-                    self._storage_info[StorageType.StorageAPI] = (
-                        f"ENABLED but not configured: set {public_env_prefix()}STORAGE_API_DISCOVERY_URL "
-                        f"or {public_env_prefix()}STORAGE_API_GRPC_ADDRESS"
+                # Load config once here; a malformed config (e.g. a named service
+                # with no discovery_url) fails fast out of the Router, matching
+                # the fail-fast contract for invalid configuration.
+                wrapp_config = load_wrapp_config()
+                self._storage_apis["default"] = StorageAPIStorageGRPC(
+                    wrapp_version, debug_level, throttling_parameters, wrapp_config=wrapp_config
+                )
+                for named in wrapp_config.named_storage_api_backends:
+                    self._storage_apis[named.name] = StorageAPIStorageGRPC(
+                        wrapp_version,
+                        debug_level,
+                        throttling_parameters,
+                        wrapp_config=wrapp_config,
+                        backend_config=named,
                     )
+                self._storage_info[StorageType.StorageAPI] = self._storage_api_status_summary()
             else:
                 self._storage_info[
                     StorageType.StorageAPI
@@ -276,6 +290,130 @@ class Router:
         self._wrapp_version = wrapp_version
         self._debug_level = debug_level
 
+    @property
+    def _storage_api(self):
+        """Backward-compatible accessor for the *default* Storage API instance.
+
+        Historically the Router held a single ``self._storage_api``. Multi-service
+        support replaced it with :attr:`_storage_apis`; this property preserves the
+        old single-instance attribute (getter returns the default/first instance,
+        setter installs a single instance) for existing callers and tests. New code
+        should use :meth:`storage_api`, :meth:`_select_storage_api`, or iterate
+        :attr:`_storage_apis`.
+        """
+        return next(iter(self._storage_apis.values()), None)
+
+    @_storage_api.setter
+    def _storage_api(self, value) -> None:
+        if value is None:
+            self._storage_apis = {}
+        else:
+            self._storage_apis = {getattr(value, "_name", "default"): value}
+
+    def _storage_api_status_summary(self) -> str:
+        """One-line, per-instance status string stored under the single
+        ``StorageType.StorageAPI`` key in :attr:`_storage_info`."""
+        parts = []
+        for name, inst in self._storage_apis.items():
+            target = inst._discovery_url or inst._endpoint
+            if target:
+                parts.append(f"[{name}] initialized ({target})")
+            else:
+                parts.append(
+                    f"[{name}] ENABLED but not configured: set {public_env_prefix()}STORAGE_API_DISCOVERY_URL "
+                    f"or {public_env_prefix()}STORAGE_API_GRPC_ADDRESS"
+                )
+        return "; ".join(parts) if parts else "no instances configured"
+
+    def eager_initialize_storage_apis(self) -> None:
+        """Eagerly connect every configured Storage API service (discover the
+        gRPC endpoint, negotiate versions, and populate its route scope), then
+        warn about any overlapping scopes between services.
+
+        Per-instance failures are isolated: one service being down or unauthed
+        does not block the others, and routing falls back to lazy initialization
+        for that service on its first real operation.
+        """
+        for name, storage_api in self._storage_apis.items():
+            if not (storage_api._endpoint or storage_api._discovery_url):
+                # Inert instance (e.g. an unconfigured ``default``): nothing to connect to.
+                continue
+            try:
+                storage_api.eager_initialize()
+            except FailedCommand:
+                logger.debug(
+                    "StorageAPI[%s] eager initialization deferred (no credentials available yet, will retry after auth)",
+                    name,
+                )
+            except (StorageInitializationError, StorageOperationError) as e:
+                logger.warning("StorageAPI[%s] eager initialization failed, will retry lazily: %s", name, e)
+        self._warn_on_storage_api_route_conflicts()
+
+    def _warn_on_storage_api_route_conflicts(self) -> None:
+        """Warn (once, at startup) when two connected Storage API services claim
+        overlapping URLs.
+
+        WRAPP still proceeds — overlapping URLs route to the first service in
+        config order (see :meth:`_select_storage_api`). The remedy is to set
+        disjoint ``routes`` under ``[storage_api.<name>]`` in ``wrapp.toml`` so
+        each URL is unambiguously owned by one service.
+
+        Wildcard-pattern intersection is undecidable in general, so this uses
+        representative probe URLs (the literal prefix of each route pattern, each
+        top-level address, and the discovery URL) and asks whether another
+        service's authoritative scope (or discovery URL) also claims them.
+        """
+        instances = list(self._storage_apis.items())
+        if len(instances) < 2:
+            return
+        order = {name: i for i, (name, _) in enumerate(instances)}
+
+        def probe_urls(storage_api) -> set:
+            urls: set = set()
+            if storage_api._discovery_url:
+                urls.add(storage_api._discovery_url)
+            for pattern in storage_api._routes or []:
+                # Strip the wildcard tail to a literal prefix, e.g.
+                # "https://host/**" -> "https://host".
+                prefix = pattern.split("*", 1)[0].rstrip("/")
+                if prefix:
+                    urls.add(prefix)
+            for tla in storage_api._top_level_addresses or []:
+                urls.add(tla)
+            return urls
+
+        def claims(storage_api, url: str) -> bool:
+            discovery_url = storage_api._discovery_url
+            if discovery_url:
+                normalized = url.rstrip("/")
+                if normalized == discovery_url or normalized.startswith(discovery_url + "/"):
+                    return True
+            # Only authoritative scope counts — ignore the permissive
+            # pre-connection window so we do not raise false conflicts.
+            return storage_api.has_known_scope() and storage_api.is_url_in_scope(url)
+
+        reported: set = set()
+        for name_a, storage_api_a in instances:
+            for probe in probe_urls(storage_api_a):
+                for name_b, storage_api_b in instances:
+                    if name_b == name_a or not claims(storage_api_b, probe):
+                        continue
+                    key = (tuple(sorted((name_a, name_b))), probe)
+                    if key in reported:
+                        continue
+                    reported.add(key)
+                    winner = name_a if order[name_a] < order[name_b] else name_b
+                    logger.warning(
+                        "Storage API routing conflict: services %r and %r both claim %r. "
+                        "WRAPP will route the overlapping URL(s) to %r (first configured). "
+                        "To resolve, give each service a disjoint 'routes' list under "
+                        "[storage_api.<name>] in wrapp.toml.",
+                        name_a,
+                        name_b,
+                        probe,
+                        winner,
+                    )
+
     def get_throttling_params(self) -> "ThrottlingParameters":
         """Get the scheduling parameters that were used to initialize the Router."""
         return self._throttling_params
@@ -294,8 +432,9 @@ class Router:
             success = False
         if self._gcs is not None and not self._gcs.reconfigure_throttlers(params):
             success = False
-        if self._storage_api is not None and not self._storage_api.reconfigure_throttlers(params):
-            success = False
+        for storage_api in self._storage_apis.values():
+            if not storage_api.reconfigure_throttlers(params):
+                success = False
         return success
 
     def _verify_same_params(self, wrapp_version: str, debug_level: bool, throttling_params: "ThrottlingParameters"):
@@ -341,9 +480,9 @@ class Router:
 
     @sync_calls_async_on_wrapp_thread
     async def _storageapi_shutdown(self):
-        if self._storage_api:
-            await self._storage_api.close()
-            self._storage_api = None
+        for storage_api in self._storage_apis.values():
+            await storage_api.close()
+        self._storage_apis = {}
 
     @assert_not_wrapp_thread
     def shutdown(self, exc_type=None, exc_val=None, exc_tb=None, shutdown_client_lib=True):
@@ -391,26 +530,51 @@ class Router:
         return self._is_gcs_url_impl(url)
 
     def is_storage_api_url(self, url: str) -> bool:
-        if self._storage_api is None:
-            return False
-        # Once Storage API has reported authoritative scope (routes or TLAs),
-        # trust it for any URL scheme — including omniverse:// and file:// —
-        # so that a service that explicitly advertises those URLs as its own
-        # is correctly preferred over the Nucleus/local backends.
-        if self._storage_api.has_known_scope():
-            return self._storage_api.is_url_in_scope(url)
-        # Pre-connection (no scope yet known): be permissive to allow lazy
-        # gRPC initialization, but do not steal omniverse:// / file:// URLs
-        # from their dedicated backends before the server has had a chance
-        # to tell us what it actually serves.
+        """True if any connected Storage API service claims *url*."""
+        return self._select_storage_api(url) is not None
+
+    def _select_storage_api(self, url: str):
+        """Return the Storage API instance that owns *url*, or ``None``.
+
+        With multiple connected services, selection is deterministic and
+        proceeds in priority order (config order breaks ties, which is also the
+        conflict-winner order warned about at startup):
+
+        1. **Discovery-URL claim.** If *url* is (under) an instance's discovery
+           URL, that instance owns it — regardless of its route table. This is
+           what lets ``--auth <discovery_url>,<token>`` and per-service auth land
+           on the right instance instead of falling through to Nucleus.
+        2. **Known scope.** Among instances that have reported authoritative
+           scope (routes or TLAs), the first whose scope contains *url* — trusted
+           for any scheme (including ``omniverse://`` / ``file://``) so a service
+           that advertises those URLs beats the Nucleus/local backends.
+        3. **Pre-connection permissive.** Before any instance has known scope,
+           allow lazy gRPC init by letting the first configured-but-unconnected
+           instance claim *url* — but never steal ``omniverse://`` / ``file://``
+           from their dedicated backends in this window.
+        """
+        if not self._storage_apis:
+            return None
+
+        for storage_api in self._storage_apis.values():
+            discovery_url = storage_api._discovery_url
+            if discovery_url:
+                normalized_url = url.rstrip("/")
+                if normalized_url == discovery_url or normalized_url.startswith(discovery_url + "/"):
+                    return storage_api
+
+        for storage_api in self._storage_apis.values():
+            if storage_api.has_known_scope() and storage_api.is_url_in_scope(url):
+                return storage_api
+
+        # No connected instance claims it. Fall through to the permissive
+        # pre-connection window only for schemes not owned by a dedicated backend.
         if is_file_url(url) or is_nucleus_url(url):
-            return False
-        if self._storage_api.is_url_in_scope(url):
-            return True
-        discovery_url = self._storage_api._discovery_url
-        if discovery_url and url.rstrip("/").startswith(discovery_url):
-            return True
-        return False
+            return None
+        for storage_api in self._storage_apis.values():
+            if not storage_api.has_known_scope() and storage_api.is_url_in_scope(url):
+                return storage_api
+        return None
 
     def get_storage_version_info(self, storage_type: StorageType) -> str:
         return self._storage_info[storage_type]
@@ -433,11 +597,13 @@ class Router:
     def _get_storage(self, url: Optional[str]) -> Tuple[StorageInterface, StorageType]:
         if not url or not url.strip():
             raise StorageOperationError("URL cannot be empty")
-        elif self.is_storage_api_url(url):
-            # Prefer StorageAPI if it is not disabled
-            # Once Routing is available on StorageAPI, this can be much more precise than a catch-all
-            return self.storage_api(), StorageType.StorageAPI
-        elif self.is_s3_url(url):
+        # Prefer StorageAPI if a connected service claims this URL. With multiple
+        # services, route to the specific owning instance (not just "the"
+        # StorageAPI) so cross-service reads/writes/copies hit the right server.
+        storage_api = self._select_storage_api(url)
+        if storage_api is not None:
+            return storage_api, StorageType.StorageAPI
+        if self.is_s3_url(url):
             return self.s3(), StorageType.S3
         elif self.is_azure_url(url):
             return self.azure(), StorageType.Azure
@@ -459,7 +625,8 @@ class Router:
             elif self._clientlib is not None:
                 return self.clientlib(), StorageType.Local
             else:
-                raise StorageOperationError(f"No storage backend available to handle file URL: {url}")
+                backend_info = "\n\t".join(self.get_version_info())
+                raise StorageOperationError(f"File URL {url} cannot be handled by any of the enabled storage backends:\n\t{backend_info}\n")
         else:
             backend_info = "\n\t".join(self.get_version_info())
             raise StorageOperationError(f"URL {url} cannot be handled by any of the enabled storage backends:\n\t{backend_info}\n")
@@ -476,8 +643,8 @@ class Router:
             throttlers.extend(self.azure().backend_throttlers())
         if self._gcs:
             throttlers.extend(self.gcs().backend_throttlers())
-        if self._storage_api:
-            throttlers.extend(self.storage_api().backend_throttlers())
+        for storage_api in self._storage_apis.values():
+            throttlers.extend(storage_api.backend_throttlers())
         return throttlers
 
     def storage_for_read(self, url: str) -> StorageInterface:
@@ -492,11 +659,43 @@ class Router:
         write_storage, write_storage_type = self._get_storage(write_url)
         return read_storage_type, write_storage_type
 
+    def storages_for_copy(self, read_url: str, write_url: str) -> Tuple[StorageInterface, StorageType, StorageInterface, StorageType]:
+        """Route both URLs in one pass, returning the backend *instances* and
+        their types. Callers compare the instances (not just the types) so that
+        two different Storage API services — which share ``StorageType.StorageAPI``
+        — are correctly treated as a cross-storage copy rather than a same-service
+        server-side copy.
+        """
+        read_storage, read_storage_type = self._get_storage(read_url)
+        write_storage, write_storage_type = self._get_storage(write_url)
+        return read_storage, read_storage_type, write_storage, write_storage_type
+
+    def storage_api_instance_for(self, url: str):
+        """Return the Storage API instance that owns *url*, or ``None``. Lets
+        Tier-3 ``storage.py`` decide same-vs-different Storage API service without
+        reaching into private routing internals."""
+        return self._select_storage_api(url)
+
+    def storage_stores_wrapp_hashes(self, url: str) -> bool:
+        """Return whether the routed backend stores WRAPP hashes directly with files or objects."""
+        try:
+            storage, storage_type = self._get_storage(url)
+        except StorageOperationError:
+            return False
+
+        if storage_type in (StorageType.S3, StorageType.Azure, StorageType.GCS):
+            return True
+        if storage_type == StorageType.Nucleus:
+            return is_nucleus_url(url)
+        if storage_type == StorageType.StorageAPI:
+            return bool(getattr(storage, "has_metadata_support", False))
+        return False
+
     def enable_auth_interactive_fallback(self, enabled: bool):
         if self._clientlib is not None:
             self._clientlib.enable_auth_interactive_fallback(enabled)
-        if self._storage_api is not None:
-            self._storage_api.enable_auth_interactive_fallback(enabled)
+        for storage_api in self._storage_apis.values():
+            storage_api.enable_auth_interactive_fallback(enabled)
 
     def s3(self) -> "S3Storage":  # type: ignore[name-defined]
         # S3 might have failed during the initialization. Given there are use cases in which the user will
@@ -535,9 +734,15 @@ class Router:
             raise StorageOperationError("Local file storage was not successfully initialized")
         return self._local_file_storage
 
-    if g_storage_api_enabled:
+    def storage_api(self, name: str = "default") -> "StorageAPIStorageGRPC":  # type: ignore[name-defined]
+        """Return a Storage API instance by name (defaults to ``default``).
 
-        def storage_api(self) -> "StorageAPIStorageGRPC":  # type: ignore[name-defined]
-            if not self._storage_api:
-                raise StorageOperationError("Storage API was not successfully initialized")
-            return self._storage_api
+        Defined unconditionally (like :meth:`s3` and :meth:`local_file_storage`):
+        it only reads :attr:`_storage_apis`, which is always initialized, so the
+        accessor stays available even when the Storage API backend is disabled —
+        it just raises ``StorageOperationError`` because no instance is present.
+        """
+        storage_api = self._storage_apis.get(name)
+        if storage_api is None:
+            raise StorageOperationError(f"Storage API instance {name!r} was not successfully initialized")
+        return storage_api

@@ -538,6 +538,9 @@ class StorageInterface(ABC):
     async def delete_tree(self, url: str, task_node: SchedulerTaskGroupNode) -> Result:
         ...
 
+    def is_case_sensitive(self, url: str) -> bool:
+        return True
+
     @abstractmethod
     def can_be_cached(self, url: str) -> bool:
         ...

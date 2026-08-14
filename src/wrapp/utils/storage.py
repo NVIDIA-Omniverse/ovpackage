@@ -59,6 +59,7 @@ from wrapp.utils.storage_interface import (
     ConnectionStatus,
     ListEntry,
     LocalReadOnlyFile,
+    ResourceIdentity,
     Result,
     ServerInfo,
     StorageAuthInfo,
@@ -66,7 +67,6 @@ from wrapp.utils.storage_interface import (
 )
 from wrapp.utils.utils import (
     FailedCommand,
-    StorageInitializationError,
     StorageOperationError,
     is_nucleus_url,
     make_relative_url,
@@ -91,6 +91,12 @@ def wrapp_is_source_and_destination_same_storage(source: str, destination: str) 
     target_is_gcs = Router.me().is_gcs_url(destination)
     if source_is_gcs and target_is_gcs:
         return True
+    # Storage API: "same storage" means the *same connected service instance*.
+    # Two different Storage API services are distinct storages even though both
+    # are StorageType.StorageAPI, so a copy between them is a cross-storage copy.
+    source_storage_api = Router.me().storage_api_instance_for(source)
+    if source_storage_api is not None and source_storage_api is Router.me().storage_api_instance_for(destination):
+        return True
     return False
 
 
@@ -98,6 +104,16 @@ def wrapp_is_source_and_destination_same_storage(source: str, destination: str) 
 async def wrapp_stat(url: str) -> Tuple[Result, ListEntry]:
     Stats.get().increment(StatType.STAT)
     return await Router.me().storage_for_read(url).stat(url)
+
+
+@force_wrapp_thread
+async def wrapp_make_resource_identity(url: str, item: ListEntry, relative_url: str) -> Tuple[str, str, ResourceIdentity]:
+    """Build the resource identity for ``url`` via its read backend.
+
+    Wraps ``storage_for_read(url).make_resource_identity(...)`` and returns the
+    backend's ``(absolute_url, relative_path, ResourceIdentity)`` tuple unchanged.
+    """
+    return await Router.me().storage_for_read(url).make_resource_identity(url, item, relative_url)
 
 
 @force_wrapp_thread
@@ -174,43 +190,51 @@ async def wrapp_list_checkpoints(url: str) -> Tuple[Result, List[ListEntry]]:
 @force_wrapp_thread
 async def wrapp_copy(src_url: str, dst_url: str, overwrite: bool = False, message: str = "") -> Result:
     Stats.get().increment(StatType.COPY_ASYNC)
-    read_storage_type, write_storage_type = Router.me().storage_types_for_copy(src_url, dst_url)
+    # Route both URLs once and keep the backend *instances*: two different Storage
+    # API services share StorageType.StorageAPI, so we must compare instances (not
+    # just types) to decide whether a copy is same-storage.
+    read_storage, read_storage_type, write_storage, write_storage_type = Router.me().storages_for_copy(src_url, dst_url)
 
-    # Case 1 - same storage copy.
-    if read_storage_type == write_storage_type:
+    # Case 1 - same storage copy (same backend *instance*).
+    # A same-instance copy may use the backend's server-side copy(). A
+    # cross-instance copy (e.g. between two Storage API services) must NOT take
+    # this path: the source service's server-side copy() resolves the
+    # destination against its own endpoint and would write to a same-named path
+    # on the wrong server. Such copies fall through to Case 4 (download+upload).
+    if read_storage_type == write_storage_type and read_storage is write_storage:
         try:
-            return await Router.me().storage_for_read(src_url).copy(src_url, dst_url, overwrite, message)
+            return await read_storage.copy(src_url, dst_url, overwrite, message)
         except NotImplementedError:
             pass  # Fall through to Case 4 (download to temp file, upload from temp file)
 
     # Case 2 - upload from local disk
     if read_storage_type == StorageType.Local:
         Stats.get().increment(StatType.WRITE_FILE_ASYNC)
-        return await Router.me().storage_for_write(dst_url).upload_file(src_url, dst_url, overwrite, message)
+        return await write_storage.upload_file(src_url, dst_url, overwrite, message)
 
     # Case 3 - download to local disk
     if write_storage_type == StorageType.Local:
         # This is a download operation
         Stats.get().increment(StatType.READ_FILE_ASYNC)
-        return await Router.me().storage_for_write(src_url).download_file(src_url, dst_url, overwrite)
+        return await read_storage.download_file(src_url, dst_url, overwrite)
 
     # Case 4 - client needs to download and then upload
     # Ok, this is a real cross storage operation. As long as we cannot stream data, we need to download and then upload
     if not overwrite:
-        stat_result, entry = await Router.me().storage_for_write(dst_url).stat(dst_url)
+        stat_result, entry = await write_storage.stat(dst_url)
         if stat_result == Result.OK:
             return Result.ERROR_ALREADY_EXISTS
 
     async with TempFileManager.me().create_temp_file() as tmp:
         # Download from source to temp file
         Stats.get().increment(StatType.READ_FILE_ASYNC)
-        result = await Router.me().storage_for_read(src_url).download_file(src_url, tmp.url, overwrite=True)
+        result = await read_storage.download_file(src_url, tmp.url, overwrite=True)
         if result != Result.OK:
             return result
         tmp.write_completed()
         # Upload from temp file to destination
         Stats.get().increment(StatType.WRITE_FILE_ASYNC)
-        return await Router.me().storage_for_write(dst_url).upload_file(tmp.url, dst_url, overwrite, message)
+        return await write_storage.upload_file(tmp.url, dst_url, overwrite, message)
 
 
 @force_wrapp_thread
@@ -354,6 +378,11 @@ def wrapp_can_be_cached(url: str) -> bool:
     return Router.me().storage_for_read(url).can_be_cached(url)
 
 
+@sync_force_wrapp_thread
+def wrapp_is_case_sensitive(url: str) -> bool:
+    return Router.me().storage_for_read(url).is_case_sensitive(url)
+
+
 @force_wrapp_thread
 async def wrapp_get_server_info(url: str) -> Tuple[Result, ServerInfo]:
     Stats.get().increment(StatType.GET_SERVER_INFO_ASYNC)
@@ -401,14 +430,10 @@ def wrapp_initialize(wrapp_version: str, debug_level: bool, throttling_params: O
         WrappEventLoopThread.initialize()
         assert WrappEventLoopThread.is_initialized()
 
-        storage_api = Router.me()._storage_api
-        if storage_api is not None and (storage_api._endpoint or storage_api._discovery_url):
-            try:
-                storage_api.eager_initialize()
-            except FailedCommand:
-                logger.debug("StorageAPI eager initialization deferred (no credentials available yet, will retry after auth)")
-            except (StorageInitializationError, StorageOperationError) as e:
-                logger.warning(f"StorageAPI eager initialization failed, will retry lazily: {e}")
+        # Eagerly connect every configured Storage API service and warn about
+        # any overlapping route scopes between them. Per-instance failures are
+        # isolated inside the Router and fall back to lazy initialization.
+        Router.me().eager_initialize_storage_apis()
 
         TempFileManager.initialize()
 

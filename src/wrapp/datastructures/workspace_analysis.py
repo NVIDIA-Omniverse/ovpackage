@@ -304,11 +304,16 @@ async def check_dirty_state(
                     )
 
         if len(package_errors) > 0:
+            status_message = (
+                f"{sub_package.package.name} at {sub_package.relative_path} is modified"
+                if sub_package.relative_path
+                else f"{sub_package.package.name} is modified"
+            )
             dirty_error = PackageStatusItem(
                 package_name=sub_package.package.name,
                 absolute_wrapp_file_path=sub_package.absolute_path,
                 status_item_type=PackageStatusItemType.PACKAGE_MODIFIED,
-                status_message=f"{sub_package.package.name} at {sub_package.relative_path} is modified",
+                status_message=status_message,
             )
             dirty_packages_in_order.append(sub_package)
             dirty_packages_set.add(sub_package.absolute_path)

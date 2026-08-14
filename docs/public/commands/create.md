@@ -17,6 +17,17 @@ of the subpackage content itself. Those subpackages must not be "new" packages w
 files belong to the subpackage versus the top-level package, since the top-level package collects all files not already claimed by a
 subpackage anywhere in the source tree. See [Catalog](catalog.md) for creating catalogs to define subpackage boundaries.
 
+Use `--create-package-standard <LICENSE>` (or `--cps <LICENSE>`) to also
+write SimReady package-standard sidecars next to the generated `.wrapp` file.
+If the source directory already contains a package-standard *definition seed*
+(for example one written by `ovpackage new --create-package-standard`), `create`
+picks up its license automatically, so `--cps` is not required; an explicit
+`--cps` overrides the seed. If the created package records dependencies, ovpackage
+logs an error and skips sidecar generation because the released package-standard
+metadata does not model ovpackage dependencies yet.
+See package standard sidecars for the compatibility model and sidecar
+behavior.
+
 For usage examples, see the [Tutorial](../tutorial.md). For CLI options, run `ovpackage create --help`.
 
 ## Python API Reference

@@ -19,7 +19,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "ovpackage"
-version = "0.1.0"
+version = "0.2.1"
 description = "Workflow for reproducible asset packaging and publishing."
 readme = "README.md"
 license = { file = "LICENSE" }
@@ -28,7 +28,7 @@ classifiers = [
 ]
 requires-python = ">=3.11, <3.13"
 dependencies = [
-    "typer[all]>=0.16",
+    "typer>=0.16",
     "toml>=0.10.2",
     "gitignore-parser>=0.1.11",
     "prompt-toolkit>=3.0.47",

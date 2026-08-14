@@ -16,8 +16,12 @@
 import hashlib
 import logging
 import os
-from dataclasses import dataclass
+from dataclasses import (
+    dataclass,
+    field,
+)
 from datetime import datetime
+from enum import Enum
 from typing import (
     BinaryIO,
     Dict,
@@ -56,6 +60,7 @@ from wrapp.datastructures.ignore import (
     create_ignore_eval_from_params,
     item_is_ignored,
 )
+from wrapp.datastructures.package_standard import is_package_standard_sidecar_path
 from wrapp.options import (
     AuthOption,
     CheckpointsFlag,
@@ -85,7 +90,10 @@ from wrapp.utils.coro import (
     force_wrapp_thread,
 )
 from wrapp.utils.ensure_scheduler import ensure_scheduler
-from wrapp.utils.nucleus_hash import calc_nucleus_hash_from_stream
+from wrapp.utils.nucleus_hash import (
+    calc_nucleus_hash_from_stream,
+    calc_package_standard_hashes_from_stream,
+)
 from wrapp.utils.scheduler_task_node import (
     SchedulerTaskGroupNode,
     SchedulerTreeNode,
@@ -130,6 +138,17 @@ from wrapp.utils.wrapp_init_for_cmd import wrapp_init_for_cmd
 from ..utils.logging import log_args
 
 logger = logging.getLogger("omni.wrapp")
+
+
+class ContentHashAlgorithm(Enum):
+    """Extra content hashes a caller can request to be computed during cataloging.
+
+    ``PACKAGE_STANDARD`` yields the SimReady package-standard hashes (a plain
+    ``sha256`` and, for files over 1 MiB, ``sha256-first1m``) computed in the same
+    offloaded pass that produces the WRAPP nucleus hash, so the payload is read once.
+    """
+
+    PACKAGE_STANDARD = "package-standard"
 
 
 @app.command(name="catalog")
@@ -247,6 +266,69 @@ async def catalog(
     :raises FailedCommand: When prerequisites not matched
     :raises StorageOperationError: Raised when network or file operations fail
     """
+    resulting_catalog, _ = await _catalog_impl(
+        root_dir=root_dir,
+        file_list=file_list,
+        tags=tags,
+        ignores=ignores,
+        local_hash=local_hash,
+        checkpoints=checkpoints,
+        skip_missing=skip_missing,
+        content_hashes=None,
+        context=context,
+        scheduler=scheduler,
+    )
+    return resulting_catalog
+
+
+@force_wrapp_thread
+@ensure_scheduler
+@log_args
+async def catalog_with_content_hashes(
+    root_dir: Optional[str] = None,
+    file_list: Optional[Union[str, List[Tuple[str, str]]]] = None,
+    tags: bool = False,
+    ignores: Optional[Union[str, IgnoreEvaluator]] = None,
+    local_hash: bool = False,
+    checkpoints: bool = True,
+    skip_missing: bool = False,
+    content_hashes: Optional[List[ContentHashAlgorithm]] = None,
+    *,
+    context: CommandParameters = CommandParameters(),
+    scheduler: Optional[SchedulerContext] = None,
+) -> Tuple[Catalog, Dict[str, Dict[str, str]]]:
+    """Internal variant of :func:`catalog` that also returns precomputed content hashes.
+
+    When ``content_hashes`` requests an algorithm (e.g. ``ContentHashAlgorithm.PACKAGE_STANDARD``),
+    the per-file hashes are computed in the same offloaded pass that produces the WRAPP nucleus hash
+    and returned as a ``{relative_path: {hash_name: value}}`` map, so callers need not re-read the payload.
+    """
+    return await _catalog_impl(
+        root_dir=root_dir,
+        file_list=file_list,
+        tags=tags,
+        ignores=ignores,
+        local_hash=local_hash,
+        checkpoints=checkpoints,
+        skip_missing=skip_missing,
+        content_hashes=content_hashes,
+        context=context,
+        scheduler=scheduler,
+    )
+
+
+async def _catalog_impl(
+    root_dir: Optional[str],
+    file_list: Optional[Union[str, List[Tuple[str, str]]]],
+    tags: bool,
+    ignores: Optional[Union[str, IgnoreEvaluator]],
+    local_hash: bool,
+    checkpoints: bool,
+    skip_missing: bool,
+    content_hashes: Optional[List[ContentHashAlgorithm]],
+    context: CommandParameters,
+    scheduler: Optional[SchedulerContext],
+) -> Tuple[Catalog, Dict[str, Dict[str, str]]]:
     if scheduler is None:
         raise RuntimeError("No scheduler present and ensure_scheduler malfunctioned, program error!")
     catalog_items: List[CatalogItem] = []
@@ -256,6 +338,7 @@ async def catalog(
         checkpoints=checkpoints,
         command_params=context,
         error_raises_exception=not skip_missing,
+        content_hashes=content_hashes,
     ) as builder:
         if isinstance(file_list, list):
             if not root_dir:
@@ -289,7 +372,7 @@ async def catalog(
     resulting_catalog = Catalog(root=root, items=catalog_items)
     if tags:
         await CatalogBuilder.add_tags_to_catalog(context, scheduler, resulting_catalog)
-    return resulting_catalog
+    return resulting_catalog, builder.content_hashes_map
 
 
 class ProgressStats_Catalog:
@@ -375,11 +458,16 @@ class CatalogBuilder:
         local_hash: bool = False,
         command_params: CommandParameters = CommandParameters(),
         error_raises_exception=True,
+        content_hashes: Optional[List[ContentHashAlgorithm]] = None,
     ):
         self.verbose = command_params.verbose
         self.checkpoints = checkpoints
         self.local_hash = local_hash
         self.result_list: List[CatalogItem] = []
+        # Extra content hashes (e.g. package-standard sha256) requested in addition to the WRAPP
+        # nucleus hash, computed in the same offloaded pass and collected as {relative_path: {name: value}}.
+        self._content_hashes: List[ContentHashAlgorithm] = content_hashes or []
+        self.content_hashes_map: Dict[str, Dict[str, str]] = {}
         self.hash_cache: Optional[HashCache] = None
         self.progress_stats: ProgressStats_Catalog = ProgressStats_Catalog(self)
         if command_params.hash_cache_file is not None:
@@ -472,6 +560,10 @@ class CatalogBuilder:
                     file_url = AbsoluteUrl(absolute_url=url)
                     relative = make_relative_url(base, url)
                     assert is_relative_path(relative)
+                if is_package_standard_sidecar_path(relative):
+                    if self.verbose:
+                        logger.info(f"Ignoring package-standard sidecar {relative}")
+                    continue
                 if ignore_rules is not None and ignore_rules.is_ignored(file_url.absolute_url):
                     if self.verbose:
                         logger.info(f"Ignoring {file_url.absolute_url}")
@@ -585,10 +677,13 @@ class CatalogBuilder:
         filesize: int,
         modified_time: datetime,
         resource_identity: Optional[str],
+        extra_hashes: Optional[Dict[str, str]] = None,
     ):
         if modified_time is not None and self.hash_cache is not None:
             self.hash_cache.set(url.absolute_url, filesize, modified_time, local_hash)
         relative_url = base_url.make_relative(url)
+        if extra_hashes:
+            self.content_hashes_map[relative_url.relative_url] = extra_hashes
         self.result_list.append(
             CatalogItem(
                 relative_path=relative_url.relative_url,
@@ -692,6 +787,7 @@ class CatalogBuilder:
                     filesize=filesize,
                     modified_time=modified_time,
                     resource_identity=resource_identity,
+                    extra_hashes=self._compute_extra_hashes(tmp.path),
                 )
 
     @dataclass
@@ -702,6 +798,7 @@ class CatalogBuilder:
         filesize: int
         modified_time: datetime
         resource_identity: Optional[str]
+        extra_hashes: Dict[str, str] = field(default_factory=dict)
 
     def _collect_local_hash_result(self, r: ComputeLocalHashResult) -> None:
         if self.verbose:
@@ -713,6 +810,7 @@ class CatalogBuilder:
             r.filesize,
             r.modified_time,
             r.resource_identity,
+            r.extra_hashes,
         )
 
     def _compute_local_hash(
@@ -724,7 +822,8 @@ class CatalogBuilder:
         resource_identity: Optional[str],
     ) -> ComputeLocalHashResult:
         try:
-            local_hash, filesize = self._compute_hash(cache_file.local_path())
+            path = cache_file.local_path()
+            local_hash, filesize = self._compute_hash(path)
             return CatalogBuilder.ComputeLocalHashResult(
                 base_url=base_url.absolute_url,
                 url=url.absolute_url,
@@ -732,9 +831,19 @@ class CatalogBuilder:
                 filesize=filesize,
                 modified_time=modified_time,
                 resource_identity=resource_identity,
+                extra_hashes=self._compute_extra_hashes(path),
             )
         finally:
             cache_file.close()
+
+    def _compute_extra_hashes(self, path: str) -> Dict[str, str]:
+        """Compute any requested extra content hashes for a local file (single read per algorithm)."""
+        hashes: Dict[str, str] = {}
+        if ContentHashAlgorithm.PACKAGE_STANDARD in self._content_hashes:
+            with open(path, "rb") as f:
+                package_standard_hashes, _ = calc_package_standard_hashes_from_stream(f)
+            hashes.update(package_standard_hashes)
+        return hashes
 
     @staticmethod
     async def _download_file(url: AbsoluteUrl) -> LocalReadOnlyFile:

@@ -25,9 +25,13 @@ A missing file is not an error — `load_wrapp_config()` returns an empty
 fails fast with :class:`InvalidConfigurationError` so that overrides are
 never silently dropped.
 
-Schema (only the keys understood by the current WRAPP version are listed; the
-``[storage_api.<name>]`` shape is reserved for future multi-backend support
-but in this release only the entry named ``default`` is honored):
+Schema (only the keys understood by the current WRAPP version are listed). Each
+``[storage_api.<name>]`` table defines a Storage API service that WRAPP connects
+to. The entry named ``default`` is the one configured by the
+``WRAPP_STORAGE_API_DISCOVERY_URL`` / ``WRAPP_STORAGE_API_GRPC_ADDRESS``
+environment variables; every other named entry becomes an *additional* Storage
+API service connected at the same time (multi-service support). A named
+(non-``default``) entry must set ``discovery_url`` — it has no env-var fallback:
 
 .. code-block:: toml
 
@@ -44,6 +48,13 @@ but in this release only the entry named ``default`` is honored):
         "omniverse://content.ov.nvidia.com/**",
         "https://content.ov.nvidia.com/**",
     ]
+
+    # A second Storage API service, connected alongside ``default``. Give each
+    # service a disjoint ``routes`` scope so a URL is unambiguously owned by
+    # one service (WRAPP warns at startup if two services' scopes overlap).
+    [storage_api.staging]
+    discovery_url = "https://storage-api.staging.example.com"
+    routes = ["https://staging.content.example.com/**"]
 
 Precedence (top wins):
 
@@ -86,11 +97,11 @@ _KNOWN_TOP_LEVEL_KEYS = frozenset({"storage_api"})
 # Keys understood inside each ``[storage_api.<name>]`` table.
 _KNOWN_STORAGE_API_KEYS = frozenset({"discovery_url", "routes"})
 
-# In this release, only the backend named ``default`` is wired into the
-# Router. The schema accepts other names so that users can start preparing
-# their config for a future multi-backend release, but we log a clear
-# message when we see them so the override is never silent.
-_ACTIVE_STORAGE_API_BACKEND_NAME = "default"
+# The backend named ``default`` is the one configured by the
+# ``WRAPP_STORAGE_API_DISCOVERY_URL`` / ``WRAPP_STORAGE_API_GRPC_ADDRESS``
+# environment variables. Every other ``[storage_api.<name>]`` table becomes an
+# additional Storage API service connected alongside it.
+DEFAULT_STORAGE_API_BACKEND_NAME = "default"
 
 
 @dataclass(frozen=True)
@@ -118,9 +129,18 @@ class WrappConfig:
     def default_storage_api(self) -> Optional[StorageAPIBackendConfig]:
         """Return the ``[storage_api.default]`` entry, or None if absent."""
         for backend in self.storage_api_backends:
-            if backend.name == _ACTIVE_STORAGE_API_BACKEND_NAME:
+            if backend.name == DEFAULT_STORAGE_API_BACKEND_NAME:
                 return backend
         return None
+
+    @property
+    def named_storage_api_backends(self) -> Tuple[StorageAPIBackendConfig, ...]:
+        """Return the non-``default`` Storage API backends, in file order.
+
+        These are the additional services connected alongside the
+        env-configured ``default`` instance.
+        """
+        return tuple(b for b in self.storage_api_backends if b.name != DEFAULT_STORAGE_API_BACKEND_NAME)
 
 
 def _resolve_config_path(explicit_path: Optional[Path]) -> Path:
@@ -157,6 +177,12 @@ def _parse_storage_api_section(raw: Any, source_path: Path) -> Tuple[StorageAPIB
             raise InvalidConfigurationError(
                 f"{source_path}: [storage_api.{backend_name}].discovery_url must be a string; " f"got {type(discovery_url).__name__}"
             )
+        # Treat a blank/whitespace-only value as "unset" (matching
+        # StorageAPIStorageGRPC._normalize_discovery_url) so the named-backend
+        # fail-fast below catches ``discovery_url = "   "`` instead of letting it
+        # through as an inert backend.
+        if isinstance(discovery_url, str):
+            discovery_url = discovery_url.strip() or None
 
         routes_raw = backend_table.get("routes")
         routes: Optional[Tuple[str, ...]] = None
@@ -164,6 +190,16 @@ def _parse_storage_api_section(raw: Any, source_path: Path) -> Tuple[StorageAPIB
             if not isinstance(routes_raw, list) or not all(isinstance(p, str) for p in routes_raw):
                 raise InvalidConfigurationError(f"{source_path}: [storage_api.{backend_name}].routes must be a list of strings")
             routes = tuple(routes_raw)
+
+        # A named (non-``default``) service has no env-var fallback for its
+        # endpoint, so it must declare a discovery_url or it can never connect.
+        # The ``default`` entry is exempt: it may be configured purely by the
+        # WRAPP_STORAGE_API_* env vars (or left inert).
+        if backend_name != DEFAULT_STORAGE_API_BACKEND_NAME and not discovery_url:
+            raise InvalidConfigurationError(
+                f"{source_path}: [storage_api.{backend_name}] must set discovery_url "
+                f"(named Storage API services have no environment-variable fallback)"
+            )
 
         backends.append(
             StorageAPIBackendConfig(
@@ -222,13 +258,5 @@ def load_wrapp_config(path: Optional[Path] = None) -> WrappConfig:
 
     backend_names = sorted(b.name for b in storage_api_backends)
     logger.info("Loaded wrapp config from %s; storage_api backends: %s", resolved, backend_names or "<none>")
-    inactive = [n for n in backend_names if n != _ACTIVE_STORAGE_API_BACKEND_NAME]
-    if inactive:
-        logger.info(
-            "wrapp config: backend(s) %s are reserved for future multi-backend support; "
-            "only [storage_api.%s] is honored in this WRAPP version",
-            inactive,
-            _ACTIVE_STORAGE_API_BACKEND_NAME,
-        )
 
     return config

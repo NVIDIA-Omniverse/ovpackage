@@ -88,7 +88,7 @@ def env_default_credentials() -> dict[str, str]:
     except ImportError:
         pass
 
-    # StorageBackendForTests.LOCAL_DIR has no default credentials (and is handled by ClientLibTestHelper)
+    # StorageBackendForTests.LOCAL_DIR has no default credentials.
     # StorageBackendForTests.STORAGEAPI has no default credentials
     return default_credentials
 
@@ -100,6 +100,7 @@ def run_wrapp_in_separate_process(
     add_default_credentials=True,
     use_system_env=True,
     cwd: Optional[str] = None,
+    include_stderr: bool = False,
 ) -> str:
     # We cannot use CliRunner here - it does not spawn a separate process,
     # so once omni.client is loaded into the process, OMNICLIENT_USE_HUB is ignored.
@@ -122,17 +123,32 @@ def run_wrapp_in_separate_process(
     result: subprocess.CompletedProcess = subprocess.run(
         cmd, capture_output=True, env={**complete_env, "PYTHONIOENCODING": "utf-8"}, cwd=cwd
     )
-    output = result.stdout.decode("utf-8")
+    stdout = result.stdout.decode("utf-8")
+    stderr = result.stderr.decode("utf-8")
     list_of_expected_return_codes: List[int] = [expected_return_codes] if isinstance(expected_return_codes, int) else expected_return_codes
     if result.returncode not in list_of_expected_return_codes:
-        raise Exception(
-            f"Unexpected return code {result.returncode} in {result},\noutput was {output}\nand stderr:\n{result.stderr.decode('utf-8')}"
-        )
-    return output
+        raise Exception(f"Unexpected return code {result.returncode} in {result},\noutput was {stdout}\nand stderr:\n{stderr}")
+    # Several wrapp errors (and all log records) are emitted to stderr rather
+    # than stdout, so tests that need to assert on log/error output -- e.g.
+    # which backend handled a URL, which parser dispatched -- should pass
+    # ``include_stderr=True``.  See ``architecture/testing.md`` TEST-1.
+    return stdout + stderr if include_stderr else stdout
 
 
 def run_wrapp_without_hub(args: List[str], expected_return_code: int = 0):
-    return run_wrapp_in_separate_process(args, expected_return_code, env={"OMNICLIENT_HUB_MODE": "disabled"})
+    with tempfile.TemporaryDirectory() as cache_root:
+        env = {
+            "OMNICLIENT_HUB_MODE": "disabled",
+            "OMNI_CONFIG_PATH": os.path.join(cache_root, "config"),
+        }
+        if platform.system() == "Windows":
+            env["LOCALAPPDATA"] = os.path.join(cache_root, "localappdata")
+            env["USERPROFILE"] = os.path.join(cache_root, "home")
+        else:
+            env["HOME"] = os.path.join(cache_root, "home")
+            env["XDG_CACHE_HOME"] = os.path.join(cache_root, "xdg-cache")
+            env["XDG_DATA_HOME"] = os.path.join(cache_root, "xdg-data")
+        return run_wrapp_in_separate_process(args, expected_return_code, env=env)
 
 
 def run_wrapp_with_hub(args: List[str], expected_return_code: int = 0):
@@ -146,13 +162,13 @@ def run_wrapp_with_hub(args: List[str], expected_return_code: int = 0):
         return run_wrapp_in_separate_process(args, expected_return_code, env=env)
 
 
-def run_wrapp(cli_runner, params: list, expected_exit_code=0):
+def run_wrapp(cli_runner, params: list, expected_exit_code=0, env: Optional[collections.abc.Mapping[str, str]] = None):
     print(f"Running wrapp {' '.join(params)}")
     # This is sneaky - the tests run several at once in the same process. Therefore the progress output of all
     # tests get mixed up in the same stdout. This messes with the test capturing the stdout (like test_ls).
     # TODO: We cannot use the progress report option, as that is oddly enough not universal (it should be).
     CLIProgressPrinter.disable_progress_output()
-    result = cli_runner.invoke(app, params, catch_exceptions=False, standalone_mode=False)
+    result = cli_runner.invoke(app, params, catch_exceptions=False, standalone_mode=False, env=env)
     # Oddly, if not run in standalone_mode, the exit code will be returned in return_value if Typer.Exit(..) is raised.
     exit_code = result.return_value if result.return_value != None else result.exit_code
     if exit_code != expected_exit_code:
@@ -228,3 +244,20 @@ async def get_tags_async(url):
     async with connect_tagging_service(url) as ts:
         parsed = urlparse(url)
         return await ts.get_tags([parsed.path])
+
+
+def count_open_fds_under(directory: str, suffix: str) -> int:
+    """Count this process's open FDs resolving to files under directory with the given suffix.
+
+    Requires /proc/self/fd (Linux); used by the file-handle-bounding regression tests.
+    """
+    real_dir = os.path.realpath(str(directory)) + os.sep
+    count = 0
+    for fd in os.listdir("/proc/self/fd"):
+        try:
+            target = os.readlink(f"/proc/self/fd/{fd}")
+        except OSError:
+            continue  # fd vanished between listdir and readlink (e.g. the listdir FD itself)
+        if target.startswith(real_dir) and target.endswith(suffix):
+            count += 1
+    return count

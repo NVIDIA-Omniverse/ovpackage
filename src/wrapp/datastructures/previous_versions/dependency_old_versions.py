@@ -23,7 +23,7 @@ from pydantic import (
 from wrapp.datastructures.wrapp_file_model import (
     WRAPPFileModel,
     WRAPPModelVersion,
-    all_old_wrapp_file_model_classes,
+    all_old_file_model_classes,
 )
 
 
@@ -69,6 +69,9 @@ class Dependency_V3_0(WRAPPFileModel):
         return Dependency_V3_0(**data_dict)
 
 
-all_old_wrapp_file_model_classes[("Dependency", WRAPPModelVersion(version_string="1"))] = Dependency_V2
-all_old_wrapp_file_model_classes[("Dependency", WRAPPModelVersion(version_string="2"))] = Dependency_V2
-all_old_wrapp_file_model_classes[("Dependency", WRAPPModelVersion(version_string="3.0"))] = Dependency_V3_0
+# Versioned classes above are compatibility snapshots. Do not edit an
+# existing class body after it has shipped; add a new class and registry entry
+# for a new file format version instead.
+all_old_file_model_classes[("Dependency", WRAPPModelVersion(version_string="1"))] = Dependency_V2
+all_old_file_model_classes[("Dependency", WRAPPModelVersion(version_string="2"))] = Dependency_V2
+all_old_file_model_classes[("Dependency", WRAPPModelVersion(version_string="3.0"))] = Dependency_V3_0

@@ -14,6 +14,7 @@
 # limitations under the License.
 
 import logging
+import os
 from typing import (
     List,
     Optional,
@@ -45,9 +46,11 @@ from wrapp.datastructures.package import (
     validate_package_and_version,
     write_package_info,
 )
+from wrapp.datastructures.package_standard import write_package_standard_definition_seed
 from wrapp.options import (
     AuthOption,
     CreateCatalogFlag,
+    CreatePackageStandardOption,
     DebugLevelFlag,
     HashLocalFlag,
     IgnoreFileOption,
@@ -91,8 +94,11 @@ logger = logging.getLogger("omni.wrapp")
 async def new_command(
     package_name: str = typer.Argument(..., help="Specify the name of the package"),
     version: str = typer.Argument(..., help="Specify the initial version string"),
-    destination: str = typer.Argument(..., help="Specify the target URL where to create the file"),
+    destination: Optional[str] = typer.Argument(
+        None, help="Specify the target URL where to create the file (defaults to the current directory)"
+    ),
     create_catalog: bool = CreateCatalogFlag,
+    create_package_standard_license: Optional[str] = CreatePackageStandardOption,
     local_hash: bool = HashLocalFlag,
     ignore_file: str = IgnoreFileOption,
     tags: bool = TagsFlag.default_help(),
@@ -117,6 +123,9 @@ async def new_command(
         wrapp new vegetation_assets 1.0.0 omniverse://localhost/asset_library/vegetation
     """
 
+    if destination is None:
+        destination = os.getcwd()
+
     context, scheduler_params = context_from_params()
     try:
         async with WrappSchedulerCLI(params=scheduler_params) as scheduler:
@@ -128,6 +137,7 @@ async def new_command(
                 tags=tags,
                 ignores=ignore_file,
                 local_hash=local_hash,
+                create_package_standard_license=create_package_standard_license,
                 context=context,
                 scheduler=scheduler,
             )
@@ -153,6 +163,7 @@ async def new(
     tags: bool = False,
     ignores: Optional[Union[str, IgnoreEvaluator]] = None,
     local_hash: bool = False,
+    create_package_standard_license: Optional[str] = None,
     *,
     context: CommandParameters = CommandParameters(),
     scheduler: Optional[SchedulerContext] = None,
@@ -170,6 +181,9 @@ async def new(
     :param tags: Specify this to also catalog the tags when cataloging the destination
     :param ignores: Specify a name of an ignore rule file to use during cataloging, or an IgnoreEvaluator object
     :param local_hash: Set this to allow calculating local hashes during cataloging. Might download data when creating in a remote server.
+    :param create_package_standard_license: SPDX license identifier. When set, a package-standard definition seed
+        (identity only, no BOM) is written next to the new .wrapp file. A later ``create`` from this directory picks
+        up the license automatically without re-specifying it.
     :param context: Global configuration parameters
     :param scheduler: Optionally pre-constructed SchedulerContext. When calling many functions in a row make sure to pre-construct the scheduler.
 
@@ -205,3 +219,11 @@ async def new(
         )
     package_info = PackageInfo(name=package_name, version=version, catalog=catalog_to_create, dependencies=None, repository=None)
     await write_package_info(full_package_path, package_info, context)
+
+    if create_package_standard_license is not None and create_package_standard_license.strip():
+        await write_package_standard_definition_seed(
+            full_package_path,
+            package_id=f"{package_name}.{version}",
+            license_id=create_package_standard_license.strip(),
+            context=context,
+        )

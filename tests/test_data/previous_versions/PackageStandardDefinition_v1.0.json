@@ -1,0 +1,19 @@
+{
+  "format_version": "1.0",
+  "package_id": "com.nvidia.test.package",
+  "license": "LicenseRef-WRAPP-Test",
+  "metadata": [
+    {
+      "name": "com.nvidia.simready.packaging.bom.json",
+      "hash": {
+        "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+      }
+    }
+  ],
+  "content_hash": {
+    "sha256": "1111111111111111111111111111111111111111111111111111111111111111"
+  },
+  "package_hash": {
+    "sha256": "2222222222222222222222222222222222222222222222222222222222222222"
+  }
+}

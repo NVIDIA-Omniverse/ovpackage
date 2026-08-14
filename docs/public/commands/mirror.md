@@ -14,6 +14,10 @@ caching file hashes between runs. See generic parameters for details.
 Legacy pickle cache files (ovpackage `<=2.1.0`) are rejected; see [CLI](../cli.md) for JSON format and
 one-time migration guidance.
 
+If the source package has SimReady package-standard sidecars, `mirror` copies
+them to the mirrored package verbatim, preserving package-standard identity; it
+does not create or regenerate sidecars. See package standard sidecars.
+
 For usage examples, see the [Tutorial](../tutorial.md). For CLI options, run `ovpackage mirror --help`.
 
 ## Python API Reference

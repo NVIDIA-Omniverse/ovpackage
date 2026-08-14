@@ -39,6 +39,7 @@ from wrapp.datastructures.ignore import IgnoreEvaluator
 from wrapp.datastructures.package import (
     PackageInfo,
     UniquePackageLocation,
+    _write_package_info,
     load_package_setup,
     wrapp_file_name,
     write_package_info,
@@ -330,7 +331,13 @@ class _MirrorHandler:
 
             # Write the package info file
             package_file = wrapp_file_name(package_name)
-            await write_package_info(join_paths(destination, package_file), mirror_package, self._mirror_context.context)
+            destination_package_file_url = join_paths(destination, package_file)
+            await _write_package_info(
+                destination_package_file_url,
+                mirror_package,
+                self._mirror_context.context,
+                package_standard_seed_url=source_package_url,
+            )
 
             # Mark the package as mirrored
             package.has_been_mirrored = True

@@ -78,6 +78,7 @@ from wrapp.utils.utils import (
     FailedCommand,
     StorageOperationError,
     is_folder,
+    make_file_url_absolute,
     validate_non_empty_string,
 )
 from wrapp.utils.wrapp_init_for_cmd import wrapp_init_for_cmd
@@ -211,8 +212,14 @@ async def extract_catalog(
         final_catalog = top_level.catalog
 
     if add_wrapp_files:
-        # Add the wrapp file itself to the catalog
-        base_path = repo_object.package_url(package, version)
+        # Add the wrapp file itself to the catalog. Normalize the paths to the same
+        # absolute URI form the sibling catalog entries use (the catalog() file-tree
+        # walk normalizes its root via make_file_url_absolute, but the file-list path
+        # used here does not). Without this, a bare filesystem wrapp_file argument
+        # produces a scheme-less source_path/resource_identity for the .wrapp entry
+        # while data files keep their file:// scheme, yielding a mixed-scheme manifest.
+        base_path = make_file_url_absolute(repo_object.package_url(package, version))
+        wrapp_file = make_file_url_absolute(wrapp_file)
         single_file_catalog = await catalog(base_path, [(base_path, wrapp_file)], context=context, scheduler=scheduler)
         if not single_file_catalog.items:
             raise FailedCommand(f"Failed to determine source_url for wrapp file {wrapp_file}")

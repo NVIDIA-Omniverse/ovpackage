@@ -107,9 +107,6 @@ async def create_patch_command(
         except Exception as e:
             raise FailedCommand(f"Failed to load catalog: {e}")
 
-        if ignore and force:
-            raise FailedCommand("Argument error - ignore and force options cannot be used together!")
-
         patch_list, conflict_list = await create_patch(
             a_catalog,
             b_catalog,
@@ -191,6 +188,9 @@ async def create_patch(
     :raises FailedCommand: When prerequisites not matched
     :raises StorageOperationError: Raised when network or file operations fail
     """
+    if ignore and force:
+        raise FailedCommand("Argument error - ignore and force options cannot be used together!")
+
     a_dict = a_catalog._catalog_to_dict()
     b_dict = b_catalog._catalog_to_dict()
     base_dict = baseline._catalog_to_dict()
@@ -214,8 +214,6 @@ async def create_patch(
                     )
                 else:
                     for op in conflict_list:
-                        p.add(op[1])
-                    for op in extras_list:
                         p.add(op[1])
             await p.save(context, patch)
             logger.info(f"Wrote {len(p.ops.operations)} operations to patch file {patch}")

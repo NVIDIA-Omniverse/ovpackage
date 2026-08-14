@@ -54,11 +54,13 @@ class LsOutputFormat(str, Enum):
 
     Attributes:
         TSV: tab-separated values for use by catalog's --file-list
+        long_tsv: tab-separated values matching the normal output columns
         normal: a nicely formatted table
         short: just the URLs detected
     """
 
     TSV = "tsv"
+    long_tsv = "long-tsv"
     normal = "normal"
     short = "short"
 
@@ -134,6 +136,13 @@ CheckSubpackages = typer.Option(
 CreateCatalogFlag = typer.Option(
     False, "--create-catalog/--no-create-catalog", help="Set this to build initial catalog for this package at destination"
 )
+CreatePackageStandardOption = typer.Option(
+    None,
+    "--create-package-standard",
+    "--cps",
+    envvar="WRAPP_CREATE_PACKAGE_STANDARD_LICENSE",
+    help="Create package-standard sidecar metadata using the given SPDX license identifier when no sidecar license exists yet.",
+)
 DebugLevelFlag = typer.Option(False, "--debug/--no-debug", "-d", help="Set logging level of client library to debug")
 DedupFlag = typer.Option(
     False,
@@ -187,6 +196,11 @@ InteractiveAuthFlag = typer.Option(
 JsonLoggingFlag = typer.Option(False, "--json-logging", help="Do JSON structured logging instead of human readable text")
 JobsNumber = typer.Option(200, "--jobs", "-j", envvar="WRAPP_JOBS", help="Set the number of parallel operations to be sent to the storage")
 LogFileOption = typer.Option("wrapp.log", "--log-file", "-l", envvar="WRAPP_LOG_FILE", help="Specify name for log file")
+MinimalFormatFlag = typer.Option(
+    False,
+    "--minimal-format",
+    help="Write only relative_path and resource_identity per file entry",
+)
 NewVersionOption = typer.Option(
     None, "--new-version", help="Specify a newer version of the package, ignore the one in the package's wrapp file"
 )

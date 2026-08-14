@@ -15,6 +15,7 @@
 
 import logging
 from typing import (
+    Dict,
     List,
     Optional,
     Union,
@@ -28,7 +29,10 @@ from wrapp.app import (
     measure_time,
     print_stats,
 )
-from wrapp.commands.catalog import catalog as catalog_command
+from wrapp.commands.catalog import (
+    ContentHashAlgorithm,
+    catalog_with_content_hashes,
+)
 from wrapp.commands.freeze import (
     freeze_catalog,
     freeze_file_tree_as_subtask,
@@ -55,6 +59,7 @@ from wrapp.datastructures.loaded_package import LoadedPackage
 from wrapp.datastructures.package import (
     Dependency,
     PackageInfo,
+    _write_package_info,
     load_package_setup,
     validate_package_and_version,
     wrapp_file_in_repo,
@@ -62,6 +67,7 @@ from wrapp.datastructures.package import (
     wrapp_file_path,
     write_package_info,
 )
+from wrapp.datastructures.package_standard import read_package_standard_definition
 from wrapp.datastructures.workspace_analysis import (
     check_dirty_state,
     collect_workspace_info,
@@ -71,6 +77,7 @@ from wrapp.options import (
     AuthOption,
     CatalogOptionFlag,
     CheckSubpackages,
+    CreatePackageStandardOption,
     DebugLevelFlag,
     FileTransferJobsNumber,
     IgnoreFileOption,
@@ -130,6 +137,7 @@ async def create_command(
     catalog: bool = CatalogOptionFlag,
     tags: bool = TagsFlag.default_help(),
     ignore_file: str = IgnoreFileOption,
+    create_package_standard_license: Optional[str] = CreatePackageStandardOption,
     auth: Optional[List[str]] = AuthOption,
     interactive_auth: bool = InteractiveAuthFlag,
     check_subpackage: bool = CheckSubpackages,
@@ -205,6 +213,7 @@ async def create_command(
                 skip_dirty_check=allow_dirty_subpackages,
                 publish_redirect=publish_redirect,
                 external_url=external_url,
+                create_package_standard_license=create_package_standard_license,
                 context=context,
                 scheduler=scheduler,
             )
@@ -261,6 +270,7 @@ async def create(
     external_url: Optional[str] = None,
     *,
     ignore_file: Optional[str] = None,
+    create_package_standard_license: Optional[str] = None,
     context: CommandParameters = CommandParameters(),
     scheduler: Optional[SchedulerContext] = None,
 ) -> None:
@@ -450,13 +460,30 @@ async def create(
             context=context,
         )
 
+    # Pick up a package-standard definition seed left in the source directory (e.g. by `wrapp new --cps`)
+    # so its license flows into the generated sidecars without re-specifying --cps. An explicit --cps wins.
+    effective_package_standard_license = create_package_standard_license
+    if effective_package_standard_license is None and not catalog:
+        source_seed = await read_package_standard_definition(join_paths(source, package_file_name))
+        if source_seed is not None and source_seed.license and source_seed.license.strip():
+            effective_package_standard_license = source_seed.license.strip()
+
     # Catalog after freeze
     logger.info("Finished copying, now cataloging result...")
 
     scheduler_create_package = scheduler.create_sub_context_and_node("Creating catalog for new package")
+    # When creating package-standard sidecars, compute their content hashes in the same catalog pass so the
+    # payload is read once (the catalog already hashes every file for the WRAPP nucleus hash).
+    package_standard_content_hashes: Dict[str, Dict[str, str]] = {}
     if await wrapp_url_exists(target_base_url):
-        destination_catalog = await catalog_command(
-            root_dir=target_base_url, tags=tags, ignores=ignore_rules, context=context, scheduler=scheduler_create_package
+        content_hashes = [ContentHashAlgorithm.PACKAGE_STANDARD] if effective_package_standard_license is not None else None
+        destination_catalog, package_standard_content_hashes = await catalog_with_content_hashes(
+            root_dir=target_base_url,
+            tags=tags,
+            ignores=ignore_rules,
+            content_hashes=content_hashes,
+            context=context,
+            scheduler=scheduler_create_package,
         )
     else:
         # Create an empty catalog
@@ -480,13 +507,25 @@ async def create(
                 package_name  # This could actually rename a package, as the source might have been called differently. Feature or bug?
             )
             existing_package.repository = repo_object.base_url()
-            await write_package_info(package_target_file, existing_package, context)
+            await write_package_info(
+                package_target_file,
+                existing_package,
+                context,
+                create_package_standard_license=effective_package_standard_license,
+                package_standard_content_hashes=package_standard_content_hashes,
+            )
         else:
             # This is a raw package without its own wrapp file, now it needs to get one
             package_source = PackageInfo(
                 name=package_name, version=version, catalog=destination_catalog, dependencies=None, repository=repo_object.base_url()
             )
-            await write_package_info(package_target_file, package_source, context)
+            await write_package_info(
+                package_target_file,
+                package_source,
+                context,
+                create_package_standard_license=effective_package_standard_license,
+                package_standard_content_hashes=package_standard_content_hashes,
+            )
     elif extended_setup is not None:
         # In dependency mode, we just write the extended package setup
         extended_setup.version = version
@@ -496,7 +535,13 @@ async def create(
         extended_setup.repository = repo_object.base_url()
         extended_setup.catalog = destination_catalog
         extended_setup.source = normalize_url(source)
-        await write_package_info(package_target_file, extended_setup, context)
+        await write_package_info(
+            package_target_file,
+            extended_setup,
+            context,
+            create_package_standard_license=effective_package_standard_license,
+            package_standard_content_hashes=package_standard_content_hashes,
+        )
     else:
         raise RuntimeError("Program error, neither catalog nor extended_setup defined")
 
@@ -529,6 +574,12 @@ async def create(
                 external_url=external_url,
             )
             redirect_wrapp_url = join_paths(redirect_repo.package_url(package_name, version), wrapp_file_name(package_name))
-            await write_package_info(redirect_wrapp_url, redirect_package, context)
+            # Carry any package-standard sidecars from the just-created package into the redirect repo.
+            await _write_package_info(
+                redirect_wrapp_url,
+                redirect_package,
+                context,
+                package_standard_seed_url=package_target_file,
+            )
         else:
             raise FailedCommand(f"Cannot load package file written to target repository for redirect creation: {package_target_file}")
