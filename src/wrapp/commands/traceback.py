@@ -14,12 +14,14 @@
 # limitations under the License.
 
 import logging
+import sys
 from enum import (
     Enum,
     auto,
 )
 from typing import (
     List,
+    NamedTuple,
     Optional,
     Set,
 )
@@ -120,7 +122,36 @@ class TracebackNode:
         self.repository = repository
 
 
-def print_traceback_tree(node: TracebackNode, indent: int = 0, is_last: bool = True, prefix: str = ""):
+class _TreeConnectors(NamedTuple):
+    branch: str
+    last_branch: str
+    vertical: str
+
+
+_UNICODE_TREE_CONNECTORS = _TreeConnectors(branch="├── ", last_branch="└── ", vertical="│   ")
+_ASCII_TREE_CONNECTORS = _TreeConnectors(branch="+-- ", last_branch="`-- ", vertical="|   ")
+
+
+def _traceback_tree_connectors() -> _TreeConnectors:
+    encoding = getattr(sys.stdout, "encoding", None)
+    if not encoding:
+        return _UNICODE_TREE_CONNECTORS
+
+    try:
+        "".join(_UNICODE_TREE_CONNECTORS).encode(encoding)
+    except (LookupError, UnicodeEncodeError):
+        return _ASCII_TREE_CONNECTORS
+
+    return _UNICODE_TREE_CONNECTORS
+
+
+def print_traceback_tree(
+    node: TracebackNode,
+    indent: int = 0,
+    is_last: bool = True,
+    prefix: str = "",
+    connectors: Optional[_TreeConnectors] = None,
+):
     """
     Print a traceback tree with proper indentation and branch indicators.
 
@@ -130,25 +161,28 @@ def print_traceback_tree(node: TracebackNode, indent: int = 0, is_last: bool = T
         is_last: Whether this node is the last child of its parent
         prefix: Prefix string for the current line
     """
+    if connectors is None:
+        connectors = _traceback_tree_connectors()
+
     # Print the current node
     if indent == 0:
         print(node.message)
     else:
         # Child nodes with proper indentation
-        branch = "└── " if is_last else "├── "
+        branch = connectors.last_branch if is_last else connectors.branch
         print(f"{prefix}{branch} {node.message}")
 
     # Prepare the prefix for children
     if indent > 0:
-        new_prefix = prefix + ("    " if is_last else "│   ")
+        new_prefix = prefix + ("    " if is_last else connectors.vertical)
     else:
         new_prefix = "    "
 
     # Print children
     if node.repository:
-        print_traceback_tree(node.repository, indent + 1, node.source is None, new_prefix)
+        print_traceback_tree(node.repository, indent + 1, node.source is None, new_prefix, connectors)
     if node.source:
-        print_traceback_tree(node.source, indent + 1, True, new_prefix)
+        print_traceback_tree(node.source, indent + 1, True, new_prefix, connectors)
 
 
 @app.command(name="traceback")

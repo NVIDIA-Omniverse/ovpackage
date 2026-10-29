@@ -94,7 +94,7 @@ from wrapp.utils.utils import (
     StorageOperationError,
     all_parent_directories,
     get_base_directory_from_url,
-    join_paths,
+    join_url_path,
     make_relative_url,
     validate_non_empty_string,
 )
@@ -224,10 +224,10 @@ async def uninstall(
             installed_package_file = f".{dep.package}.wrapp"
             loaded_package = LoadedPackage(package, package_info)
             install_destination = loaded_package.dependency_install_path(dep)
-            installed_package_file_url = join_paths(install_destination, installed_package_file)
+            installed_package_file_url = join_url_path(install_destination, installed_package_file)
     else:
         installed_package_file = f".{package_name}.wrapp"
-        installed_package_file_url = join_paths(install_location, installed_package_file)
+        installed_package_file_url = join_url_path(install_location, installed_package_file)
 
     installed_package_info: Optional[PackageInfo] = await load_package_setup(installed_package_file_url)
     # Task structure:
@@ -342,7 +342,7 @@ async def uninstall(
             if keeper is not None:
                 if keeper.catalog is not None:
                     for item in keeper.catalog.items:
-                        absolute_path = join_paths(keeper_location, item.relative_path)
+                        absolute_path = join_url_path(keeper_location, item.relative_path)
                         relative_path = make_relative_url(install_location, absolute_path)
                         # TODO it could be that the path was outside the install_location, then we should not bother about the file anyway
                         dont_delete.add(relative_path)
@@ -355,7 +355,7 @@ async def uninstall(
             f"Uninstalling {len(installed_package_info.dependencies)} dependencies"
         )
         for dependency in installed_package_info.dependencies:
-            installed_in = join_paths(install_base, dependency.relative_destination)
+            installed_in = join_url_path(install_base, dependency.relative_destination)
             await uninstall(
                 dependency.package,
                 install_location=installed_in,
@@ -379,7 +379,7 @@ async def uninstall(
     async with scheduler.parent_task_node().create_task_group_node(f"Removing files for '{package_name}'") as task_group:
         for delete_file in installed_catalog.items:
             if delete_file.relative_path not in dont_delete:
-                file_url = join_paths(install_location, delete_file.relative_path)
+                file_url = join_url_path(install_location, delete_file.relative_path)
                 items_to_remove.add(file_url)
                 task_group.create_task(uninstall_item(file_url), name=f"Remove item {file_url}")
 
@@ -391,7 +391,7 @@ async def uninstall(
         metadata_dir = package_standard_metadata_folder_url(installed_package_file_url)
         sidecar_urls = [sidecar_paths.definition_url]
         for rel_path, _ in await list_package_standard_metadata_files(installed_package_file_url):
-            sidecar_urls.append(join_paths(metadata_dir, rel_path))
+            sidecar_urls.append(join_url_path(metadata_dir, rel_path))
         for sidecar_url in sidecar_urls:
             items_to_remove.add(sidecar_url)
             task_group.create_task(uninstall_item(sidecar_url), name=f"Remove sidecar {sidecar_url}")
@@ -405,7 +405,7 @@ async def delete_folder_if_empty(context: CommandParameters, folder: str, items_
     try:
         async for item in wrapp_list_directory(folder):
             # Ignore items that still exist but are in the set of items to be deleted
-            if join_paths(folder, item.relative_path) in items_to_be_deleted:
+            if join_url_path(folder, item.relative_path) in items_to_be_deleted:
                 continue
             logger.info(f"Keeping folder {folder} because it is not empty")
             return Result.OK

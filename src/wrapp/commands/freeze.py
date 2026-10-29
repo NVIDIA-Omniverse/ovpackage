@@ -94,19 +94,23 @@ from wrapp.utils.stats import (
 )
 from wrapp.utils.storage import (
     Result,
-    wrapp_copy_item_optimized,
+    wrapp_copy_address_optimized,
+    wrapp_copy_resource_identity_optimized,
     wrapp_list_directory,
     wrapp_stat,
     wrapp_supports_tags,
     wrapp_url_exists,
 )
+from wrapp.utils.storage_interface import (
+    ResourceAddress,
+    SerializedResourceIdentity,
+)
 from wrapp.utils.utils import (
     FailedCommand,
     StorageOperationError,
-    drop_parameters_from_url,
     is_folder,
     is_regular_file,
-    join_paths,
+    join_url_path,
 )
 from wrapp.utils.wrapp_init_for_cmd import wrapp_init_for_cmd
 
@@ -237,7 +241,7 @@ async def freeze(
             real_dependencies: List[LoadedPackage] = await collect_wrapp_files_in_tree(context, tn, source)
             for dep in real_dependencies:
                 if dep.package.catalog is not None:
-                    skip_files.extend([join_paths(dep.install_base, item.relative_path) for item in dep.package.catalog.items])
+                    skip_files.extend([join_url_path(dep.install_base, item.relative_path) for item in dep.package.catalog.items])
                 else:
                     logger.info(f"Not skipping files from dependency {dep.wrapp_file_url} because it has no catalog")
 
@@ -258,10 +262,25 @@ class FreezeTaskResult:
     result: Result
     error_msg: Optional[str]
 
-    def __init__(self, result: Result, op_desc: str):
+    def __init__(self, result: Result, op_desc: str, error_msg: Optional[str] = None):
         self.result = result
         if self.result != Result.OK:
-            self.error_msg = f"Failed to {op_desc}: {self.result.name}"
+            self.error_msg = error_msg or f"Failed to {op_desc}: {self.result.name}"
+
+
+def _resource_identity_copy_error(copy_source: str) -> str:
+    return (
+        f"Failed to copy catalog item '{copy_source}': "
+        "recorded resource identity could not be resolved or read; source_path was not used as a fallback."
+    )
+
+
+def _is_resource_identity_read_failure(result: Result) -> bool:
+    return result in {
+        Result.ERROR_BAD_REQUEST,
+        Result.ERROR_BAD_VERSION,
+        Result.ERROR_NOT_FOUND,
+    }
 
 
 def process_results(results: dict[asyncio.Task, Any], op_desc: str) -> None:
@@ -397,7 +416,7 @@ async def _copy_tags(context: CommandParameters, task_node: SchedulerTreeNode, c
             for item in catalog_items:
                 if item.tags is not None:
                     # source_is_nucleus = is_nucleus_url(item['source_path'])
-                    copy_target = dest_dir + "/" + item.relative_path
+                    copy_target = join_url_path(dest_dir, item.relative_path)
                     # TODO - surprisingly, this does not work as expected. The apply test fails on the second install step to automatically get the tags
                     # if source_is_nucleus and target_is_nucleus:
                     #    source = urlparse(item['source_path'])
@@ -420,7 +439,7 @@ async def _copy_tags(context: CommandParameters, task_node: SchedulerTreeNode, c
             await ts.disconnect()
 
 
-async def _copy_item_task(
+async def _copy_address_item_task(
     context: CommandParameters,
     copy_source: str,
     copy_target: str,
@@ -429,8 +448,52 @@ async def _copy_item_task(
     force_upload: bool = False,
 ) -> FreezeTaskResult:
     return FreezeTaskResult(
-        await wrapp_copy_item_optimized(context, copy_source, copy_target, hash, overwrite, force_upload),
+        await wrapp_copy_address_optimized(
+            context,
+            ResourceAddress(copy_source),
+            ResourceAddress(copy_target),
+            hash,
+            overwrite,
+            force_upload,
+        ),
         f"copy '{copy_source}' to '{copy_target}'",
+    )
+
+
+async def _copy_catalog_item_task(
+    context: CommandParameters,
+    copy_source: str,
+    copy_target: str,
+    hash: Optional[str],
+    resource_identity: Optional[str],
+    overwrite: bool = False,
+    force_upload: bool = False,
+) -> FreezeTaskResult:
+    identity_error_msg = None
+    if resource_identity is None:
+        result = await wrapp_copy_address_optimized(
+            context,
+            ResourceAddress(copy_source),
+            ResourceAddress(copy_target),
+            hash,
+            overwrite,
+            force_upload,
+        )
+    else:
+        identity_error_msg = _resource_identity_copy_error(copy_source)
+        result = await wrapp_copy_resource_identity_optimized(
+            context,
+            SerializedResourceIdentity(resource_identity),
+            ResourceAddress(copy_target),
+            hash,
+            overwrite,
+            force_upload,
+            source_description=copy_source,
+        )
+    return FreezeTaskResult(
+        result,
+        f"copy '{copy_source}' to '{copy_target}'",
+        identity_error_msg if result != Result.OK and _is_resource_identity_read_failure(result) else None,
     )
 
 
@@ -489,13 +552,14 @@ async def freeze_catalog(
     async with scheduler.parent_task_node().create_task_group_node(f"Freezing {len(catalog_items)} items", task_results) as task_node:
         for source_item in catalog_items:
             if not item_is_ignored(catalog_root, source_item.relative_path, ignore_rules):
-                destination_path = join_paths(dest_dir, drop_parameters_from_url(source_item.relative_path))
+                destination_path = join_url_path(dest_dir, source_item.relative_path)
                 task_node.create_task(
-                    _copy_item_task(
+                    _copy_catalog_item_task(
                         context,
                         source_item.source_path,
                         destination_path,
                         source_item.hash,
+                        source_item.resource_identity_v2,
                         overwrite,
                         force_upload,
                     ),
@@ -535,7 +599,7 @@ async def _copy_internal(
     folders_to_recurse_into = []
     try:
         async for item in wrapp_list_directory(source_dir):
-            copy_source = join_paths(source_dir, item.relative_path)
+            copy_source = join_url_path(source_dir, item.relative_path)
             if skip_files is None or copy_source not in skip_files:
                 non_skipped_files.append(item)
             elif is_folder(item):
@@ -546,8 +610,8 @@ async def _copy_internal(
     # Now traverse over the non-ignored files
     for item in non_skipped_files + folders_to_recurse_into:
         if not item_is_ignored(source_dir, item.relative_path, ignore_rules):
-            copy_source = join_paths(source_dir, item.relative_path)
-            copy_target = join_paths(dest_dir, item.relative_path)
+            copy_source = join_url_path(source_dir, item.relative_path)
+            copy_target = join_url_path(dest_dir, item.relative_path)
             if is_folder(item):
                 # Recurse
                 task_node.create_task(
@@ -567,7 +631,7 @@ async def _copy_internal(
             elif is_regular_file(item):
                 logger.info(f"Copying {copy_source} to {copy_target}")
                 task_node.create_task(
-                    _copy_item_task(
+                    _copy_address_item_task(
                         context,
                         copy_source,
                         copy_target,

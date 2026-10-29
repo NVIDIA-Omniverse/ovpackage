@@ -1,3 +1,36 @@
+# 0.3.0
+
+## Compatibility 0.3.0
+
+* **Breaking compatibility:** Packages written by ovpackage 0.3.0 use catalog/package format 6.0 and copy-patch format 3.0. ovpackage 0.2.1 and earlier cannot consume them. Upgrade readers before consuming packages written with this release.
+* Catalog-backed reads now treat recorded resource identities as authoritative and fail if an identity cannot be resolved instead of falling back to a mutable source path. S3 and Azure catalogs enforce recorded ETags when no immutable object version is available; enable object/blob versioning before cataloging content and retain referenced versions. Reading S3 identities that contain `versionId` additionally requires `s3:GetObjectVersion`.
+* Storage-core manifests require durable identities for every file. Generating manifests for local file content is unsupported; `--recalculate-identities` does not enable local manifests.
+
+## New Features 0.3.0
+
+* Publish operations can omit private provenance with `--strip-source`/`OVPACKAGE_STRIP_SOURCE`, or replace it with a canonical public base URL using `--canonical-source` (`--cs`)/`OVPACKAGE_CANONICAL_SOURCE`.
+* Added a read-only Hugging Face dataset backend for `hf://datasets/<owner>/<repo>[@<revision>]/...` URLs. Install the `huggingface` extra to list, catalog, install, mirror, or otherwise consume packages from dataset repositories.
+* S3, Azure Blob Storage, and Google Cloud Storage catalogs now retain logical source paths and version-bound resource identities. Repeated `catalog --hash-cache-file` operations reuse hashes for exact identities without redownloading unchanged objects.
+* Build-manifest validates legacy catalog bytes and reconstructs missing durable identities by default. Use `--no-recalculate-identities` or `recalculate_identities=False` to disable reconstruction.
+
+## Improvements 0.3.0
+
+* Package operations preserve literal question marks and percent escapes in supported filenames and directories, including across legacy catalog migration and archive round trips.
+* Storage API retries now use capped jittered backoff, and upload streams retain a transfer slot for their complete lifetime to prevent queued streams from being reset.
+* Every CLI command now accepts the shared `--log-file` option.
+* `create` warns when the final package contains paths that require case-sensitive filenames.
+* Removed the upper version bound on Python while retaining Python 3.11 as the minimum. Storage API supports `grpcio>=1.73.1` and `protobuf>=6.31.0` without upper version bounds; `grpcio-tools` is no longer required at runtime.
+* Backend-disabled diagnostics now identify optional backends and recommend the appropriate distribution extra.
+
+## Bug Fixes 0.3.0
+
+* Fixed transfers of files with spaces, Unicode, or literal percent escapes between local filesystems and storage backends, including mirroring locally created packages to S3, Azure, and GCS. Filenames such as `sp ace.txt` and `sp%20ace.txt` remain distinct.
+* Fixed Storage API uploads on Windows incorrectly rejecting unchanged files as changed while the upload was queued.
+* Fixed `ovpackage traceback` crashing when stdout uses a strict non-UTF-8 encoding.
+* Fixed recursive local `ovpackage ls --pattern` matching for leading-star globs on Windows.
+* Tightened Storage API wildcard route matching so trailing `/**` and single `*` patterns cannot claim lookalike paths or identifiers outside their advertised scope.
+* Rejected unsafe Windows absolute paths and embedded NUL bytes in preserved `.metadata` companion files.
+
 # 0.2.1
 
 ## New Features 0.2.1

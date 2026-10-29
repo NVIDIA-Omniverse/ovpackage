@@ -35,6 +35,7 @@ class FolderMode(int, metaclass=_enum_type_wrapper.EnumTypeWrapper):
     FOLDER_MODE_NATIVE: _ClassVar[FolderMode]
     FOLDER_MODE_NO_EMPTY: _ClassVar[FolderMode]
     FOLDER_MODE_HYBRID: _ClassVar[FolderMode]
+
 FOLDER_MODE_UNSPECIFIED: FolderMode
 FOLDER_MODE_NATIVE: FolderMode
 FOLDER_MODE_NO_EMPTY: FolderMode
@@ -52,13 +53,19 @@ class ListResponse(_message.Message):
     SUB_RESOURCE_ADDRESSES_FIELD_NUMBER: _ClassVar[int]
     subfolder_addresses: _containers.RepeatedCompositeFieldContainer[FolderAddress]
     sub_resource_addresses: _containers.RepeatedScalarFieldContainer[str]
-    def __init__(self, subfolder_addresses: _Optional[_Iterable[_Union[FolderAddress, _Mapping]]] = ..., sub_resource_addresses: _Optional[_Iterable[str]] = ...) -> None: ...
+    def __init__(
+        self,
+        subfolder_addresses: _Optional[_Iterable[_Union[FolderAddress, _Mapping]]] = ...,
+        sub_resource_addresses: _Optional[_Iterable[str]] = ...,
+    ) -> None: ...
 
 class ListStatRequest(_message.Message):
-    __slots__ = ("folder",)
+    __slots__ = ("folder", "include_native_metadata")
     FOLDER_FIELD_NUMBER: _ClassVar[int]
+    INCLUDE_NATIVE_METADATA_FIELD_NUMBER: _ClassVar[int]
     folder: FolderAddress
-    def __init__(self, folder: _Optional[_Union[FolderAddress, _Mapping]] = ...) -> None: ...
+    include_native_metadata: bool
+    def __init__(self, folder: _Optional[_Union[FolderAddress, _Mapping]] = ..., include_native_metadata: bool = ...) -> None: ...
 
 class ListStatResponse(_message.Message):
     __slots__ = ("subfolder_addresses", "entries")
@@ -66,7 +73,11 @@ class ListStatResponse(_message.Message):
     ENTRIES_FIELD_NUMBER: _ClassVar[int]
     subfolder_addresses: _containers.RepeatedCompositeFieldContainer[FolderAddress]
     entries: _containers.RepeatedCompositeFieldContainer[ListItem]
-    def __init__(self, subfolder_addresses: _Optional[_Iterable[_Union[FolderAddress, _Mapping]]] = ..., entries: _Optional[_Iterable[_Union[ListItem, _Mapping]]] = ...) -> None: ...
+    def __init__(
+        self,
+        subfolder_addresses: _Optional[_Iterable[_Union[FolderAddress, _Mapping]]] = ...,
+        entries: _Optional[_Iterable[_Union[ListItem, _Mapping]]] = ...,
+    ) -> None: ...
 
 class DeleteFolderRequest(_message.Message):
     __slots__ = ("folder",)
@@ -94,7 +105,9 @@ class ListItem(_message.Message):
     RESOURCE_INFO_FIELD_NUMBER: _ClassVar[int]
     resource_address: str
     resource_info: _fileobject_pb2.ResourceInfo
-    def __init__(self, resource_address: _Optional[str] = ..., resource_info: _Optional[_Union[_fileobject_pb2.ResourceInfo, _Mapping]] = ...) -> None: ...
+    def __init__(
+        self, resource_address: _Optional[str] = ..., resource_info: _Optional[_Union[_fileobject_pb2.ResourceInfo, _Mapping]] = ...
+    ) -> None: ...
 
 class GetFolderModeRequest(_message.Message):
     __slots__ = ("folder",)

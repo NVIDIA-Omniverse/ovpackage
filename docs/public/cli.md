@@ -31,10 +31,19 @@ Most if not all commands support the following parameters:
 ## Hash Cache
 
 The `--hash-cache-file` (short: `--hcf`) option tells ovpackage to store and reuse
-file-hash results in a local cache file. When a file's modification time and size
-have not changed since the last run, ovpackage skips re-hashing it and uses the cached
-value instead. This can dramatically speed up repeated operations on large file
-trees regardless of the storage backend (local files, S3, Azure, GCS, etc.).
+file-hash results in a local cache file. Address-based operations reuse a hash
+when the file's modification time and size have not changed since the last run.
+Cataloging a resource identity instead reuses the hash for that exact opaque
+identity, provided the captured size matches. This avoids downloading unchanged
+S3, Azure, GCS, and Hugging Face objects that lack ovpackage hash metadata.
+
+Address hashes and identity hashes occupy separate namespaces, even when an
+identity token is identical to an address string. Identity keys are never
+normalized as URLs or paths, and an address cache entry is never used as a
+fallback for an identity. A changed identity requires its own hash; an unchanged
+identity can reuse its hash regardless of changes to the logical source address
+or its modification time. Requests for additional content hashes still read the
+bytes, since the cache stores only the ovpackage hash.
 
 The option is available on the following commands: `catalog`, `check`,
 `install`, `mirror`, and `uninstall`.
@@ -52,6 +61,9 @@ runs load the file and update it with any new or changed entries. Use
 
 Hash cache files are stored as JSON with package metadata file-model metadata
 (`format_version.version_string`).
+Format **1.1** stores address hashes in `entries` and identity hashes in
+`identity_entries`. Existing **1.0** JSON caches remain readable; their entries
+are retained as address hashes, with an initially empty identity cache.
 Legacy pickle-based cache files are no longer accepted and fail with a clear error
 message. "Legacy" means cache files produced by ovpackage versions up to and including
 `2.1.0`. Starting with ovpackage `2.2.0`, hash cache files use JSON.

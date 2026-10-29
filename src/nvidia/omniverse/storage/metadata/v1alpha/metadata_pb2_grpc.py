@@ -22,29 +22,29 @@ from nvidia.omniverse.storage.metadata.v1alpha import (
     metadata_pb2 as nvidia_dot_omniverse_dot_storage_dot_metadata_dot_v1alpha_dot_metadata__pb2,
 )
 
-GRPC_GENERATED_VERSION = '1.72.2'
+GRPC_GENERATED_VERSION = "1.73.1"
 GRPC_VERSION = grpc.__version__
 _version_not_supported = False
 
 try:
     from grpc._utilities import first_version_is_lower
+
     _version_not_supported = first_version_is_lower(GRPC_VERSION, GRPC_GENERATED_VERSION)
 except ImportError:
     _version_not_supported = True
 
 if _version_not_supported:
     raise RuntimeError(
-        f'The grpc package installed is at version {GRPC_VERSION},'
-        + f' but the generated code in nvidia/omniverse/storage/metadata/v1alpha/metadata_pb2_grpc.py depends on'
-        + f' grpcio>={GRPC_GENERATED_VERSION}.'
-        + f' Please upgrade your grpc module to grpcio>={GRPC_GENERATED_VERSION}'
-        + f' or downgrade your generated code using grpcio-tools<={GRPC_VERSION}.'
+        f"The grpc package installed is at version {GRPC_VERSION},"
+        + f" but the generated code in nvidia/omniverse/storage/metadata/v1alpha/metadata_pb2_grpc.py depends on"
+        + f" grpcio>={GRPC_GENERATED_VERSION}."
+        + f" Please upgrade your grpc module to grpcio>={GRPC_GENERATED_VERSION}"
+        + f" or downgrade your generated code using grpcio-tools<={GRPC_VERSION}."
     )
 
 
 class MetadataServiceStub(object):
-    """The MetadataService provides methods to set and retrieve metadata for data objects.
-    """
+    """The MetadataService provides methods to set and retrieve metadata for data objects."""
 
     def __init__(self, channel):
         """Constructor.
@@ -53,92 +53,183 @@ class MetadataServiceStub(object):
             channel: A grpc.Channel.
         """
         self.GetMetadata = channel.unary_unary(
-                '/nvidia.omniverse.storage.metadata.v1alpha.MetadataService/GetMetadata',
-                request_serializer=nvidia_dot_omniverse_dot_storage_dot_metadata_dot_v1alpha_dot_metadata__pb2.GetMetadataRequest.SerializeToString,
-                response_deserializer=nvidia_dot_omniverse_dot_storage_dot_metadata_dot_v1alpha_dot_metadata__pb2.GetMetadataResponse.FromString,
-                _registered_method=True)
+            "/nvidia.omniverse.storage.metadata.v1alpha.MetadataService/GetMetadata",
+            request_serializer=nvidia_dot_omniverse_dot_storage_dot_metadata_dot_v1alpha_dot_metadata__pb2.GetMetadataRequest.SerializeToString,
+            response_deserializer=nvidia_dot_omniverse_dot_storage_dot_metadata_dot_v1alpha_dot_metadata__pb2.GetMetadataResponse.FromString,
+            _registered_method=True,
+        )
         self.UpdateMetadata = channel.unary_unary(
-                '/nvidia.omniverse.storage.metadata.v1alpha.MetadataService/UpdateMetadata',
-                request_serializer=nvidia_dot_omniverse_dot_storage_dot_metadata_dot_v1alpha_dot_metadata__pb2.UpdateMetadataRequest.SerializeToString,
-                response_deserializer=nvidia_dot_omniverse_dot_storage_dot_metadata_dot_v1alpha_dot_metadata__pb2.UpdateMetadataResponse.FromString,
-                _registered_method=True)
+            "/nvidia.omniverse.storage.metadata.v1alpha.MetadataService/UpdateMetadata",
+            request_serializer=nvidia_dot_omniverse_dot_storage_dot_metadata_dot_v1alpha_dot_metadata__pb2.UpdateMetadataRequest.SerializeToString,
+            response_deserializer=nvidia_dot_omniverse_dot_storage_dot_metadata_dot_v1alpha_dot_metadata__pb2.UpdateMetadataResponse.FromString,
+            _registered_method=True,
+        )
         self.DeleteMetadata = channel.unary_unary(
-                '/nvidia.omniverse.storage.metadata.v1alpha.MetadataService/DeleteMetadata',
-                request_serializer=nvidia_dot_omniverse_dot_storage_dot_metadata_dot_v1alpha_dot_metadata__pb2.DeleteMetadataRequest.SerializeToString,
-                response_deserializer=nvidia_dot_omniverse_dot_storage_dot_metadata_dot_v1alpha_dot_metadata__pb2.DeleteMetadataResponse.FromString,
-                _registered_method=True)
+            "/nvidia.omniverse.storage.metadata.v1alpha.MetadataService/DeleteMetadata",
+            request_serializer=nvidia_dot_omniverse_dot_storage_dot_metadata_dot_v1alpha_dot_metadata__pb2.DeleteMetadataRequest.SerializeToString,
+            response_deserializer=nvidia_dot_omniverse_dot_storage_dot_metadata_dot_v1alpha_dot_metadata__pb2.DeleteMetadataResponse.FromString,
+            _registered_method=True,
+        )
+        self.GetMetadataBatch = channel.unary_stream(
+            "/nvidia.omniverse.storage.metadata.v1alpha.MetadataService/GetMetadataBatch",
+            request_serializer=nvidia_dot_omniverse_dot_storage_dot_metadata_dot_v1alpha_dot_metadata__pb2.GetMetadataBatchRequest.SerializeToString,
+            response_deserializer=nvidia_dot_omniverse_dot_storage_dot_metadata_dot_v1alpha_dot_metadata__pb2.GetMetadataBatchResponse.FromString,
+            _registered_method=True,
+        )
+        self.QueryMetadata = channel.unary_stream(
+            "/nvidia.omniverse.storage.metadata.v1alpha.MetadataService/QueryMetadata",
+            request_serializer=nvidia_dot_omniverse_dot_storage_dot_metadata_dot_v1alpha_dot_metadata__pb2.QueryMetadataRequest.SerializeToString,
+            response_deserializer=nvidia_dot_omniverse_dot_storage_dot_metadata_dot_v1alpha_dot_metadata__pb2.QueryMetadataResponse.FromString,
+            _registered_method=True,
+        )
+        self.UpdateMetadataBatch = channel.unary_stream(
+            "/nvidia.omniverse.storage.metadata.v1alpha.MetadataService/UpdateMetadataBatch",
+            request_serializer=nvidia_dot_omniverse_dot_storage_dot_metadata_dot_v1alpha_dot_metadata__pb2.UpdateMetadataBatchRequest.SerializeToString,
+            response_deserializer=nvidia_dot_omniverse_dot_storage_dot_metadata_dot_v1alpha_dot_metadata__pb2.UpdateMetadataBatchResponse.FromString,
+            _registered_method=True,
+        )
+        self.DeleteMetadataBatch = channel.unary_stream(
+            "/nvidia.omniverse.storage.metadata.v1alpha.MetadataService/DeleteMetadataBatch",
+            request_serializer=nvidia_dot_omniverse_dot_storage_dot_metadata_dot_v1alpha_dot_metadata__pb2.DeleteMetadataBatchRequest.SerializeToString,
+            response_deserializer=nvidia_dot_omniverse_dot_storage_dot_metadata_dot_v1alpha_dot_metadata__pb2.DeleteMetadataBatchResponse.FromString,
+            _registered_method=True,
+        )
 
 
 class MetadataServiceServicer(object):
-    """The MetadataService provides methods to set and retrieve metadata for data objects.
-    """
+    """The MetadataService provides methods to set and retrieve metadata for data objects."""
 
     def GetMetadata(self, request, context):
-        """Get metadata for a specific URI
-        """
+        """Get metadata for a specific URI"""
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
-        context.set_details('Method not implemented!')
-        raise NotImplementedError('Method not implemented!')
+        context.set_details("Method not implemented!")
+        raise NotImplementedError("Method not implemented!")
 
     def UpdateMetadata(self, request, context):
-        """Update metadata for a specific URI
-        """
+        """Update metadata for a specific URI"""
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
-        context.set_details('Method not implemented!')
-        raise NotImplementedError('Method not implemented!')
+        context.set_details("Method not implemented!")
+        raise NotImplementedError("Method not implemented!")
 
     def DeleteMetadata(self, request, context):
-        """Delete metadata for a specific URI
+        """Delete metadata for a specific URI"""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details("Method not implemented!")
+        raise NotImplementedError("Method not implemented!")
+
+    def GetMetadataBatch(self, request, context):
+        """Read one or more metadata values in a batch.
+
+        Responses may arrive in any order, not necessarily the order the requests were sent. To match
+        each response to its request, use `GetMetadataBatchResponseEntry.request_index`, which gives
+        the zero-based position of the request that produced it.
+
+        Each entry succeeds or fails independently; a failed entry is safe to retry according to its
+        error code.
         """
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
-        context.set_details('Method not implemented!')
-        raise NotImplementedError('Method not implemented!')
+        context.set_details("Method not implemented!")
+        raise NotImplementedError("Method not implemented!")
+
+    def QueryMetadata(self, request, context):
+        """Query metadata values for a resource within a namespace."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details("Method not implemented!")
+        raise NotImplementedError("Method not implemented!")
+
+    def UpdateMetadataBatch(self, request, context):
+        """Update one or more metadata values in a batch.
+
+        Responses may arrive in any order, not necessarily the order the requests were sent. To match
+        each response to its request, use `UpdateMetadataBatchResponseEntry.request_index`, which
+        gives the zero-based position of the request that produced it.
+
+        Each entry succeeds or fails independently; a failed entry is safe to retry according to its
+        error code.
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details("Method not implemented!")
+        raise NotImplementedError("Method not implemented!")
+
+    def DeleteMetadataBatch(self, request, context):
+        """Delete one or more metadata values in a batch.
+
+        Responses may arrive in any order, not necessarily the order the requests were sent. To match
+        each response to its request, use `DeleteMetadataBatchResponseEntry.request_index`, which
+        gives the zero-based position of the request that produced it.
+
+        Each entry succeeds or fails independently; a failed entry is safe to retry according to its
+        error code.
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details("Method not implemented!")
+        raise NotImplementedError("Method not implemented!")
 
 
 def add_MetadataServiceServicer_to_server(servicer, server):
     rpc_method_handlers = {
-            'GetMetadata': grpc.unary_unary_rpc_method_handler(
-                    servicer.GetMetadata,
-                    request_deserializer=nvidia_dot_omniverse_dot_storage_dot_metadata_dot_v1alpha_dot_metadata__pb2.GetMetadataRequest.FromString,
-                    response_serializer=nvidia_dot_omniverse_dot_storage_dot_metadata_dot_v1alpha_dot_metadata__pb2.GetMetadataResponse.SerializeToString,
-            ),
-            'UpdateMetadata': grpc.unary_unary_rpc_method_handler(
-                    servicer.UpdateMetadata,
-                    request_deserializer=nvidia_dot_omniverse_dot_storage_dot_metadata_dot_v1alpha_dot_metadata__pb2.UpdateMetadataRequest.FromString,
-                    response_serializer=nvidia_dot_omniverse_dot_storage_dot_metadata_dot_v1alpha_dot_metadata__pb2.UpdateMetadataResponse.SerializeToString,
-            ),
-            'DeleteMetadata': grpc.unary_unary_rpc_method_handler(
-                    servicer.DeleteMetadata,
-                    request_deserializer=nvidia_dot_omniverse_dot_storage_dot_metadata_dot_v1alpha_dot_metadata__pb2.DeleteMetadataRequest.FromString,
-                    response_serializer=nvidia_dot_omniverse_dot_storage_dot_metadata_dot_v1alpha_dot_metadata__pb2.DeleteMetadataResponse.SerializeToString,
-            ),
+        "GetMetadata": grpc.unary_unary_rpc_method_handler(
+            servicer.GetMetadata,
+            request_deserializer=nvidia_dot_omniverse_dot_storage_dot_metadata_dot_v1alpha_dot_metadata__pb2.GetMetadataRequest.FromString,
+            response_serializer=nvidia_dot_omniverse_dot_storage_dot_metadata_dot_v1alpha_dot_metadata__pb2.GetMetadataResponse.SerializeToString,
+        ),
+        "UpdateMetadata": grpc.unary_unary_rpc_method_handler(
+            servicer.UpdateMetadata,
+            request_deserializer=nvidia_dot_omniverse_dot_storage_dot_metadata_dot_v1alpha_dot_metadata__pb2.UpdateMetadataRequest.FromString,
+            response_serializer=nvidia_dot_omniverse_dot_storage_dot_metadata_dot_v1alpha_dot_metadata__pb2.UpdateMetadataResponse.SerializeToString,
+        ),
+        "DeleteMetadata": grpc.unary_unary_rpc_method_handler(
+            servicer.DeleteMetadata,
+            request_deserializer=nvidia_dot_omniverse_dot_storage_dot_metadata_dot_v1alpha_dot_metadata__pb2.DeleteMetadataRequest.FromString,
+            response_serializer=nvidia_dot_omniverse_dot_storage_dot_metadata_dot_v1alpha_dot_metadata__pb2.DeleteMetadataResponse.SerializeToString,
+        ),
+        "GetMetadataBatch": grpc.unary_stream_rpc_method_handler(
+            servicer.GetMetadataBatch,
+            request_deserializer=nvidia_dot_omniverse_dot_storage_dot_metadata_dot_v1alpha_dot_metadata__pb2.GetMetadataBatchRequest.FromString,
+            response_serializer=nvidia_dot_omniverse_dot_storage_dot_metadata_dot_v1alpha_dot_metadata__pb2.GetMetadataBatchResponse.SerializeToString,
+        ),
+        "QueryMetadata": grpc.unary_stream_rpc_method_handler(
+            servicer.QueryMetadata,
+            request_deserializer=nvidia_dot_omniverse_dot_storage_dot_metadata_dot_v1alpha_dot_metadata__pb2.QueryMetadataRequest.FromString,
+            response_serializer=nvidia_dot_omniverse_dot_storage_dot_metadata_dot_v1alpha_dot_metadata__pb2.QueryMetadataResponse.SerializeToString,
+        ),
+        "UpdateMetadataBatch": grpc.unary_stream_rpc_method_handler(
+            servicer.UpdateMetadataBatch,
+            request_deserializer=nvidia_dot_omniverse_dot_storage_dot_metadata_dot_v1alpha_dot_metadata__pb2.UpdateMetadataBatchRequest.FromString,
+            response_serializer=nvidia_dot_omniverse_dot_storage_dot_metadata_dot_v1alpha_dot_metadata__pb2.UpdateMetadataBatchResponse.SerializeToString,
+        ),
+        "DeleteMetadataBatch": grpc.unary_stream_rpc_method_handler(
+            servicer.DeleteMetadataBatch,
+            request_deserializer=nvidia_dot_omniverse_dot_storage_dot_metadata_dot_v1alpha_dot_metadata__pb2.DeleteMetadataBatchRequest.FromString,
+            response_serializer=nvidia_dot_omniverse_dot_storage_dot_metadata_dot_v1alpha_dot_metadata__pb2.DeleteMetadataBatchResponse.SerializeToString,
+        ),
     }
-    generic_handler = grpc.method_handlers_generic_handler(
-            'nvidia.omniverse.storage.metadata.v1alpha.MetadataService', rpc_method_handlers)
+    generic_handler = grpc.method_handlers_generic_handler("nvidia.omniverse.storage.metadata.v1alpha.MetadataService", rpc_method_handlers)
     server.add_generic_rpc_handlers((generic_handler,))
-    server.add_registered_method_handlers('nvidia.omniverse.storage.metadata.v1alpha.MetadataService', rpc_method_handlers)
+    server.add_registered_method_handlers("nvidia.omniverse.storage.metadata.v1alpha.MetadataService", rpc_method_handlers)
 
 
- # This class is part of an EXPERIMENTAL API.
+# This class is part of an EXPERIMENTAL API.
 class MetadataService(object):
-    """The MetadataService provides methods to set and retrieve metadata for data objects.
-    """
+    """The MetadataService provides methods to set and retrieve metadata for data objects."""
 
     @staticmethod
-    def GetMetadata(request,
-            target,
-            options=(),
-            channel_credentials=None,
-            call_credentials=None,
-            insecure=False,
-            compression=None,
-            wait_for_ready=None,
-            timeout=None,
-            metadata=None):
+    def GetMetadata(
+        request,
+        target,
+        options=(),
+        channel_credentials=None,
+        call_credentials=None,
+        insecure=False,
+        compression=None,
+        wait_for_ready=None,
+        timeout=None,
+        metadata=None,
+    ):
         return grpc.experimental.unary_unary(
             request,
             target,
-            '/nvidia.omniverse.storage.metadata.v1alpha.MetadataService/GetMetadata',
+            "/nvidia.omniverse.storage.metadata.v1alpha.MetadataService/GetMetadata",
             nvidia_dot_omniverse_dot_storage_dot_metadata_dot_v1alpha_dot_metadata__pb2.GetMetadataRequest.SerializeToString,
             nvidia_dot_omniverse_dot_storage_dot_metadata_dot_v1alpha_dot_metadata__pb2.GetMetadataResponse.FromString,
             options,
@@ -149,23 +240,26 @@ class MetadataService(object):
             wait_for_ready,
             timeout,
             metadata,
-            _registered_method=True)
+            _registered_method=True,
+        )
 
     @staticmethod
-    def UpdateMetadata(request,
-            target,
-            options=(),
-            channel_credentials=None,
-            call_credentials=None,
-            insecure=False,
-            compression=None,
-            wait_for_ready=None,
-            timeout=None,
-            metadata=None):
+    def UpdateMetadata(
+        request,
+        target,
+        options=(),
+        channel_credentials=None,
+        call_credentials=None,
+        insecure=False,
+        compression=None,
+        wait_for_ready=None,
+        timeout=None,
+        metadata=None,
+    ):
         return grpc.experimental.unary_unary(
             request,
             target,
-            '/nvidia.omniverse.storage.metadata.v1alpha.MetadataService/UpdateMetadata',
+            "/nvidia.omniverse.storage.metadata.v1alpha.MetadataService/UpdateMetadata",
             nvidia_dot_omniverse_dot_storage_dot_metadata_dot_v1alpha_dot_metadata__pb2.UpdateMetadataRequest.SerializeToString,
             nvidia_dot_omniverse_dot_storage_dot_metadata_dot_v1alpha_dot_metadata__pb2.UpdateMetadataResponse.FromString,
             options,
@@ -176,23 +270,26 @@ class MetadataService(object):
             wait_for_ready,
             timeout,
             metadata,
-            _registered_method=True)
+            _registered_method=True,
+        )
 
     @staticmethod
-    def DeleteMetadata(request,
-            target,
-            options=(),
-            channel_credentials=None,
-            call_credentials=None,
-            insecure=False,
-            compression=None,
-            wait_for_ready=None,
-            timeout=None,
-            metadata=None):
+    def DeleteMetadata(
+        request,
+        target,
+        options=(),
+        channel_credentials=None,
+        call_credentials=None,
+        insecure=False,
+        compression=None,
+        wait_for_ready=None,
+        timeout=None,
+        metadata=None,
+    ):
         return grpc.experimental.unary_unary(
             request,
             target,
-            '/nvidia.omniverse.storage.metadata.v1alpha.MetadataService/DeleteMetadata',
+            "/nvidia.omniverse.storage.metadata.v1alpha.MetadataService/DeleteMetadata",
             nvidia_dot_omniverse_dot_storage_dot_metadata_dot_v1alpha_dot_metadata__pb2.DeleteMetadataRequest.SerializeToString,
             nvidia_dot_omniverse_dot_storage_dot_metadata_dot_v1alpha_dot_metadata__pb2.DeleteMetadataResponse.FromString,
             options,
@@ -203,4 +300,125 @@ class MetadataService(object):
             wait_for_ready,
             timeout,
             metadata,
-            _registered_method=True)
+            _registered_method=True,
+        )
+
+    @staticmethod
+    def GetMetadataBatch(
+        request,
+        target,
+        options=(),
+        channel_credentials=None,
+        call_credentials=None,
+        insecure=False,
+        compression=None,
+        wait_for_ready=None,
+        timeout=None,
+        metadata=None,
+    ):
+        return grpc.experimental.unary_stream(
+            request,
+            target,
+            "/nvidia.omniverse.storage.metadata.v1alpha.MetadataService/GetMetadataBatch",
+            nvidia_dot_omniverse_dot_storage_dot_metadata_dot_v1alpha_dot_metadata__pb2.GetMetadataBatchRequest.SerializeToString,
+            nvidia_dot_omniverse_dot_storage_dot_metadata_dot_v1alpha_dot_metadata__pb2.GetMetadataBatchResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True,
+        )
+
+    @staticmethod
+    def QueryMetadata(
+        request,
+        target,
+        options=(),
+        channel_credentials=None,
+        call_credentials=None,
+        insecure=False,
+        compression=None,
+        wait_for_ready=None,
+        timeout=None,
+        metadata=None,
+    ):
+        return grpc.experimental.unary_stream(
+            request,
+            target,
+            "/nvidia.omniverse.storage.metadata.v1alpha.MetadataService/QueryMetadata",
+            nvidia_dot_omniverse_dot_storage_dot_metadata_dot_v1alpha_dot_metadata__pb2.QueryMetadataRequest.SerializeToString,
+            nvidia_dot_omniverse_dot_storage_dot_metadata_dot_v1alpha_dot_metadata__pb2.QueryMetadataResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True,
+        )
+
+    @staticmethod
+    def UpdateMetadataBatch(
+        request,
+        target,
+        options=(),
+        channel_credentials=None,
+        call_credentials=None,
+        insecure=False,
+        compression=None,
+        wait_for_ready=None,
+        timeout=None,
+        metadata=None,
+    ):
+        return grpc.experimental.unary_stream(
+            request,
+            target,
+            "/nvidia.omniverse.storage.metadata.v1alpha.MetadataService/UpdateMetadataBatch",
+            nvidia_dot_omniverse_dot_storage_dot_metadata_dot_v1alpha_dot_metadata__pb2.UpdateMetadataBatchRequest.SerializeToString,
+            nvidia_dot_omniverse_dot_storage_dot_metadata_dot_v1alpha_dot_metadata__pb2.UpdateMetadataBatchResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True,
+        )
+
+    @staticmethod
+    def DeleteMetadataBatch(
+        request,
+        target,
+        options=(),
+        channel_credentials=None,
+        call_credentials=None,
+        insecure=False,
+        compression=None,
+        wait_for_ready=None,
+        timeout=None,
+        metadata=None,
+    ):
+        return grpc.experimental.unary_stream(
+            request,
+            target,
+            "/nvidia.omniverse.storage.metadata.v1alpha.MetadataService/DeleteMetadataBatch",
+            nvidia_dot_omniverse_dot_storage_dot_metadata_dot_v1alpha_dot_metadata__pb2.DeleteMetadataBatchRequest.SerializeToString,
+            nvidia_dot_omniverse_dot_storage_dot_metadata_dot_v1alpha_dot_metadata__pb2.DeleteMetadataBatchResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True,
+        )

@@ -19,6 +19,7 @@ from typing import (
     List,
     Optional,
 )
+from urllib.parse import quote
 
 import typer
 
@@ -241,13 +242,16 @@ async def _check_single_package(
     with CatalogBuilder(
         task_node=task_node, verbose=context.verbose, local_hash=True, command_params=context, error_raises_exception=False
     ) as builder:
-        catalog_items = []
+        catalog_items: list[tuple[str, str]] = []
+        trusted_identity_items = []
         for item in top_level.catalog.items:
-            # source_path points to the actual file location (works for both normal and redirect packages)
+            # source_path is the logical catalog input. Validate that it still
+            # belongs to this package even when a trusted identity makes an
+            # address-integrity check unnecessary.
             relative = make_relative_url(top_level.catalog.root, item.source_path)
             if relative == item.source_path:
                 try:
-                    real_base = get_base_from_absolute_url(item.source_path, item.relative_path)
+                    real_base = get_base_from_absolute_url(item.source_path, quote(item.relative_path, safe="/"))
                     if not await wrapp_urls_are_equivalent(real_base, location):
                         raise FailedCommand(
                             f"Catalog problem for package {top_level.name}: location of package is {location}, catalog root is {top_level.catalog.root}, but item is at {item.source_path}"
@@ -256,15 +260,24 @@ async def _check_single_package(
                         logger.debug(
                             f"Fixing catalog root during check_single_package. Expected {location} but was {top_level.catalog.root}"
                         )
-                        catalog_items.append((location, item.source_path))
+                        catalog_base = location
                 except ValueError as e:
                     raise FailedCommand(
                         f"Catalog problem for package {top_level.name}: {item.relative_path} is not part of {item.source_path}, corrupt catalog?"
                     ) from e
             else:
-                catalog_items.append((top_level.catalog.root, item.source_path))
+                catalog_base = top_level.catalog.root
 
-        files_found = await builder.catalog_file_list(catalog_items)
+            if item.resource_identity_v2 is not None:
+                # A resource identity is a trusted token for the exact bytes
+                # recorded by the catalog. Checking whether storage still
+                # serves those bytes is a deep availability audit, not an
+                # address-integrity check.
+                trusted_identity_items.append(item)
+            else:
+                catalog_items.append((catalog_base, item.source_path))
+
+        files_found = trusted_identity_items + await builder.catalog_file_list(catalog_items)
 
     catalog_of_storage = Catalog(root=location, items=files_found)
     unique_to_a, unique_to_b, differing_items = Diff.diff_catalogs_internal(

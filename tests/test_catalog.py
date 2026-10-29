@@ -14,28 +14,44 @@
 # limitations under the License.
 
 import copy
+import importlib
+import io
 import json
+from datetime import (
+    datetime,
+    timezone,
+)
+from pathlib import Path
 
 from wrapp import catalog
+from wrapp.commands.catalog import (
+    AbsoluteUrl,
+    CatalogBuilder,
+    RelativePath,
+)
 from wrapp.datastructures.catalog import (
     Catalog,
     CatalogItem,
 )
 from wrapp.datastructures.two_way_diff import Diff
+from wrapp.utils.nucleus_hash import calc_nucleus_hash_from_stream
+from wrapp.utils.router import Router
 from wrapp.utils.stats import (
     Stats,
     StatType,
 )
 from wrapp.utils.storage import (
     Result,
-    wrapp_copy,
+    wrapp_copy_address,
     wrapp_stat_and_calculate_hash_if_missing,
     wrapp_supports_tags,
     wrapp_url_exists,
 )
+from wrapp.utils.storage_interface import ResourceIdentity
 from wrapp.utils.utils import (
     FailedCommand,
     StorageOperationError,
+    get_path_from_url,
 )
 
 from .common import *
@@ -45,12 +61,128 @@ from .storage_test_helpers import (
 )
 from .wrapp_sync_funcs import wrapp_url_exists_sync
 
+catalog_module = importlib.import_module("wrapp.commands.catalog")
+
 
 def _make_catalog(relative_paths):
     return Catalog(
         root="file:/dummy",
         items=[CatalogItem(source_path=f"file:/dummy/{p}", relative_path=p) for p in relative_paths],
     )
+
+
+@pytest.mark.asyncio
+async def test_catalog_keeps_logical_source_path_when_backend_returns_identity(monkeypatch):
+    """A backend identity is catalog output; it must not replace the input address."""
+    input_relative_path = "asset.usd"
+    source_url = f"https://content.example/assets/{input_relative_path}"
+    source_identity = "storage-id://service/original-version"
+
+    class FakeResourceIdentity:
+        def to_string(self):
+            return source_identity
+
+    class FakeStorage:
+        async def make_resource_identity(self, file_url, item, relative_url):
+            assert file_url == source_url
+            return (
+                "https://blob-store.example/deduplicated/object",
+                "backend/rewritten/path.usd",
+                FakeResourceIdentity(),
+            )
+
+    class FakeRouter:
+        def storage_for_read(self, source):
+            assert source == source_url
+            return FakeStorage()
+
+    class FakeItem:
+        modified_time = datetime.now(timezone.utc)
+        size = 8
+        nucleus_hash = "sha-256-flat;1048576;original"
+        has_checkpoint = True
+
+    monkeypatch.setattr(Router, "me", classmethod(lambda cls: FakeRouter()))
+
+    builder = CatalogBuilder(task_node=object())
+    await builder._catalog_file_item(
+        task_node=object(),
+        item=FakeItem(),
+        base=AbsoluteUrl(absolute_url="https://content.example/assets"),
+        relative=RelativePath(relative_path=input_relative_path),
+    )
+
+    assert len(builder.result_list) == 1
+    assert builder.result_list[0].source_path == source_url
+    assert builder.result_list[0].relative_path == input_relative_path
+    assert builder.result_list[0].resource_identity_v2 == source_identity
+
+
+@pytest.mark.asyncio
+async def test_catalog_hash_is_computed_from_recorded_resource_identity(monkeypatch, tmp_path):
+    """A catalog identity and hash must describe the same immutable bytes."""
+    original_bytes = b"bytes named by the resource identity"
+    source_identity = "storage-id://service/original-version"
+
+    class FakeResourceIdentity(ResourceIdentity):
+        async def read_data(self, storage):
+            pytest.fail("Catalog hashing must dispatch a serialized identity through the router")
+
+        def to_string(self):
+            return source_identity
+
+    class FakeRouter:
+        def storage_for_read(self, source):
+            pytest.fail("A recorded resource identity must not be routed through its mutable source address")
+
+    async def fake_download_resource_identity(identity, dst_url, *, overwrite, expected_hash=None):
+        assert identity == source_identity
+        assert overwrite is True
+        assert expected_hash is None
+        Path(get_path_from_url(dst_url)).write_bytes(original_bytes)
+        return Result.OK
+
+    class FakeTempFile:
+        def __init__(self):
+            self.path = str(tmp_path / "catalog-download.tmp")
+            self.url = Path(self.path).as_uri()
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc_value, traceback):
+            return False
+
+        def write_completed(self):
+            pass
+
+    class FakeTempFileManager:
+        def create_temp_file(self):
+            return FakeTempFile()
+
+    monkeypatch.setattr(Router, "me", classmethod(lambda cls: FakeRouter()))
+    monkeypatch.setattr(catalog_module, "wrapp_can_be_cached", lambda url: False)
+    monkeypatch.setattr(catalog_module, "wrapp_download_resource_identity", fake_download_resource_identity)
+    monkeypatch.setattr(
+        catalog_module.TempFileManager,
+        "me",
+        classmethod(lambda cls: FakeTempFileManager()),
+    )
+
+    builder = CatalogBuilder(task_node=object())
+    await builder._download_item(
+        task_node=object(),
+        base_url=AbsoluteUrl(absolute_url="https://content.example/"),
+        url=AbsoluteUrl(absolute_url="https://content.example/asset.usd"),
+        modified_time=datetime.now(timezone.utc),
+        size=len(original_bytes),
+        resource_identity=FakeResourceIdentity(),
+    )
+
+    expected_hash, _ = calc_nucleus_hash_from_stream(io.BytesIO(original_bytes))
+    assert len(builder.result_list) == 1
+    assert builder.result_list[0].resource_identity_v2 == source_identity
+    assert builder.result_list[0].hash == expected_hash
 
 
 @pytest.mark.parametrize(
@@ -194,7 +326,7 @@ async def test_catalog_from_local(cli_runner, test_folder_url, local_tmp_folder,
     # Now write the example file and check the hash
     source = join_paths(test_data_path, "example.json")
     target = join_paths(test_folder_url, "example.json")
-    result = await wrapp_copy(source, target)
+    result = await wrapp_copy_address(source, target)
     assert result == Result.OK
     result, uploaded_item = await wrapp_stat_and_calculate_hash_if_missing(target)
     assert result == Result.OK
@@ -378,14 +510,14 @@ def test_update_source_paths_rewrites_resource_identity_OMPE_92178():
                 relative_path="a.txt",
                 hash="hash-a",
                 size=1,
-                resource_identity="omniverse://source.example/pkg/1.0.0/a.txt?&1",
+                resource_identity_v2="omniverse://source.example/pkg/1.0.0/a.txt?&1",
             ),
             CatalogItem(
                 source_path="omniverse://source.example/pkg/1.0.0/sub/b.txt",
                 relative_path="sub/b.txt",
                 hash="hash-b",
                 size=2,
-                resource_identity="omniverse://source.example/pkg/1.0.0/sub/b.txt?&2",
+                resource_identity_v2="omniverse://source.example/pkg/1.0.0/sub/b.txt?&2",
             ),
         ],
     )
@@ -397,14 +529,14 @@ def test_update_source_paths_rewrites_resource_identity_OMPE_92178():
                 relative_path="a.txt",
                 hash="hash-a",
                 size=1,
-                resource_identity="omniverse://dest.example/pkg/1.0.0/a.txt?&7",
+                resource_identity_v2="omniverse://dest.example/pkg/1.0.0/a.txt?&7",
             ),
             CatalogItem(
                 source_path="omniverse://dest.example/pkg/1.0.0/sub/b.txt",
                 relative_path="sub/b.txt",
                 hash="hash-b",
                 size=2,
-                resource_identity=None,
+                resource_identity_v2=None,
             ),
         ],
     )
@@ -414,6 +546,6 @@ def test_update_source_paths_rewrites_resource_identity_OMPE_92178():
     assert not_updated == []
     items_by_path = {item.relative_path: item for item in source_catalog.items}
     assert items_by_path["a.txt"].source_path == "omniverse://dest.example/pkg/1.0.0/a.txt"
-    assert items_by_path["a.txt"].resource_identity == "omniverse://dest.example/pkg/1.0.0/a.txt?&7"
+    assert items_by_path["a.txt"].resource_identity_v2 == "omniverse://dest.example/pkg/1.0.0/a.txt?&7"
     assert items_by_path["sub/b.txt"].source_path == "omniverse://dest.example/pkg/1.0.0/sub/b.txt"
-    assert items_by_path["sub/b.txt"].resource_identity is None
+    assert items_by_path["sub/b.txt"].resource_identity_v2 is None

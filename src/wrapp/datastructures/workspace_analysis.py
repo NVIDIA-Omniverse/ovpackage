@@ -39,6 +39,7 @@ from ..utils.api_marker import wrapp_public_api
 from ..utils.utils import (
     FailedCommand,
     get_base_directory_from_url,
+    join_url_path,
     make_relative_url,
 )
 from .ignore import (
@@ -198,7 +199,7 @@ async def check_dirty_state(
             filtered_sub_catalog = filter_catalog_with_ignores(workspace_file.package.catalog, ignore_rules)
             sub_set_of_items: list[CatalogItem] = []
             for item in filtered_sub_catalog.items:
-                item_absolute_path = workspace_file.install_base.rstrip("/") + "/" + item.relative_path.lstrip("/")
+                item_absolute_path = join_url_path(workspace_file.install_base, item.relative_path)
                 item_relative_path = make_relative_url(root_dir, item_absolute_path)
                 if item_relative_path in extra_files:
                     extra_files.remove(item_relative_path)

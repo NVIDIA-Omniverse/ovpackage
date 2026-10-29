@@ -61,7 +61,7 @@ from wrapp.utils.utils import (
     FailedCommand,
     StorageOperationError,
     is_folder,
-    join_paths,
+    join_url_path,
     validate_non_empty_string,
 )
 from wrapp.utils.wrapp_init_for_cmd import wrapp_init_for_cmd
@@ -129,7 +129,7 @@ async def list_repo(repository: str, *, scheduler: Optional[SchedulerContext] = 
     if scheduler is None:
         raise RuntimeError("No scheduler present and ensure_scheduler malfunctioned, program error!")
 
-    packages_dir = join_paths(repository, ".packages")
+    packages_dir = join_url_path(repository, ".packages")
     if not await wrapp_url_exists(packages_dir):
         raise FailedCommand("No .packages folder")
 
@@ -139,7 +139,7 @@ async def list_repo(repository: str, *, scheduler: Optional[SchedulerContext] = 
             logger.info(f"Listing {packages_dir}")
             async for item in wrapp_list_directory(packages_dir):
                 if is_folder(item):
-                    version_dir = join_paths(packages_dir, item.relative_path)
+                    version_dir = join_url_path(packages_dir, item.relative_path)
                     task_group.create_task(_list_versions(version_dir, versions), name="List package versions")
                 else:
                     logger.warning(f"extra file in .packages directory: {item.relative_path}, ignoring it")

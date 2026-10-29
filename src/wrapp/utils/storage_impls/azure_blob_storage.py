@@ -23,12 +23,21 @@ from asyncio import AbstractEventLoop
 from collections.abc import AsyncGenerator
 from datetime import datetime
 from typing import (
+    Any,
     Dict,
     List,
     Optional,
     Tuple,
 )
-from urllib.parse import urlparse
+from urllib.parse import (
+    parse_qs,
+    parse_qsl,
+    unquote,
+    urlencode,
+    urlparse,
+    urlsplit,
+    urlunsplit,
+)
 
 from wrapp.datastructures.command_context import ThrottlingParameters
 from wrapp.utils.coro import assert_is_wrapp_thread
@@ -45,6 +54,7 @@ from wrapp.utils.storage_interface import (
     ServerInfo,
     StorageAuthInfo,
     StorageInterface,
+    URLResourceIdentity,
 )
 from wrapp.utils.task_throttler import (
     TaskThrottler,
@@ -53,7 +63,7 @@ from wrapp.utils.task_throttler import (
 from wrapp.utils.utils import (
     StorageMissingDependenciesError,
     StorageOperationError,
-    get_path_from_url,
+    file_url_to_path,
 )
 
 logger = logging.getLogger("omni.wrapp")
@@ -73,10 +83,13 @@ def _parse_positive_int_env(env_var: str, default: int) -> int:
 
 # Try to import required dependencies
 try:
+    from azure.core import MatchConditions
     from azure.core.exceptions import (
         AzureError,
         ClientAuthenticationError,
+        ResourceModifiedError,
         ResourceNotFoundError,
+        ResourceNotModifiedError,
     )
     from azure.storage.blob import (
         BlobProperties,
@@ -85,7 +98,11 @@ try:
 except ImportError as e:
     # The list of dependencies should be the same as in pyproject.toml
     missing = getattr(e, "name", str(e))
-    error_msg = f"failed to import {missing}. Required dependencies: azure-storage-blob. Install with 'pip install ovpackage[azure]'. Exception: {e}"
+    error_msg = (
+        f"failed to import {missing}. Required dependencies: azure-storage-blob. "
+        "Install with 'pip install \"ovpackage[azure]\"'. "
+        f"Exception: {e}"
+    )
     raise StorageMissingDependenciesError(error_msg) from e
 
 
@@ -175,7 +192,7 @@ def parse_azure_url(url: str) -> Tuple[str, str, str]:
         path_parts = parsed.path.strip("/").split("/", 1)
         account_name = parsed.netloc
         container_name = (path_parts[0] if path_parts else "").lower()
-        blob_name = path_parts[1] if len(path_parts) > 1 else ""
+        blob_name = unquote(path_parts[1]) if len(path_parts) > 1 else ""
         if url.endswith("/") and blob_name != "":
             blob_name = blob_name + "/"
         return account_name, container_name, blob_name
@@ -185,7 +202,7 @@ def parse_azure_url(url: str) -> Tuple[str, str, str]:
         account_name = parsed.netloc.split(".")[0]
         path_parts = parsed.path.strip("/").split("/", 1)
         container_name = (path_parts[0] if path_parts else "").lower()
-        blob_name = path_parts[1] if len(path_parts) > 1 else ""
+        blob_name = unquote(path_parts[1]) if len(path_parts) > 1 else ""
         if url.endswith("/") and blob_name != "":
             blob_name = blob_name + "/"
         return account_name, container_name, blob_name
@@ -207,6 +224,69 @@ def is_azure_url(url: str) -> bool:
         return True
     except ValueError:
         return False
+
+
+_AZURE_IDENTITY_QUERY_KEYS = frozenset({"versionid", "versionId", "etag"})
+
+
+class _InvalidAzureIdentityError(ValueError):
+    """An Azure resource identity contains a parameter that cannot identify a blob version."""
+
+
+def _azure_identity_request_args(url: str) -> Tuple[Optional[str], Dict[str, Any]]:
+    """Decode WRAPP's URL-shaped Azure identity into exact-read arguments.
+
+    ``versionid`` is Azure's native selector, while ``etag`` is a WRAPP URL
+    qualifier that native URL consumers need not honor. WRAPP translates the
+    latter into an SDK match condition so identities without a durable version
+    fail closed after an overwrite instead of returning replacement bytes.
+    """
+    query = parse_qs(urlsplit(url).query, keep_blank_values=True)
+    for key in _AZURE_IDENTITY_QUERY_KEYS:
+        if key in query and any(value == "" for value in query[key]):
+            raise _InvalidAzureIdentityError(f"Invalid Azure identity parameter {key!r}: value must not be empty")
+    version_values = query.get("versionid") or query.get("versionId")
+    version_id = version_values[-1] if version_values else None
+    args: Dict[str, Any] = {}
+    if etag_values := query.get("etag"):
+        # Version and ETag are minted from one properties result. The ETag is
+        # essential when no version exists and otherwise validates that the
+        # persisted selector/validator pair is still coherent.
+        args["etag"] = etag_values[-1]
+        args["match_condition"] = MatchConditions.IfNotModified
+    return version_id, args
+
+
+def _azure_copy_source_identity_args(url: str) -> Tuple[Optional[str], Dict[str, Any], Dict[str, Any]]:
+    version_id, request_args = _azure_identity_request_args(url)
+    copy_args: Dict[str, Any] = {}
+    if etag := request_args.get("etag"):
+        copy_args["source_etag"] = etag
+        copy_args["source_match_condition"] = MatchConditions.IfNotModified
+    return version_id, request_args, copy_args
+
+
+def _blob_property(props: BlobProperties, name: str) -> Optional[str]:
+    value = getattr(props, name, None)
+    if value:
+        return value
+    if hasattr(props, "get"):
+        return props.get(name)
+    return None
+
+
+def _azure_resource_identity_url(url: str, entry: "AzureBlobListEntry") -> str:
+    """Mint a WRAPP-owned Azure identity from one coherent list/stat observation."""
+    if not entry.azure_version_id and not entry.etag:
+        raise StorageOperationError(f"Azure blob has no version or ETag: {url}", Result.ERROR_BAD_VERSION)
+    split_url = urlsplit(url)
+    query = [(key, value) for key, value in parse_qsl(split_url.query) if key not in _AZURE_IDENTITY_QUERY_KEYS]
+    if entry.azure_version_id:
+        query.append(("versionid", entry.azure_version_id))
+    if entry.etag:
+        quoted_etag = entry.etag if entry.etag.startswith('"') else f'"{entry.etag}"'
+        query.append(("etag", quoted_etag))
+    return urlunsplit(split_url._replace(query=urlencode(query)))
 
 
 class AzureBlobListEntry(ListEntry):
@@ -241,6 +321,7 @@ class AzureBlobListEntry(ListEntry):
             size=size,
             last_modified=last_modified,
             nucleus_hash=nucleus_hash,
+            version_id=_blob_property(props, "version_id"),
         )
 
     @classmethod
@@ -270,6 +351,7 @@ class AzureBlobListEntry(ListEntry):
         size: Optional[int] = None,
         last_modified: Optional[datetime] = None,
         nucleus_hash: Optional[str] = None,
+        version_id: Optional[str] = None,
     ) -> None:
         """Initialize an Azure Blob Storage ListEntry.
 
@@ -291,6 +373,7 @@ class AzureBlobListEntry(ListEntry):
         assert size is None or (isinstance(size, int) and size >= 0)
         assert last_modified is None or isinstance(last_modified, datetime)
         assert nucleus_hash is None or (isinstance(nucleus_hash, str) and nucleus_hash != "")
+        assert version_id is None or (isinstance(version_id, str) and version_id != "")
 
         self._etag = etag
         self._is_folder = is_folder
@@ -298,6 +381,7 @@ class AzureBlobListEntry(ListEntry):
         self._size = size
         self._last_modified = last_modified
         self._nucleus_hash = nucleus_hash
+        self._version_id = version_id
 
     @property
     def is_folder(self) -> bool:
@@ -309,11 +393,19 @@ class AzureBlobListEntry(ListEntry):
 
     @property
     def has_checkpoint(self) -> bool:
-        return False
+        return self.is_regular_file
 
     @property
     def version(self) -> str:
-        return "1"
+        return self._version_id or "1"
+
+    @property
+    def etag(self) -> str:
+        return self._etag
+
+    @property
+    def azure_version_id(self) -> Optional[str]:
+        return self._version_id
 
     @property
     def relative_path(self) -> str:
@@ -577,6 +669,7 @@ class AzureBlobStorage(StorageInterface):
         """
         try:
             account_name, container_name, blob_name = parse_azure_url(url)
+            version_id, identity_args = _azure_identity_request_args(url)
 
             # Get container client
             async_client = await self.azure_client().get_async_instance()
@@ -606,11 +699,13 @@ class AzureBlobStorage(StorageInterface):
                         return Result.ERROR_NOT_FOUND, None
             else:
                 # For file-like paths, try to get the blob properties
-                blob_client = container_client.get_blob_client(blob_name)
+                blob_client = container_client.get_blob_client(blob_name, version_id=version_id)
                 try:
-                    props = await self._throttler_roundtrip.run(blob_client.get_blob_properties())
+                    props = await self._throttler_roundtrip.run(blob_client.get_blob_properties(**identity_args))
                     return Result.OK, AzureBlobListEntry.file_from_blob_properties(blob_name, props)
                 except ResourceNotFoundError:
+                    if version_id is not None or identity_args:
+                        return Result.ERROR_NOT_FOUND, None
                     # Check if there's a directory with this name
                     directory_path = blob_name + "/"
                     blobs = await self._throttler_roundtrip.run(self._list_1_if_dir(directory_path, container_client))
@@ -621,11 +716,15 @@ class AzureBlobStorage(StorageInterface):
                         # Neither a blob nor a directory exists with this name
                         return Result.ERROR_NOT_FOUND, None
 
+        except _InvalidAzureIdentityError:
+            return Result.ERROR_NOT_FOUND, None
         except ClientAuthenticationError as e:
             logger.error(f"Azure stat {url} failed because of authentication error: {e}")
             self._last_connection_status = ConnectionStatus.AUTH_ERROR
             return Result.ERROR_ACCESS_DENIED, None
         except ResourceNotFoundError as e:
+            return Result.ERROR_NOT_FOUND, None
+        except (ResourceModifiedError, ResourceNotModifiedError):
             return Result.ERROR_NOT_FOUND, None
         except AzureError as e:
             logger.error(f"Azure error during stat {url}: {e}")
@@ -633,7 +732,23 @@ class AzureBlobStorage(StorageInterface):
             return Result.ERROR, None
 
     async def make_resource_identity(self, file_url, item: ListEntry, relative_url) -> Tuple[str, str, ResourceIdentity]:
-        raise NotImplementedError("Resource identities not supported for S3 yet")
+        if not isinstance(item, AzureBlobListEntry) or not item.is_regular_file:
+            raise TypeError("Can only generate resource identities for Azure Blob files")
+        if item.etag or item.azure_version_id:
+            # Current-version listings include the available version ID and
+            # ETag. They describe the same observation as the listed hash.
+            return file_url, relative_url, URLResourceIdentity(_azure_resource_identity_url(file_url, item))
+        result, stat_item = await self.stat(file_url)
+        if result != Result.OK or not isinstance(stat_item, AzureBlobListEntry):
+            raise StorageOperationError(f"Cannot generate Azure resource identity for {file_url}: stat returned {result}", result)
+        if item.size is not None and stat_item.size != item.size:
+            raise StorageOperationError(f"Azure blob changed size while cataloging {file_url}", Result.ERROR_BAD_VERSION)
+        if item.etag and stat_item.etag and stat_item.etag != item.etag:
+            raise StorageOperationError(f"Azure blob changed ETag while cataloging {file_url}", Result.ERROR_BAD_VERSION)
+        if stat_item.nucleus_hash and not item.nucleus_hash:
+            item.nucleus_hash = stat_item.nucleus_hash
+        identity_url = _azure_resource_identity_url(file_url, stat_item)
+        return file_url, relative_url, URLResourceIdentity(identity_url)
 
     async def is_folder(self, url: str) -> Tuple[Result, bool]:
         """Check if a URL represents a folder.
@@ -681,7 +796,9 @@ class AzureBlobStorage(StorageInterface):
 
             # Use walk_blobs instead of list_blobs to properly handle the delimiter parameter
             # walk_blobs returns both blobs and prefixes directly in the iterator
-            async for item in self._throttler_roundtrip.iterate(container_client.walk_blobs(name_starts_with=blob_name, delimiter="/")):
+            async for item in self._throttler_roundtrip.iterate(
+                container_client.walk_blobs(name_starts_with=blob_name, delimiter="/", include=["metadata"])
+            ):
                 # Process both blobs and prefixes from the walk_blobs result
                 # Check if this is a blob or a prefix (virtual directory)
                 if hasattr(item, "is_prefix") and item.is_prefix:
@@ -803,7 +920,13 @@ class AzureBlobStorage(StorageInterface):
         # Azure Blob Storage doesn't have a direct equivalent to checkpoints
         return Result.ERROR_NOT_SUPPORTED, []
 
-    async def copy(self, src_url: str, dst_url: str, overwrite: bool = False, message: str = "") -> Result:
+    async def copy_address(
+        self,
+        src_url: str,
+        dst_url: str,
+        overwrite: bool = False,
+        message: str = "",
+    ) -> Result:
         """Copy a blob from one location to another.
 
         Args:
@@ -821,6 +944,30 @@ class AzureBlobStorage(StorageInterface):
             raise ValueError(f"'{dst_url} is not supported by the Azure Blob Storage backend.")
 
         return await self._copy_blob_azure_azure(src_url, dst_url, overwrite)
+
+    async def copy_resource_identity(
+        self,
+        resource_identity: str,
+        dst_url: str,
+        overwrite: bool = False,
+        message: str = "",
+    ) -> Result:
+        return await self.copy_address(resource_identity, dst_url, overwrite, message)
+
+    async def read_resource_identity(self, resource_identity: str, *, expected_hash: Optional[str] = None) -> Tuple[Result, bytes]:
+        """Read an Azure identity through its version and ETag-qualified URL."""
+        return await URLResourceIdentity(resource_identity).read_data(self)
+
+    async def download_resource_identity(
+        self,
+        resource_identity: str,
+        dst_url: str,
+        overwrite: bool,
+        *,
+        expected_hash: Optional[str] = None,
+    ) -> Result:
+        """Stream the version-qualified object with its backend preconditions."""
+        return await self.download_file(resource_identity, dst_url, overwrite)
 
     def supports_create_with_hash(self, target_url: str, hash: str) -> bool:
         """Check if create_with_hash is supported.
@@ -860,27 +1007,32 @@ class AzureBlobStorage(StorageInterface):
         """
         try:
             account_name, container_name, blob_name = parse_azure_url(file_url)
+            version_id, identity_args = _azure_identity_request_args(file_url)
 
             if blob_name.endswith("/"):
                 return Result.ERROR_WRONG_TYPE, bytes()
 
             # Get blob client
             async_client = await self.azure_client().get_async_instance()
-            blob_client = async_client.get_blob_client(container=container_name, blob=blob_name)
+            blob_client = async_client.get_blob_client(container=container_name, blob=blob_name, version_id=version_id)
 
             # Download blob
             download_stream = await self._throttler_roundtrip.run(
-                blob_client.download_blob(max_concurrency=WRAPP_AZURE_DOWNLOAD_MAX_CONCURRENCY)
+                blob_client.download_blob(max_concurrency=WRAPP_AZURE_DOWNLOAD_MAX_CONCURRENCY, **identity_args)
             )
             content = await self._throttler_networkdata.run(download_stream.readall())
 
             return Result.OK, content
 
+        except _InvalidAzureIdentityError:
+            return Result.ERROR_NOT_FOUND, bytes()
         except ClientAuthenticationError as e:
             logger.error(f"Azure read_file_content {file_url} failed because of authentication error: {e}")
             self._last_connection_status = ConnectionStatus.AUTH_ERROR
             return Result.ERROR_ACCESS_DENIED, bytes()
         except ResourceNotFoundError:
+            return Result.ERROR_NOT_FOUND, bytes()
+        except (ResourceModifiedError, ResourceNotModifiedError):
             return Result.ERROR_NOT_FOUND, bytes()
         except AzureError as e:
             logger.error(f"Azure error during read_file_content {file_url}: {e}")
@@ -1094,7 +1246,7 @@ class AzureBlobStorage(StorageInterface):
         """
         try:
             # Get local file path
-            src_path = get_path_from_url(src_url)
+            src_path = file_url_to_path(src_url)
 
             # Calculate nucleus hash and snapshot the hashed handle's stat, so the
             # deferred upload can detect a source that changed while queued.
@@ -1144,6 +1296,7 @@ class AzureBlobStorage(StorageInterface):
             sanitized_metadata = sanitize_azure_metadata(metadata)
 
             async def _throttled_upload() -> None:
+                """Upload the verified source while holding a network-transfer slot."""
                 # Open the source only while holding a NetworkDataTransfer slot, so at
                 # most file_transfer_jobs source files are open at once (OMPE-74369).
                 # upload_blob is awaited directly: this task already holds the slot and
@@ -1205,28 +1358,32 @@ class AzureBlobStorage(StorageInterface):
         try:
             # Parse source URL
             account_name, container_name, blob_name = parse_azure_url(src_url)
+            version_id, identity_args = _azure_identity_request_args(src_url)
 
             # Get blob client
             async_client = await self.azure_client().get_async_instance()
-            blob_client = async_client.get_blob_client(container=container_name, blob=blob_name)
+            blob_client = async_client.get_blob_client(container=container_name, blob=blob_name, version_id=version_id)
 
             # Get destination path
-            dst_path = get_path_from_url(dst_url)
+            dst_path = file_url_to_path(dst_url)
 
             # Create parent directories if they don't exist
             dst_dir = os.path.dirname(dst_path)
             os.makedirs(dst_dir, exist_ok=True)
+            if not overwrite and os.path.exists(dst_path):
+                return Result.ERROR_ALREADY_EXISTS
 
             async def _throttled_download() -> None:
+                """Stream into the native destination while holding a transfer slot."""
                 # Hold exactly one NetworkDataTransfer slot for the whole file and open
-                # the destination only inside it, so at most file_transfer_jobs
-                # destination files are open at once (OMPE-74369). The nested roundtrip
-                # throttle for the initial GET is a *different* throttler; nothing in
-                # here may re-acquire networkdata.
+                # the destination only after the initial GET validates the source
+                # identity, so stale catalog identities do not leave empty files.
+                # The nested roundtrip throttle for the initial GET is a *different*
+                # throttler; nothing in here may re-acquire networkdata.
+                download_stream = await self._throttler_roundtrip.run(
+                    blob_client.download_blob(max_concurrency=WRAPP_AZURE_DOWNLOAD_MAX_CONCURRENCY, **identity_args)
+                )
                 with open(dst_path, "wb" if overwrite else "xb") as f_dst:
-                    download_stream = await self._throttler_roundtrip.run(
-                        blob_client.download_blob(max_concurrency=WRAPP_AZURE_DOWNLOAD_MAX_CONCURRENCY)
-                    )
                     # Stream to the file instead of readall(): peak memory is the SDK's
                     # first-chunk buffer (max_single_get_size), not the whole blob.
                     await download_stream.readinto(f_dst)
@@ -1235,6 +1392,8 @@ class AzureBlobStorage(StorageInterface):
 
             return Result.OK
 
+        except _InvalidAzureIdentityError:
+            return Result.ERROR_NOT_FOUND
         except FileExistsError:
             return Result.ERROR_ALREADY_EXISTS
         except FileNotFoundError:
@@ -1243,6 +1402,8 @@ class AzureBlobStorage(StorageInterface):
             logger.error(f"Azure download_file, permission error {src_url}: {e}")
             return Result.ERROR_ACCESS_DENIED
         except ResourceNotFoundError:
+            return Result.ERROR_NOT_FOUND
+        except (ResourceModifiedError, ResourceNotModifiedError):
             return Result.ERROR_NOT_FOUND
         except ClientAuthenticationError as e:
             logger.error(f"Azure download_file {src_url} failed because of authentication error: {e}")
@@ -1349,6 +1510,7 @@ class AzureBlobStorage(StorageInterface):
             # Parse URLs
             src_account_name, src_container_name, src_blob_name = parse_azure_url(src_url)
             dst_account_name, dst_container_name, dst_blob_name = parse_azure_url(dst_url)
+            src_version_id, src_identity_args, src_copy_args = _azure_copy_source_identity_args(src_url)
 
             # Check if source and destination are the same
             if src_container_name == dst_container_name and src_blob_name == dst_blob_name:
@@ -1356,11 +1518,15 @@ class AzureBlobStorage(StorageInterface):
 
             # Get source blob client
             async_client = await self.azure_client().get_async_instance()
-            src_blob_client = async_client.get_blob_client(container=src_container_name, blob=src_blob_name)
+            src_blob_client = async_client.get_blob_client(
+                container=src_container_name,
+                blob=src_blob_name,
+                version_id=src_version_id,
+            )
 
             # Check if source exists
             try:
-                src_properties = await self._throttler_roundtrip.run(src_blob_client.get_blob_properties())
+                src_properties = await self._throttler_roundtrip.run(src_blob_client.get_blob_properties(**src_identity_args))
             except ResourceNotFoundError:
                 return Result.ERROR_NOT_FOUND
 
@@ -1393,7 +1559,9 @@ class AzureBlobStorage(StorageInterface):
             sanitized_metadata = sanitize_azure_metadata(src_properties.metadata)
 
             # Copy blob
-            copy_props = await self._throttler_serverdata.run(dst_blob_client.start_copy_from_url(source_url, metadata=sanitized_metadata))
+            copy_props = await self._throttler_serverdata.run(
+                dst_blob_client.start_copy_from_url(source_url, metadata=sanitized_metadata, **src_copy_args)
+            )
 
             # Check copy status
             copy_status = copy_props["copy_status"]
@@ -1411,10 +1579,14 @@ class AzureBlobStorage(StorageInterface):
             logger.error(f"Azure copy operation failed with status: {copy_status}")
             return Result.ERROR
 
+        except _InvalidAzureIdentityError:
+            return Result.ERROR_NOT_FOUND
         except ClientAuthenticationError as e:
             logger.error(f"Azure copy {src_url} to {dst_url} failed because of authentication error: {e}")
             self._last_connection_status = ConnectionStatus.AUTH_ERROR
             return Result.ERROR_ACCESS_DENIED
+        except (ResourceNotFoundError, ResourceModifiedError, ResourceNotModifiedError):
+            return Result.ERROR_NOT_FOUND
         except AzureError as e:
             logger.error(f"Azure error during copy {src_url} to {dst_url}: {e}")
             self._last_connection_status = ConnectionStatus.CONNECT_ERROR

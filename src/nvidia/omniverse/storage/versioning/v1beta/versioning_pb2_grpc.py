@@ -22,29 +22,29 @@ from nvidia.omniverse.storage.versioning.v1beta import (
     versioning_pb2 as nvidia_dot_omniverse_dot_storage_dot_versioning_dot_v1beta_dot_versioning__pb2,
 )
 
-GRPC_GENERATED_VERSION = '1.72.2'
+GRPC_GENERATED_VERSION = "1.73.1"
 GRPC_VERSION = grpc.__version__
 _version_not_supported = False
 
 try:
     from grpc._utilities import first_version_is_lower
+
     _version_not_supported = first_version_is_lower(GRPC_VERSION, GRPC_GENERATED_VERSION)
 except ImportError:
     _version_not_supported = True
 
 if _version_not_supported:
     raise RuntimeError(
-        f'The grpc package installed is at version {GRPC_VERSION},'
-        + f' but the generated code in nvidia/omniverse/storage/versioning/v1beta/versioning_pb2_grpc.py depends on'
-        + f' grpcio>={GRPC_GENERATED_VERSION}.'
-        + f' Please upgrade your grpc module to grpcio>={GRPC_GENERATED_VERSION}'
-        + f' or downgrade your generated code using grpcio-tools<={GRPC_VERSION}.'
+        f"The grpc package installed is at version {GRPC_VERSION},"
+        + f" but the generated code in nvidia/omniverse/storage/versioning/v1beta/versioning_pb2_grpc.py depends on"
+        + f" grpcio>={GRPC_GENERATED_VERSION}."
+        + f" Please upgrade your grpc module to grpcio>={GRPC_GENERATED_VERSION}"
+        + f" or downgrade your generated code using grpcio-tools<={GRPC_VERSION}."
     )
 
 
 class VersioningServiceStub(object):
-    """The VersioningService provides methods to manage versions of data objects.
-    """
+    """The VersioningService provides methods to manage versions of data objects."""
 
     def __init__(self, channel):
         """Constructor.
@@ -53,58 +53,59 @@ class VersioningServiceStub(object):
             channel: A grpc.Channel.
         """
         self.EnumerateVersions = channel.unary_stream(
-                '/nvidia.omniverse.storage.versioning.v1beta.VersioningService/EnumerateVersions',
-                request_serializer=nvidia_dot_omniverse_dot_storage_dot_versioning_dot_v1beta_dot_versioning__pb2.EnumerateVersionsRequest.SerializeToString,
-                response_deserializer=nvidia_dot_omniverse_dot_storage_dot_versioning_dot_v1beta_dot_versioning__pb2.EnumerateVersionsResponse.FromString,
-                _registered_method=True)
+            "/nvidia.omniverse.storage.versioning.v1beta.VersioningService/EnumerateVersions",
+            request_serializer=nvidia_dot_omniverse_dot_storage_dot_versioning_dot_v1beta_dot_versioning__pb2.EnumerateVersionsRequest.SerializeToString,
+            response_deserializer=nvidia_dot_omniverse_dot_storage_dot_versioning_dot_v1beta_dot_versioning__pb2.EnumerateVersionsResponse.FromString,
+            _registered_method=True,
+        )
 
 
 class VersioningServiceServicer(object):
-    """The VersioningService provides methods to manage versions of data objects.
-    """
+    """The VersioningService provides methods to manage versions of data objects."""
 
     def EnumerateVersions(self, request, context):
-        """List versions of a data object at the specified resource address.
-        """
+        """List versions of a data object at the specified resource address."""
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
-        context.set_details('Method not implemented!')
-        raise NotImplementedError('Method not implemented!')
+        context.set_details("Method not implemented!")
+        raise NotImplementedError("Method not implemented!")
 
 
 def add_VersioningServiceServicer_to_server(servicer, server):
     rpc_method_handlers = {
-            'EnumerateVersions': grpc.unary_stream_rpc_method_handler(
-                    servicer.EnumerateVersions,
-                    request_deserializer=nvidia_dot_omniverse_dot_storage_dot_versioning_dot_v1beta_dot_versioning__pb2.EnumerateVersionsRequest.FromString,
-                    response_serializer=nvidia_dot_omniverse_dot_storage_dot_versioning_dot_v1beta_dot_versioning__pb2.EnumerateVersionsResponse.SerializeToString,
-            ),
+        "EnumerateVersions": grpc.unary_stream_rpc_method_handler(
+            servicer.EnumerateVersions,
+            request_deserializer=nvidia_dot_omniverse_dot_storage_dot_versioning_dot_v1beta_dot_versioning__pb2.EnumerateVersionsRequest.FromString,
+            response_serializer=nvidia_dot_omniverse_dot_storage_dot_versioning_dot_v1beta_dot_versioning__pb2.EnumerateVersionsResponse.SerializeToString,
+        ),
     }
     generic_handler = grpc.method_handlers_generic_handler(
-            'nvidia.omniverse.storage.versioning.v1beta.VersioningService', rpc_method_handlers)
+        "nvidia.omniverse.storage.versioning.v1beta.VersioningService", rpc_method_handlers
+    )
     server.add_generic_rpc_handlers((generic_handler,))
-    server.add_registered_method_handlers('nvidia.omniverse.storage.versioning.v1beta.VersioningService', rpc_method_handlers)
+    server.add_registered_method_handlers("nvidia.omniverse.storage.versioning.v1beta.VersioningService", rpc_method_handlers)
 
 
- # This class is part of an EXPERIMENTAL API.
+# This class is part of an EXPERIMENTAL API.
 class VersioningService(object):
-    """The VersioningService provides methods to manage versions of data objects.
-    """
+    """The VersioningService provides methods to manage versions of data objects."""
 
     @staticmethod
-    def EnumerateVersions(request,
-            target,
-            options=(),
-            channel_credentials=None,
-            call_credentials=None,
-            insecure=False,
-            compression=None,
-            wait_for_ready=None,
-            timeout=None,
-            metadata=None):
+    def EnumerateVersions(
+        request,
+        target,
+        options=(),
+        channel_credentials=None,
+        call_credentials=None,
+        insecure=False,
+        compression=None,
+        wait_for_ready=None,
+        timeout=None,
+        metadata=None,
+    ):
         return grpc.experimental.unary_stream(
             request,
             target,
-            '/nvidia.omniverse.storage.versioning.v1beta.VersioningService/EnumerateVersions',
+            "/nvidia.omniverse.storage.versioning.v1beta.VersioningService/EnumerateVersions",
             nvidia_dot_omniverse_dot_storage_dot_versioning_dot_v1beta_dot_versioning__pb2.EnumerateVersionsRequest.SerializeToString,
             nvidia_dot_omniverse_dot_storage_dot_versioning_dot_v1beta_dot_versioning__pb2.EnumerateVersionsResponse.FromString,
             options,
@@ -115,4 +116,5 @@ class VersioningService(object):
             wait_for_ready,
             timeout,
             metadata,
-            _registered_method=True)
+            _registered_method=True,
+        )

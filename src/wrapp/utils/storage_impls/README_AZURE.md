@@ -41,11 +41,13 @@ You can set the following environment variables to authenticate with Azure Blob 
 You can also explicitly set authentication information in your code:
 
 ```python
+import os
+
 from wrapp.utils.storage import Router, StorageAuthInfo
 from wrapp.utils.storage_impls.azure_blob_storage import AzureBlobAuthInfo
 
 # Using connection string
-connection_string = "DefaultEndpointsProtocol=https;AccountName=your_account;AccountKey=your_key;EndpointSuffix=core.windows.net"
+connection_string = os.environ["WRAPP_AZURE_CONNECTION_STRING"]
 auth_info = StorageAuthInfo.azure_blob("azure://your_account", connection_string)
 Router.me().azure().add_auth_info(auth_info)
 
@@ -79,12 +81,12 @@ wrapp_shutdown()
 
 ```python
 import asyncio
-from wrapp.utils.storage import wrapp_copy
+from wrapp.utils.storage import wrapp_copy_address
 
 async def upload_file():
     local_file_url = "file:///path/to/local/file.txt"
     azure_url = "azure://account/container/file.txt"
-    result = await wrapp_copy(local_file_url, azure_url, overwrite=True)
+    result = await wrapp_copy_address(local_file_url, azure_url, overwrite=True)
     print(f"Upload result: {result}")
 
 asyncio.run(upload_file())
@@ -94,12 +96,12 @@ asyncio.run(upload_file())
 
 ```python
 import asyncio
-from wrapp.utils.storage import wrapp_copy
+from wrapp.utils.storage import wrapp_copy_address
 
 async def download_file():
     azure_url = "azure://account/container/file.txt"
     local_file_url = "file:///path/to/local/file.txt"
-    result = await wrapp_copy(azure_url, local_file_url, overwrite=True)
+    result = await wrapp_copy_address(azure_url, local_file_url, overwrite=True)
     print(f"Download result: {result}")
 
 asyncio.run(download_file())

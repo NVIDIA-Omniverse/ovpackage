@@ -27,12 +27,20 @@ from enum import (
 )
 from typing import (
     List,
+    NewType,
     Optional,
     Tuple,
 )
+from urllib.parse import urlparse
 
 from wrapp.utils.api_marker import wrapp_public_api
 from wrapp.utils.scheduler_task_node import SchedulerTaskGroupNode
+
+SerializedResourceIdentity = NewType("SerializedResourceIdentity", str)
+ResourceAddress = NewType("ResourceAddress", str)
+
+# These types intentionally brand otherwise identical strings. For example,
+# mypy rejects ``read_resource_identity(ResourceAddress("file:///asset.usd"))``.
 
 
 class Result(Enum):
@@ -150,6 +158,20 @@ class GCSAuthInfo:
 
 
 @dataclass
+class HuggingFaceAuthInfo:
+    """Authentication information for Hugging Face Hub dataset repositories."""
+
+    token: Optional[str] = None
+    endpoint: Optional[str] = None
+
+    def __str__(self):
+        return f"HuggingFaceAuthInfo(token=***{(self.token or '')[-3:]}, endpoint={self.endpoint})"
+
+    def __repr__(self):
+        return str(self)
+
+
+@dataclass
 class StorageAPIBearerAuthInfo:
     server: str
     bearer_token: str
@@ -190,6 +212,9 @@ class StorageAuthInfo:
 
         # GCS
         auth = StorageAuthInfo.gcs("gs://my-bucket", credentials_file="/path/to/sa.json")
+
+        # Hugging Face dataset repositories
+        auth = StorageAuthInfo.huggingface("hf://datasets/my-org/my-dataset", "<TOKEN>")
 
         # Storage API — bearer token
         auth = StorageAuthInfo.storage_api_bearer("https://discovery.example.com", "<TOKEN>")
@@ -232,6 +257,11 @@ class StorageAuthInfo:
         )
 
     @classmethod
+    def huggingface(cls, server_url: str, token: Optional[str] = None, endpoint: Optional[str] = None) -> "StorageAuthInfo":
+        """Convenience function to set up StorageAuthInfo for accessing Hugging Face dataset repositories."""
+        return StorageAuthInfo(server_url.rstrip("/"), HuggingFaceAuthInfo(token=token, endpoint=endpoint))
+
+    @classmethod
     def storage_api_bearer(cls, discovery_url: str, bearer_token: str) -> "StorageAuthInfo":
         """Create credentials for a Storage API service using a pre-obtained bearer token.
 
@@ -267,12 +297,15 @@ class StorageAuthInfo:
     def __init__(
         self,
         server_url: str,
-        auth_data: NucleusAuthInfo
-        | Boto3AuthInfo
-        | AzureBlobAuthInfo
-        | GCSAuthInfo
-        | StorageAPIBearerAuthInfo
-        | StorageAPIClientCredentialsAuthInfo,
+        auth_data: (
+            NucleusAuthInfo
+            | Boto3AuthInfo
+            | AzureBlobAuthInfo
+            | GCSAuthInfo
+            | HuggingFaceAuthInfo
+            | StorageAPIBearerAuthInfo
+            | StorageAPIClientCredentialsAuthInfo
+        ),
     ):
         self._server_url = server_url
         self._auth_data = auth_data
@@ -284,11 +317,27 @@ class StorageAuthInfo:
     @property
     def auth_data(
         self,
-    ) -> NucleusAuthInfo | Boto3AuthInfo | AzureBlobAuthInfo | GCSAuthInfo | StorageAPIBearerAuthInfo | StorageAPIClientCredentialsAuthInfo:
+    ) -> (
+        NucleusAuthInfo
+        | Boto3AuthInfo
+        | AzureBlobAuthInfo
+        | GCSAuthInfo
+        | HuggingFaceAuthInfo
+        | StorageAPIBearerAuthInfo
+        | StorageAPIClientCredentialsAuthInfo
+    ):
         return self._auth_data
 
     _server_url: str
-    _auth_data: NucleusAuthInfo | Boto3AuthInfo | AzureBlobAuthInfo | GCSAuthInfo | StorageAPIBearerAuthInfo | StorageAPIClientCredentialsAuthInfo
+    _auth_data: (
+        NucleusAuthInfo
+        | Boto3AuthInfo
+        | AzureBlobAuthInfo
+        | GCSAuthInfo
+        | HuggingFaceAuthInfo
+        | StorageAPIBearerAuthInfo
+        | StorageAPIClientCredentialsAuthInfo
+    )
 
     def __str__(self):
         server_url = getattr(self, "_server_url", None)
@@ -409,8 +458,29 @@ class ResourceIdentity(ABC):
         ...
 
     @abstractmethod
-    def to_string(self) -> str:
+    def to_string(self) -> SerializedResourceIdentity:
         ...
+
+
+class URLResourceIdentity(ResourceIdentity):
+    """A backend-issued identity represented by an absolute, version-qualified URL.
+
+    It must be absolute so relocating the tree or manifest that carries it
+    cannot change which backend resource it identifies.
+    """
+
+    def __init__(self, url: str):
+        parsed = urlparse(url)
+        is_windows_drive_path = len(parsed.scheme) == 1 and len(url) >= 2 and url[1] == ":"
+        if not parsed.scheme or is_windows_drive_path:
+            raise ValueError(f"Resource identity must be an absolute URL: {url!r}")
+        self._url = url
+
+    async def read_data(self, storage) -> Tuple[Result, bytes]:
+        return await storage.read_file_content(self._url)
+
+    def to_string(self) -> SerializedResourceIdentity:
+        return SerializedResourceIdentity(self._url)
 
 
 class ServerInfo(ABC):
@@ -434,7 +504,32 @@ class LocalReadOnlyFile(ABC):
         ...
 
 
+class MaterializedLocalFile(LocalReadOnlyFile):
+    """A read lease for a staging file whose owner handles file deletion."""
+
+    def __init__(self, path: str):
+        self._path: Optional[str] = path
+
+    def local_path(self) -> str:
+        if self._path is None:
+            raise RuntimeError("Materialized file lease has been closed")
+        return self._path
+
+    def close(self):
+        self._path = None
+
+
 class StorageInterface(ABC):
+    @property
+    def is_read_only(self) -> bool:
+        """Whether writes are unsupported by this backend, independent of credentials.
+
+        False does not guarantee write permission. Listing support and durable
+        resource identities are separate capabilities.
+        """
+
+        return False
+
     @abstractmethod
     def supports_tags(self, url: str) -> bool:
         ...
@@ -476,6 +571,11 @@ class StorageInterface(ABC):
         # We could also remove the "async" in the function definition, but I prefer it this way.
         yield ListEntry()  # noqa
 
+    def supports_list_directory(self) -> bool:
+        """Whether the backend can enumerate the immediate children of a URL."""
+
+        return True
+
     def supports_list_file_tree(self) -> bool:
         return False
 
@@ -504,9 +604,34 @@ class StorageInterface(ABC):
     # If the src_url or dst_url is a folder, the operation is undefined.
     # If the URL is not supported by the storage, raise a ValueError exception.
     @abstractmethod
-    async def copy(self, src_url: str, dst_url: str, overwrite: bool = False, message: str = "") -> Result:
-        """Given a src and a dst url, perform a copy. Create destination folders appropriately when they don't exist yet."""
+    async def copy_address(
+        self,
+        src_url: ResourceAddress,
+        dst_url: ResourceAddress,
+        overwrite: bool = False,
+        message: str = "",
+    ) -> Result:
+        """Copy the bytes addressed by ``src_url`` to ``dst_url``.
+
+        The address may be mutable or versioned. Callers that already have a
+        backend-issued identity must use :meth:`copy_resource_identity`.
+        """
         ...
+
+    async def copy_resource_identity(
+        self,
+        resource_identity: SerializedResourceIdentity,
+        dst_url: ResourceAddress,
+        overwrite: bool = False,
+        message: str = "",
+    ) -> Result:
+        """Copy exact bytes selected by ``resource_identity`` to ``dst_url``.
+
+        Backends may override this for an atomic/server-side identity copy.
+        The generic storage layer falls back to reading the same identity when
+        this operation is unavailable.
+        """
+        raise NotImplementedError
 
     @abstractmethod
     def supports_create_with_hash(self, target_url: str, hash: str) -> bool:
@@ -520,6 +645,97 @@ class StorageInterface(ABC):
     @abstractmethod
     async def read_file_content(self, file_url: str) -> Tuple[Result, bytes]:
         ...
+
+    async def read_resource_identity(
+        self,
+        resource_identity: SerializedResourceIdentity,
+        *,
+        expected_hash: Optional[str] = None,
+    ) -> Tuple[Result, bytes]:
+        """Read bytes through a backend-issued resource identity.
+
+        Backends with self-describing or opaque identities override this
+        method and own all validation required by their identity format.
+        """
+        raise NotImplementedError
+
+    async def download_resource_identity(
+        self,
+        resource_identity: SerializedResourceIdentity,
+        dst_url: ResourceAddress,
+        overwrite: bool,
+        *,
+        expected_hash: Optional[str] = None,
+    ) -> Result:
+        """Stream bytes selected by an identity into a local file.
+
+        The owning backend is responsible for any extra verification required
+        by its identity format. ``expected_hash`` exists only to safely consume
+        legacy identities whose serialized form did not contain that backend
+        verification data.
+        """
+        raise NotImplementedError
+
+    async def materialize(
+        self,
+        address: ResourceAddress,
+        staging_path: str,
+        *,
+        resource_identity: Optional[SerializedResourceIdentity] = None,
+        expected_hash: Optional[str] = None,
+    ) -> Tuple[Result, Optional[LocalReadOnlyFile]]:
+        """Acquire a local read lease, using backend caching when safe.
+
+        An explicit identity is authoritative: never substitute ``address``
+        or its cached current contents for an identity read. Backends with a
+        cache that can honor identities may override this method.
+
+        Backends may borrow a local/cache file or stream the selected bytes
+        into ``staging_path``, which is a local filesystem path. The shared
+        implementation delegates identity reads to ``download_resource_identity``
+        so each backend retains its version or validator checks.
+
+        The utility layer reserves and owns ``staging_path`` before entering
+        this operation. Backends must not allocate through TempFileManager or
+        delete borrowed cache/local files. The caller closes the returned
+        lease after consuming it and removes its own staging file.
+
+        ``expected_hash`` retains the legacy-identity verification semantics
+        of :meth:`download_resource_identity`; address reads retain their
+        ordinary backend semantics.
+        """
+        target = ResourceAddress(staging_path)
+        if resource_identity is not None:
+            result = await self.download_resource_identity(resource_identity, target, overwrite=True, expected_hash=expected_hash)
+        else:
+            if self.can_be_cached(address):
+                result, cached_file = await self.get_cached_file_async(address, download=True)
+                if result == Result.OK and cached_file is not None:
+                    return result, cached_file
+                if cached_file is not None:
+                    cached_file.close()
+            result = await self.download_file(address, target, overwrite=True)
+        if result != Result.OK:
+            return result, None
+        return Result.OK, MaterializedLocalFile(staging_path)
+
+    def can_handle_resource_identity(self, resource_identity: SerializedResourceIdentity) -> bool:
+        """Whether this backend owns the serialized resource identity."""
+        return False
+
+    def resource_identity_for_manifest(
+        self,
+        resource_identity: SerializedResourceIdentity,
+        *,
+        expected_hash: Optional[str] = None,
+    ) -> SerializedResourceIdentity:
+        """Return the protocol identity stored in manifests.
+
+        Most backend identities are already protocol-native. Backends whose
+        catalog serialization carries extra verification data may strip that
+        wrapper here.
+        """
+        return resource_identity
 
     @abstractmethod
     async def get_cached_file_async(self, file_url: str, download: bool = True) -> Tuple[Result, Optional[LocalReadOnlyFile]]:

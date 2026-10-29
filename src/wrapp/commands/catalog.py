@@ -15,7 +15,6 @@
 
 import hashlib
 import logging
-import os
 from dataclasses import (
     dataclass,
     field,
@@ -31,7 +30,10 @@ from typing import (
     Tuple,
     Union,
 )
-from urllib.parse import urlparse
+from urllib.parse import (
+    unquote,
+    urlparse,
+)
 
 import typer
 from rich.table import Table
@@ -105,31 +107,37 @@ from wrapp.utils.stats import (
 from wrapp.utils.storage import (
     ListEntry,
     LocalReadOnlyFile,
+    ResourceIdentity,
     Result,
     Router,
     wrapp_can_be_cached,
+    wrapp_download_resource_identity,
     wrapp_get_cached_file,
     wrapp_list_checkpoints,
     wrapp_list_directory,
     wrapp_list_file_tree,
     wrapp_list_file_tree_supported,
+    wrapp_make_resource_identity,
     wrapp_read_text_file,
     wrapp_stat,
     wrapp_supports_tags,
     wrapp_url_exists,
     wrapp_url_is_folder,
 )
+from wrapp.utils.storage_interface import SerializedResourceIdentity
 from wrapp.utils.task_throttler import CPUThrottler
 from wrapp.utils.temp_file_manager import TempFileManager
 from wrapp.utils.utils import (
     FailedCommand,
     StorageOperationError,
+    drop_parameters_from_url,
     format_size,
     has_checkpoint,
     is_file_url,
     is_folder,
     is_regular_file,
     is_relative_path,
+    join_url_path,
     make_file_url_absolute,
     make_relative_url,
 )
@@ -251,11 +259,12 @@ async def catalog(
 
     :param root_dir: URL of the root of the files to be cataloged
     :param file_list: Alternative to root_dir, specify the name of a tab separated file containing a list of files to include,
-                        or a list explicitly listing all files as tuples base path, relative path.
+                        or a list explicitly listing all files as tuples base address, relative URL reference.
+                        Escape literal filename delimiters (e.g. ``asset%3F.txt`` for ``asset?.txt``); URL selectors are retained.
     :param tags: Set this to additionally query the tagging service and make tags part of the catalog
     :param ignores: Specify the name of an ignore file containing rules for ignoring items, or an IgnoreEvaluator object
     :param local_hash: Flag to allow the catalog operation to calculate the hash locally, potentially after a download of the data
-    :param checkpoints: Flag, default on, to list checkpoints of local items and add the latest checkpoint into the source URL if the source URL supports checkpoints
+    :param checkpoints: Flag, default on, to capture a durable resource_identity_v2 where supported; source_path retains the input read address
     :param skip_missing: When True and using file_list mode, silently skip files that are not found instead of raising an error.
                          This is useful for targeted cataloging where some files may not exist in the destination.
     :param context: Global configuration parameters
@@ -343,7 +352,7 @@ async def _catalog_impl(
         if isinstance(file_list, list):
             if not root_dir:
                 raise FailedCommand("You must specify root_dir if the file_list is given explicitly")
-            root = root_dir
+            root = make_file_url_absolute(root_dir)
             ignore_rules = await create_ignore_eval_from_params(ignores, root)
             catalog_items = await builder.catalog_file_list(file_list, ignore_rules=ignore_rules)
         elif file_list is not None:
@@ -355,7 +364,7 @@ async def _catalog_impl(
                 logger.info(f"Starting catalog operation of file list {file_list}")
             root, catalog_items = await builder.catalog_file_list_from_file(file_list, ignores=ignores)
             if root_dir:
-                root = root_dir
+                root = make_file_url_absolute(root_dir)
             if not root:
                 raise FailedCommand("Root folder was not specified, and the root in the file list is ambiguous.")
         elif root_dir is not None:
@@ -420,15 +429,18 @@ class ProgressStats_Catalog:
         return progress_table
 
 
-class RelativeUrl:
-    def __init__(self, relative_url):
-        self.relative_url = relative_url.replace("\\", "/").lstrip("/").rstrip("/")
+class RelativePath:
+    """A backend-independent path stored relative to a catalog root."""
 
-    def append(self, url: "RelativeUrl"):
-        return RelativeUrl(relative_url=self.relative_url + "/" + url.relative_url)
+    def __init__(self, relative_path):
+        normalized_path = relative_path.replace("\\", "/").lstrip("/").rstrip("/")
+        self.relative_path = normalized_path
+
+    def append(self, path: "RelativePath"):
+        return RelativePath(relative_path=self.relative_path + "/" + path.relative_path)
 
     def __repr__(self):
-        return self.relative_url
+        return self.relative_path
 
 
 class AbsoluteUrl:
@@ -439,14 +451,26 @@ class AbsoluteUrl:
         else:
             self.absolute_url = absolute_url.replace("\\", "/").rstrip("/")
 
-    def append(self, url: RelativeUrl):
-        return AbsoluteUrl(absolute_url=(self.absolute_url + "/" + url.relative_url))
+    def append(self, path: Union[RelativePath, "RelativeUrl"]):
+        if isinstance(path, RelativeUrl):
+            return AbsoluteUrl(absolute_url=self.absolute_url + "/" + path.relative_url)
+        return AbsoluteUrl(absolute_url=join_url_path(self.absolute_url, path.relative_path))
 
     def make_relative(self, url: "AbsoluteUrl"):
         return RelativeUrl(relative_url=make_relative_url(self.absolute_url, url.absolute_url))
 
     def __repr__(self):
         return self.absolute_url
+
+
+class RelativeUrl:
+    """A relative read URL, including any checkpoint/version query parameters."""
+
+    def __init__(self, relative_url: str):
+        self.relative_url = relative_url.replace("\\", "/").lstrip("/")
+
+    def logical_path(self) -> RelativePath:
+        return RelativePath(unquote(drop_parameters_from_url(self.relative_url)))
 
 
 class CatalogBuilder:
@@ -485,43 +509,63 @@ class CatalogBuilder:
             self.hash_cache.save()
 
     async def _catalog_file_item(
-        self, task_node: SchedulerTaskGroupNode, item: ListEntry, base: AbsoluteUrl, relative: RelativeUrl
+        self,
+        task_node: SchedulerTaskGroupNode,
+        item: ListEntry,
+        base: AbsoluteUrl,
+        relative: RelativePath,
+        *,
+        file_url: Optional[AbsoluteUrl] = None,
     ) -> None:
         assert item.modified_time is not None
         assert item.size is not None
         self.progress_stats.files_found += 1
         self.progress_stats.num_bytes_found += item.size
-        file_url: AbsoluteUrl = base.append(relative)
+        file_url = file_url or base.append(relative)
+        logical_relative_path = relative.relative_path
         Stats.get().increment(StatType.FILES)
         Stats.get().increment(StatType.BYTES_IN_CATALOG, item.size)
         if self.checkpoints and has_checkpoint(item):
             # This case is for backends that allow checkpoints/resource_identities, and this item has one.
             # Use the make_resource_identity function to create the data and the code required to retrieve the object later.
-            storage = Router.me().storage_for_read(file_url.absolute_url)
-            new_absolute_url, new_relative_path, resource_identity = await storage.make_resource_identity(
-                file_url.absolute_url, item, relative.relative_url
-            )
+            _, _, resource_identity = await wrapp_make_resource_identity(file_url.absolute_url, item, relative.relative_path)
             if not item.nucleus_hash:
-                # This can happen when the storage backend does not provide a hash via metadata
-                await self._check_download_required(task_node, base, file_url, resource_identity.to_string())
+                # make_resource_identity has already asked the owning backend
+                # for identity-keyed hash metadata. Reuse a hash cached for the
+                # exact identity, or download the identified bytes to hash them;
+                # never re-stat or use an address-keyed cache here because the
+                # logical address may already identify different bytes.
+                task_node.create_task(
+                    self._download_item(
+                        task_node,
+                        base,
+                        file_url,
+                        item.modified_time,
+                        item.size,
+                        resource_identity,
+                    ),
+                    name="Download resource identity",
+                )
             else:
                 self.result_list.append(
                     CatalogItem(
-                        relative_path=new_relative_path,
-                        source_path=new_absolute_url,
-                        resource_identity=resource_identity.to_string(),
+                        relative_path=logical_relative_path,
+                        source_path=file_url.absolute_url,
+                        resource_identity_v2=resource_identity.to_string(),
                         hash=item.nucleus_hash,
                         size=item.size,
+                        modified_time=item.modified_time,
                     )
                 )
         elif item.nucleus_hash:
-            # we use the Nucleus hash provided by the storage.
+            # Use a content hash provided by the routed storage backend.
             self.result_list.append(
                 CatalogItem(
-                    relative_path=relative.relative_url,
+                    relative_path=relative.relative_path,
                     source_path=file_url.absolute_url,
                     hash=item.nucleus_hash,
                     size=item.size,
+                    modified_time=item.modified_time,
                 )
             )
         elif (
@@ -533,7 +577,7 @@ class CatalogBuilder:
         ):
             # This is a local file URL, or an S3/Azure URL, or a storage API URL, or something not checkpointed, we can calculate the hash value locally.
             # _check_download_required will stat() the URL, which might return the metadata list() has not delivered.
-            await self._check_download_required(task_node, base, file_url, None)
+            await self._check_download_required(task_node, base, file_url)
         else:
             # So this is an omniverse URL, it has no nucleus_hash, and is either on a non-checkpointing server
             # or the item has no checkpoints. If it is a mount, list_checkpoints will return NOT_SUPPORTED
@@ -553,18 +597,21 @@ class CatalogBuilder:
     ) -> List[CatalogItem]:
         async with self._root_task_node.create_task_group_node(description="Cataloging file list...") as task_node:
             for base, url in list_of_urls:
+                base = make_file_url_absolute(base)
                 if is_relative_path(url):
                     file_url = AbsoluteUrl(absolute_url=base).append(RelativeUrl(relative_url=url))
                     relative = url
                 else:
+                    url = make_file_url_absolute(url)
                     file_url = AbsoluteUrl(absolute_url=url)
                     relative = make_relative_url(base, url)
                     assert is_relative_path(relative)
-                if is_package_standard_sidecar_path(relative):
+                logical_path = RelativeUrl(relative).logical_path().relative_path
+                if is_package_standard_sidecar_path(logical_path):
                     if self.verbose:
                         logger.info(f"Ignoring package-standard sidecar {relative}")
                     continue
-                if ignore_rules is not None and ignore_rules.is_ignored(file_url.absolute_url):
+                if ignore_rules is not None and ignore_rules.is_ignored(logical_path):
                     if self.verbose:
                         logger.info(f"Ignoring {file_url.absolute_url}")
                     continue
@@ -573,7 +620,8 @@ class CatalogBuilder:
 
     async def _parallel_stat_and_catalog(self, task_node: SchedulerTaskGroupNode, base: str, relative: str):
         # Stat this file and if found catalog it adding it to the self.result_list
-        file_url = AbsoluteUrl(absolute_url=base).append(RelativeUrl(relative_url=relative))
+        relative_url = RelativeUrl(relative_url=relative)
+        file_url = AbsoluteUrl(absolute_url=base).append(relative_url)
         result, item = await wrapp_stat(file_url.absolute_url)
         if result != Result.OK:
             if result != Result.ERROR_NOT_FOUND or self._error_raises_exception:
@@ -582,7 +630,7 @@ class CatalogBuilder:
                 )
             # NOT_FOUND is ok when the _error_raises_exception flag is cleared: silently skip not found item
         elif is_regular_file(item):
-            await self._catalog_file_item(task_node, item, AbsoluteUrl(absolute_url=base), RelativeUrl(relative_url=relative))
+            await self._catalog_file_item(task_node, item, AbsoluteUrl(absolute_url=base), relative_url.logical_path(), file_url=file_url)
 
     async def catalog_file_list_from_file(
         self, source_file: str, *, ignores: Optional[Union[str, IgnoreEvaluator]] = None
@@ -597,7 +645,7 @@ class CatalogBuilder:
                 if len(entries) < 2:
                     logger.warning(f"Ignoring line as it does not contain at least two tab separated values: {file_entry}")
                 else:
-                    base = entries[0]
+                    base = make_file_url_absolute(entries[0])
                     relative = entries[1]
                     list_of_urls.append((base, relative))
                     if root is None:
@@ -631,14 +679,14 @@ class CatalogBuilder:
         elif is_regular_file(item):
             raise FailedCommand(f"catalog root URL must be a folder, not a file: {full_path.absolute_url}")
         async with self._root_task_node.create_task_group_node(f"Cataloging file tree '{base_url}'") as task_node:
-            await self._catalog_file_tree(task_node, full_path, RelativeUrl(relative_url=""), ignore_rules=ignore_rules)
+            await self._catalog_file_tree(task_node, full_path, RelativePath(relative_path=""), ignore_rules=ignore_rules)
         return self.result_list
 
     async def _catalog_file_tree(
         self,
         task_node: SchedulerTaskGroupNode,
         base_url: AbsoluteUrl,
-        source_dir: RelativeUrl,
+        source_dir: RelativePath,
         *,
         ignore_rules: Optional[IgnoreEvaluator] = None,
     ) -> None:
@@ -650,9 +698,13 @@ class CatalogBuilder:
             items_generator = wrapp_list_directory(source_url.absolute_url)
             need_manual_recurse = True
         async for item in items_generator:
-            new_source_url: RelativeUrl = source_dir.append(RelativeUrl(relative_url=item.relative_path))
+            new_source_url: RelativePath = source_dir.append(RelativePath(relative_path=item.relative_path))
             source_file = base_url.append(new_source_url)
-            if not item_is_ignored(source_dir.relative_url, RelativeUrl(relative_url=item.relative_path).relative_url, ignore_rules):
+            if not item_is_ignored(
+                source_dir.relative_path,
+                RelativePath(relative_path=item.relative_path).relative_path,
+                ignore_rules,
+            ):
                 if is_folder(item):
                     Stats.get().increment(StatType.FOLDERS)
                     self.progress_stats.directories_found += 1
@@ -679,24 +731,28 @@ class CatalogBuilder:
         resource_identity: Optional[str],
         extra_hashes: Optional[Dict[str, str]] = None,
     ):
-        if modified_time is not None and self.hash_cache is not None:
-            self.hash_cache.set(url.absolute_url, filesize, modified_time, local_hash)
-        relative_url = base_url.make_relative(url)
+        if self.hash_cache is not None:
+            if resource_identity is not None:
+                self.hash_cache.set_identity(SerializedResourceIdentity(resource_identity), filesize, local_hash)
+            elif modified_time is not None:
+                self.hash_cache.set(url.absolute_url, filesize, modified_time, local_hash)
+        relative_path = base_url.make_relative(url)
+        logical_relative_path = relative_path.logical_path().relative_path
         if extra_hashes:
-            self.content_hashes_map[relative_url.relative_url] = extra_hashes
+            self.content_hashes_map[logical_relative_path] = extra_hashes
         self.result_list.append(
             CatalogItem(
-                relative_path=relative_url.relative_url,
+                relative_path=logical_relative_path,
                 source_path=url.absolute_url,
                 hash=local_hash,
                 size=filesize,
-                resource_identity=resource_identity,
+                resource_identity_v2=resource_identity,
+                modified_time=modified_time,
             )
         )
 
-    async def _check_download_required(
-        self, task_node: SchedulerTaskGroupNode, base_url: AbsoluteUrl, url: AbsoluteUrl, resource_identity: Optional[str]
-    ) -> None:
+    async def _check_download_required(self, task_node: SchedulerTaskGroupNode, base_url: AbsoluteUrl, url: AbsoluteUrl) -> None:
+        """Check mutable-address metadata and its address-only hash cache."""
         result, item = await wrapp_stat(url.absolute_url)
         if result != Result.OK:
             raise FailedCommand(f"Failed to stat file '{url.absolute_url}' for check if hash calculation is required: {result}")
@@ -707,7 +763,7 @@ class CatalogBuilder:
         if item.nucleus_hash is not None:
             # Ah, the stat gave us a Nucleus hash what the list couldn't. This is the case when we find the Nucleus
             # hash stored in the S3 Metadata. No need to download now.
-            self._add_local_hash_result(base_url, url, item.nucleus_hash, item.size, modified_time, resource_identity)
+            self._add_local_hash_result(base_url, url, item.nucleus_hash, item.size, modified_time, None)
             return
 
         if self.hash_cache is not None:
@@ -715,7 +771,7 @@ class CatalogBuilder:
             if cached_hash is not None:
                 self.progress_stats.hash_cache_hits += 1
                 self.progress_stats.num_bytes_hash_cache_hits += item.size
-                self._add_local_hash_result(base_url, url, cached_hash, item.size, modified_time, resource_identity)
+                self._add_local_hash_result(base_url, url, cached_hash, item.size, modified_time, None)
                 return
 
         file_in_cache: bool = False
@@ -732,15 +788,13 @@ class CatalogBuilder:
                         url,
                         cache_file,
                         modified_time,
-                        resource_identity,
+                        None,
                     )
                 )
         if not file_in_cache:
             if self.verbose and not is_file_url(url.absolute_url):
                 logger.info(f"Downloading item {url.absolute_url} to calculate local hash...")
-            task_node.create_task(
-                self._download_item(task_node, base_url, url, modified_time, item.size, resource_identity), name="Download item"
-            )
+            task_node.create_task(self._download_item(task_node, base_url, url, modified_time, item.size, None), name="Download item")
 
     async def _download_item(
         self,
@@ -749,12 +803,23 @@ class CatalogBuilder:
         url: AbsoluteUrl,
         modified_time: datetime,
         size: int,
-        resource_identity: Optional[str],
+        resource_identity: Optional[Union[str, ResourceIdentity]],
     ) -> None:
-        # If the client cache is not available, client-library will revert to its unmanaged local folder to store the downloaded files indefinitely.
-        # We want to avoid that, so only download the file if the cache is available.
-        hub_runs = wrapp_can_be_cached(url.absolute_url)
-        if hub_runs:
+        serialized_identity = resource_identity.to_string() if isinstance(resource_identity, ResourceIdentity) else resource_identity
+        # Additional hash algorithms still require bytes; this cache stores only
+        # the WRAPP hash. An identity hit never consults mutable-address entries.
+        if serialized_identity is not None and self.hash_cache is not None and not self._content_hashes:
+            cached_hash = self.hash_cache.get_identity(SerializedResourceIdentity(serialized_identity), size)
+            if cached_hash is not None:
+                self.progress_stats.hash_cache_hits += 1
+                self.progress_stats.num_bytes_hash_cache_hits += size
+                self._add_local_hash_result(base_url, url, cached_hash, size, modified_time, serialized_identity)
+                return
+        # Use a managed address cache only when there is no exact resource
+        # identity. Identity materialization is backend-owned and streams into
+        # WRAPP's temporary file below.
+        use_managed_address_cache = resource_identity is None and wrapp_can_be_cached(url.absolute_url)
+        if use_managed_address_cache:
             cache_file = await self._download_file(url)
             self.progress_stats.files_downloaded += 1
             self.progress_stats.num_bytes_downloaded += size
@@ -772,21 +837,32 @@ class CatalogBuilder:
         else:
             # Download to a temp file to avoid holding large files in memory
             async with TempFileManager.me().create_temp_file() as tmp:
-                result = await Router.me().storage_for_read(url.absolute_url).download_file(url.absolute_url, tmp.url, overwrite=True)
+                if serialized_identity is None:
+                    storage = Router.me().storage_for_read(url.absolute_url)
+                    result = await storage.download_file(url.absolute_url, tmp.url, overwrite=True)
+                else:
+                    result = await wrapp_download_resource_identity(
+                        SerializedResourceIdentity(serialized_identity),
+                        tmp.url,
+                        overwrite=True,
+                    )
                 if result != Result.OK:
-                    raise FailedCommand(f"Failed to download file '{url.absolute_url}' for hash calculation: {result}")
+                    source_description = url.absolute_url if serialized_identity is None else repr(resource_identity)
+                    raise FailedCommand(f"Failed to read '{source_description}' for hash calculation: {result}")
                 tmp.write_completed()
                 self.progress_stats.files_downloaded += 1
                 self.progress_stats.num_bytes_downloaded += size
                 Stats.get().increment(StatType.READ_FILE)
                 local_hash, filesize = self._compute_hash(tmp.path)
+                if serialized_identity is not None and filesize != size:
+                    raise FailedCommand(f"Resource identity size differs from the captured metadata for {url.absolute_url}")
                 self._add_local_hash_result(
                     base_url=base_url,
                     url=url,
                     local_hash=local_hash,
                     filesize=filesize,
                     modified_time=modified_time,
-                    resource_identity=resource_identity,
+                    resource_identity=serialized_identity,
                     extra_hashes=self._compute_extra_hashes(tmp.path),
                 )
 

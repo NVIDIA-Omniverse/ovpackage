@@ -1,198 +1,83 @@
-# NVIDIA ovpackage
+# ovpackage — versioned asset packages and dependency tracking for USD content pipelines
 
-`ovpackage` is a command-line tool and async Python API for reproducible asset packaging and publishing. It snapshots a directory of assets into an immutable, named **package version**, publishes that version to a **repository** on local disk, Amazon S3, Azure Blob, Google Cloud Storage, an Omniverse Storage API endpoint, installs a chosen version into a workspace, and later proves exactly what was installed — using content-hash **catalogs**, gitignore-style `.wrappignore` rules, `.wrapp` dependency metadata, and commands for diffing, mirroring, patching, freezing, and offline export/import. It is built for asset-heavy build pipelines, shared content libraries, CI/CD promotion, offline delivery, and agents that need deterministic, verifiable package operations across storage backends.
+`ovpackage` is a command-line tool and async Python API that turns a directory of assets into an immutable, named package version, publishes it to a repository, and installs exact versions into project workspaces while recording what each project depends on. It runs standalone, with no Omniverse Kit installation, against local disk, Amazon S3, Azure Blob, Google Cloud Storage, Hugging Face, and Storage API repositories.
 
-> [!NOTE]
-> ovpackage is **pre-release** software and is not enterprise-supported. This project is currently not accepting contributions.
+> **`pip install "ovpackage[local]"`** · Publish asset versions once, install the same content wherever a project, simulation, or CI job needs it, and move to a chosen version without editing USD references. Built on content-hash catalogs, `.wrapp` dependency metadata, and storage adapters for local and cloud repositories.
+>
+> *Pre-release (version 0.3.0); not enterprise-supported. Commands, APIs, and metadata formats may change before 1.0.*
 
-## Layout
-
-| Path | Purpose |
-|---|---|
-| [`src/ovpackage/`](src/ovpackage/) | Public `ovpackage` import namespace and CLI entry point; lazily aliases onto the `wrapp` implementation |
-| [`src/wrapp/`](src/wrapp/) | Core implementation: CLI app, async package/repo engine, data structures, and storage backends |
-| [`src/wrapp/commands/`](src/wrapp/commands/) | One module per CLI command (create, install, mirror, export, diff, freeze, …) |
-| [`src/wrapp/utils/storage_impls/`](src/wrapp/utils/storage_impls/) | Backend implementations: local, S3, Azure, GCS, and Omniverse Storage API |
-| [`src/nvidia/omniverse/storage/`](src/nvidia/omniverse/storage/) | Generated gRPC/protobuf stubs for the Omniverse Storage API backend |
-| [`docs/public/`](docs/public/) | User docs: manual, tutorial, CLI and per-command reference, storage and API guides |
-| [`.agents/skills/`](.agents/skills/) | ovpackage specific skills |
-| [`tests/`](tests/) | Pytest suite and BDD features; runnable examples of public behavior |
-
-## Start Here
-
-| Goal | Entry |
-|---|---|
-| Install and run the CLI | This README, [Install from source](#install-from-source) |
-| Learn the concepts and workflows | [`docs/public/manual.md`](docs/public/manual.md), [`docs/public/tutorial.md`](docs/public/tutorial.md) |
-| Look up a command | [`docs/public/commands/index.md`](docs/public/commands/index.md), or `ovpackage COMMAND --help` |
-| Configure a storage backend | [`docs/public/storage.md`](docs/public/storage.md), [Storage Backends](#storage-backends) below |
-| Use the Python API | [`docs/public/api.md`](docs/public/api.md), [`src/wrapp_examples/example_simple.py`](src/wrapp_examples/example_simple.py), [`src/wrapp_examples/example_complex.py`](src/wrapp_examples/example_complex.py) |
-| Drive ovpackage CLI/API from an agent | [`.agents/skills/ovpackage-cli/`](.agents/skills/ovpackage-cli/), [`.agents/skills/ovpackage-api/`](.agents/skills/ovpackage-api/) |
-
-## Install from source
+With Python 3.11 or newer in an activated virtual environment:
 
 ```bash
-python -m pip install -e .[local]
-```
-
-Optional backends are available through extras: `s3`, `azure`, `gcs`, and `storage-api`.
-
-```bash
-python -m pip install -e .[local,s3,azure,gcs,storage-api]
-```
-
-Check the installed command:
-
-```bash
-ovpackage --help
-ovpackage version
-```
-
-## Core Concepts
-
-- **Package**: A named collection of files.
-- **Version**: An immutable snapshot of a package. Use a new version string for every changed snapshot.
-- **Repository**: A storage location that contains a `.packages` directory with package versions.
-- **Install location**: A workspace path where a package version is materialized for a project.
-- **Package metadata file**: A JSON file named `.<package>.wrapp` that records package metadata and dependencies. The `.wrapp` extension is part of the package format.
-- **Ignore file**: `.wrappignore` uses gitignore-style rules and is picked up by create, catalog, and freeze workflows.
-- **Catalog**: A JSON description of a directory tree, including paths, sizes, and hashes.
-
-## Local Quickstart
-
-Create and install a package using only local files:
-
-```bash
-mkdir -p demo/source demo/repo demo/workspace
-printf "hello assets\n" > demo/source/readme.txt
-
+mkdir -p demo/source && printf "hello assets\n" > demo/source/readme.txt
 ovpackage create sample_assets 1.0.0 demo/source --repo demo/repo --progress-report off
-ovpackage list-repo demo/repo
 ovpackage install sample_assets 1.0.0 demo/workspace/sample_assets --repo demo/repo --progress-report off
+ovpackage status demo/workspace/sample_assets/.sample_assets.wrapp --progress-report off
 ```
 
-Track installed package dependencies in a project-level metadata file:
+The installed copy reports `all clean`. Continue with [getting started](docs/getting-started.md) for source installs, backend extras, dependency tracking, and the Python API.
 
-```bash
-mkdir -p demo/project
-ovpackage new demo_project 1.0.0 demo/project
-ovpackage install sample_assets 1.0.0 demo/project/assets \
-    --repo demo/repo \
-    --package demo/project/.demo_project.wrapp \
-    --progress-report off
-ovpackage status demo/project/.demo_project.wrapp --progress-report off
-```
+---
 
-## Common Workflows
+## 1. What is ovpackage?
 
-### Publish a new immutable version
+**ovpackage** is the versioned packaging and distribution component of Omniverse Content Services, exposing a CLI and an asynchronous Python API. It snapshots a source directory into a **package version** stored under a repository's `.packages` folder, installs that version at a version-free path inside a workspace, and records each installed package's name, version, location, and source repository in a `.<package>.wrapp` file. Projects can then report local changes, update or downgrade to a specified version, and reproduce the exact content set they were built with.
 
-```bash
-ovpackage create textures 2026.05.11 ./textures --repo s3://asset-packages --progress-report off
-ovpackage list-repo s3://asset-packages
-```
+ovpackage preserves your directory layout and file contents. It does not discover or rewrite USD asset paths: keep references relative within each package, and record cross-package relationships as package dependencies. See [where ovpackage fits](docs/overview/content_services.md) for its relationship to the other Omniverse Content Services repositories.
 
-### Install a specific version
+---
 
-```bash
-ovpackage install textures 2026.05.11 ./project/assets/textures \
-    --repo s3://asset-packages \
-    --progress-report off
-```
+## 2. What functionalities are available, and who are the target users?
 
-### Compare two directory snapshots
+**What you can do with it:**
 
-```bash
-ovpackage catalog ./assets assets-before.json --progress-report off
-ovpackage catalog ./assets assets-after.json --progress-report off
-ovpackage diff assets-before.json assets-after.json --show
-```
+- **Publish immutable versions** — `create` stores a content-hashed snapshot of a directory; publishing an existing name and version fails instead of overwriting it.
+- **Install and update to exact versions** — `install` places a version at a stable path, so USD references don't change; installing another version updates or downgrades it in place and refuses to overwrite local edits.
+- **Track package dependencies** — `new` and `install --package` record dependencies in `.wrapp` metadata; `status`, `installed-package-list`, and `traceback` report changes, contents, and provenance.
+- **Lock data sets** — metapackages pin a set of package versions, `check --recursive` verifies stored content against recorded hashes, and `build-manifest` writes a storage-core manifest for Storage API repositories.
+- **Promote and distribute** — `mirror --recursive` copies a version and its dependencies between repositories; `export` and `import` move packages through tar archives; `publish-redirect` serves package metadata from a CDN.
+- **Compare and reconcile content** — catalogs, `diff`, `create-patch`, and `apply-patch` describe and merge changes between directory snapshots.
+- **Automate from Python or an agent** — call every command as an `async` function within `ovpackage.ContextManager`, or use the shipped agent skills.
 
-### Mirror packages between repositories
+**Who benefits:**
 
-```bash
-ovpackage mirror textures 2026.05.11 \
-    --source-repo s3://dev-packages \
-    --destination-repo s3://release-packages \
-    --recursive \
-    --progress-report off
-```
+- **USD content pipeline and asset library teams** — publish shared assets as versions and give every project a recorded, updatable dependency set.
+- **Simulation, synthetic data, and digital twin engineers** — pin the exact content behind a scene, training run, or evaluation, and verify it before use.
+- **Build and release engineers** — promote packages from development to release repositories, gate CI on status and integrity checks, and deliver offline.
+- **Python tool developers and AI coding agents** — embed package operations in pipeline tools, or drive them through the [skills](skills/README.md).
 
-### Export and import for offline delivery
+---
 
-```bash
-ovpackage export textures 2026.05.11 --repo s3://release-packages --dedup --progress-report off
-ovpackage import textures.2026.05.11.tar --repo ./offline-repo --progress-report off
-```
+## 3. Documentation and reference links
 
-## Storage Backends
+- **Getting started:** [docs/getting-started.md](docs/getting-started.md) — install, quickstart, verification, and the Python API example.
+- **Concepts and workflows:** [manual](docs/public/manual.md) · [tutorial](docs/public/tutorial.md)
+- **Command reference:** [CLI guide](docs/public/cli.md) · [commands](docs/public/commands/index.md) · `ovpackage COMMAND --help`
+- **Python API:** [API guide](docs/public/api.md)
+- **Storage backends and authentication:** [storage guide](docs/public/storage.md) · [ignore rules](docs/public/ignore-rules.md)
+- **Agent entry point:** [AGENTS.md](AGENTS.md) · [skills catalog](skills/README.md)
+- **Package and release notes:** <https://pypi.org/project/ovpackage/> · [CHANGELOG.md](CHANGELOG.md)
+- **Source and issues:** <https://github.com/NVIDIA-Omniverse/ovpackage> · [releases](https://github.com/NVIDIA-Omniverse/ovpackage/releases) · [issues](https://github.com/NVIDIA-Omniverse/ovpackage/issues)
 
-Install only the extras you need:
+---
 
-| Backend | URL examples | Install extra |
-|---------|--------------|---------------|
-| Local filesystem | `./repo`, `/mnt/packages`, `file:///mnt/packages` | `local` |
-| Amazon S3 and compatible endpoints | `s3://bucket/path` | `s3` |
-| Azure Blob Storage | `https://account.blob.core.windows.net/container/path` | `azure` |
-| Google Cloud Storage | `gs://bucket/path` | `gcs` |
-| Storage API | Service-specific URLs | `storage-api` |
+## 4. System requirements
 
-`omniverse://` Nucleus URLs are also supported when the required client libraries are available in the environment.
+- **Python:** `>=3.11`, as declared in [pyproject.toml](pyproject.toml).
+- **Storage extras:** install only the backends you use: `local`, `s3`, `azure`, `gcs`, `huggingface` (read-only), and `storage-api`, or `all`. `ovpackage version` lists the backends available in the current environment.
+- **Remote repositories:** a reachable endpoint and credentials for each repository, passed with `--auth` or `OVPACKAGE_AUTH`. `omniverse://` Nucleus URLs additionally require the Omniverse client libraries in the environment.
+- **Development tests:** the `test` extra and `make`; emulator-backed S3, Azure, and GCS tests also require Docker Compose.
 
-Authentication can be passed with `--auth` or environment variables. Prefer `OVPACKAGE_*` variables in new automation, for example `OVPACKAGE_REPO`, `OVPACKAGE_AUTH`, `OVPACKAGE_LOG_FILE`, and `OVPACKAGE_PROGRESS_REPORT`.
+---
 
-## Python API
+## 5. Licensing
 
-The public import namespace is `ovpackage`:
+- **Source code and agent skills:** [Apache License, Version 2.0](LICENSE).
+- **Third-party components:** remain under their own licenses; see [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+- **Contributions and security:** this project is not currently accepting contributions; see [CONTRIBUTING.md](CONTRIBUTING.md). Report vulnerabilities as described in [SECURITY.md](SECURITY.md).
 
-```python
-import ovpackage
+> **Note:** run one write operation at a time against the same repository or package path; overlapping writes have undefined results.
 
-print(ovpackage.__version__)
-```
+---
 
-Most command implementations are asynchronous. A typical application initializes storage backends through `ContextManager` and then calls package operations with that scheduler. See tests such as `tests/test_api.py` and `tests/test_ovpackage_aliases.py` for executable API examples.
-
-## Agent Usage
-
-This repository includes an agent skill at `.agents/skills/ovpackage-cli/`. Agents that support repository-local skills can use it directly. Otherwise, copy or symlink that directory into the agent's skill search path.
-
-The skill contains a command reference, storage/auth notes, and multi-step recipes. It is meant to compensate for the intentionally minimal initial documentation set.
-
-## Package Format Notes
-
-- Published package versions are intended to be immutable. Publish a new version instead of changing files under an existing package version.
-- Package metadata filenames use `.<package>.wrapp`; keep that filename format.
-- Ignore rules use `.wrappignore`; keep that filename format.
-- Object stores do not preserve empty folders. Add placeholder files if empty folders are meaningful to your pipeline.
-- Use `--progress-report off` in automation and agent runs to avoid interactive progress output.
-
-## Tests
-
-Install test dependencies:
-
-```bash
-python -m pip install -e .[local,test]
-```
-
-Run the default public test set:
-
-```bash
-make test
-```
-
-Run emulator-backed backend tests:
-
-```bash
-make start-test-services
-make test-emulators
-make stop-test-services
-```
-
-The GitHub workflow in `.github/workflows/tests.yml` runs both the default public tests and emulator-backed S3, Azure, and GCS tests.
-
-## Contributing
-
-This project is currently not accepting contributions.
-
-Generated version: `0.2.1`.
+*ovpackage · Omniverse Content Services · Copyright (c) 2026 NVIDIA Corporation.*

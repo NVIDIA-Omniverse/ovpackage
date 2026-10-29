@@ -46,7 +46,7 @@ from wrapp.datastructures.command_context import (
     CommandParameters,
     SchedulerContext,
 )
-from wrapp.datastructures.previous_versions.patch_old_versions import PatchOpList_V1
+from wrapp.datastructures.previous_versions.patch_old_versions import PatchOpList_V2_0
 from wrapp.datastructures.wrapp_file_model import (
     WRAPPFileModel,
     WRAPPModelVersion,
@@ -55,11 +55,17 @@ from wrapp.tagging_service import tagging
 from wrapp.utils.api_marker import wrapp_public_api
 from wrapp.utils.storage import (
     Result,
-    wrapp_copy_item_optimized,
+    wrapp_copy_address_optimized,
+    wrapp_copy_resource_identity_optimized,
     wrapp_delete_item,
+)
+from wrapp.utils.storage_interface import (
+    ResourceAddress,
+    SerializedResourceIdentity,
 )
 from wrapp.utils.utils import (
     StorageOperationError,
+    escape_legacy_storage_address,
     get_path_from_url,
 )
 
@@ -153,6 +159,7 @@ class PatchOpCopy(PatchOpBase):
     src: str  #: The source file.
     dst: str  #: The target file path.
     hash: Optional[str] = None  #: If available, the hash of the source file for optimization
+    resource_identity_v2: Optional[str] = Field(default=None, min_length=1)  #: Read token for the exact source bytes.
     item_type: ItemType  #: Deprecated - WRAPP only copies files which implicitly creates folders.
 
     def _description(self) -> str:
@@ -166,7 +173,27 @@ class PatchOpCopy(PatchOpBase):
         else:
             logger.info(repr(self))
             try:
-                result = await wrapp_copy_item_optimized(context, self.src, self.dst, self.hash, overwrite=True, force_upload=False)
+                if self.resource_identity_v2 is None:
+                    # Legacy patches and backends without durable identities
+                    # retain the address/hash copy path.
+                    result = await wrapp_copy_address_optimized(
+                        context,
+                        ResourceAddress(self.src),
+                        ResourceAddress(self.dst),
+                        self.hash,
+                        overwrite=True,
+                        force_upload=False,
+                    )
+                else:
+                    result = await wrapp_copy_resource_identity_optimized(
+                        context,
+                        SerializedResourceIdentity(self.resource_identity_v2),
+                        ResourceAddress(self.dst),
+                        self.hash,
+                        overwrite=True,
+                        force_upload=False,
+                        source_description=self.src,
+                    )
                 if result != Result.OK:
                     patch.add_error_msg(self, f"Error: could not copy {self.src} to {self.dst}: {result}")
             except StorageOperationError as e:
@@ -309,16 +336,23 @@ PatchOpUnion = Annotated[
 
 
 class PatchOpList(WRAPPFileModel):
-    format_version: WRAPPModelVersion = WRAPPModelVersion(version_string="2.0")
+    format_version: WRAPPModelVersion = WRAPPModelVersion(version_string="3.0")
     operations: list[PatchOpUnion]
 
     @classmethod
-    def migrate_major_version(cls, read_data: PatchOpList_V1) -> "PatchOpList":
+    def migrate_major_version(cls, read_data: PatchOpList_V2_0) -> "PatchOpList":
         # Without format_version: original format.
         # v1: add_tag operations are guaranteed to come before delete operations, but after all other operations.
         # v2: introduction of WRAPPFileModel/WRAPPModelVersion
+        # v3: preserve resource_identity_v2 on copy operations. This is a major
+        #     version because old nested PatchOpCopy models cannot preserve an
+        #     unknown field when a newer patch is loaded and saved.
         data_dict = read_data.model_dump()
         data_dict.pop("format_version")  # we do not want to override format_version
+        for operation in data_dict["operations"]:
+            for key in ("src", "dst", "url"):
+                if key in operation:
+                    operation[key] = escape_legacy_storage_address(operation[key])
         return PatchOpList(**data_dict)
 
 

@@ -30,7 +30,12 @@ import sys
 import tempfile
 import threading
 import uuid
-from unittest.mock import AsyncMock
+from datetime import datetime
+from types import SimpleNamespace
+from unittest.mock import (
+    AsyncMock,
+    Mock,
+)
 
 import pytest
 
@@ -58,7 +63,7 @@ from wrapp.utils.router import g_azure_enabled
 from wrapp.utils.storage import (
     Router,
     StorageType,
-    wrapp_copy,
+    wrapp_copy_address,
     wrapp_delete_item,
     wrapp_initialize,
     wrapp_list_directory,
@@ -75,6 +80,7 @@ from wrapp.utils.utils import StorageMissingDependenciesError
 try:
     # isort: off
     from wrapp.utils.storage_impls.azure_blob_storage import (
+        AzureBlobListEntry,
         AzureBlobClientWrapper,
         AzureBlobStorage,
         WRAPP_AZURE_DOWNLOAD_MAX_CONCURRENCY,
@@ -85,9 +91,12 @@ try:
 
     # Keep all direct imports from azure below the import of azure_blob_storage, to make sure we only need to capture
     # the exception StorageMissingDependenciesError, and not direct ImportError.
+    from azure.core import MatchConditions
     from azure.core.exceptions import (
+        ResourceModifiedError,
         ResourceExistsError,
         ResourceNotFoundError,
+        ResourceNotModifiedError,
     )
 
     # isort: on
@@ -186,6 +195,399 @@ async def test_azure_transfer_concurrency_is_forwarded_to_upload_and_download():
     assert content == b"content"
     fake_blob_client.download_blob.assert_awaited()
     assert fake_blob_client.download_blob.await_args.kwargs["max_concurrency"] == WRAPP_AZURE_DOWNLOAD_MAX_CONCURRENCY
+
+
+@pytest.mark.asyncio
+async def test_azure_make_resource_identity_keeps_source_and_uses_blob_version_OMPE_58312():
+    storage = AzureBlobStorage("0.0.0-test", False, ThrottlingParameters())
+    props = SimpleNamespace(
+        size=7,
+        last_modified=datetime.now(),
+        etag='"abc123"',
+        version_id="version-1",
+        metadata={"nv_omniverse_nucleus_hash": "sha-256-flat;1048576;hash"},
+    )
+    blob_client = AsyncMock()
+    blob_client.get_blob_properties.return_value = props
+
+    class _FakeContainerClient:
+        def get_blob_client(self, blob_name, version_id=None):
+            assert blob_name == "file.txt"
+            assert version_id is None
+            return blob_client
+
+    class _FakeAsyncClient:
+        def get_container_client(self, container_name):
+            assert container_name == "container"
+            return _FakeContainerClient()
+
+    class _FakeWrapper:
+        async def get_async_instance(self):
+            return _FakeAsyncClient()
+
+    storage._azure_client = _FakeWrapper()
+    listed_item = AzureBlobListEntry.file_from_blob_properties("file.txt", props)
+    source_url = "azure://account/container/file.txt"
+
+    absolute_url, relative_url, identity = await storage.make_resource_identity(source_url, listed_item, "file.txt")
+
+    assert absolute_url == source_url
+    assert relative_url == "file.txt"
+    assert identity.to_string() == "azure://account/container/file.txt?versionid=version-1&etag=%22abc123%22"
+    assert listed_item.nucleus_hash == "sha-256-flat;1048576;hash"
+    blob_client.get_blob_properties.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("version_id", [None, "version-1"])
+async def test_azure_identity_uses_captured_metadata_without_stat(version_id):
+    storage = AzureBlobStorage("0.0.0-test", False, ThrottlingParameters())
+    storage.stat = AsyncMock(side_effect=AssertionError("Captured identity metadata must not be refreshed"))
+    entry = AzureBlobListEntry("file.txt", etag="abc123", is_folder=False, size=7, last_modified=datetime.now(), version_id=version_id)
+    _, _, identity = await storage.make_resource_identity("azure://account/container/file.txt", entry, "file.txt")
+    expected = "azure://account/container/file.txt?" + (f"versionid={version_id}&" if version_id else "") + "etag=%22abc123%22"
+    assert identity.to_string() == expected
+    storage.stat.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_azure_identity_fetches_missing_validator():
+    storage = AzureBlobStorage("0.0.0-test", False, ThrottlingParameters())
+    captured = AzureBlobListEntry("file.txt", etag="abc123", is_folder=False, size=7, last_modified=datetime.now())
+    storage.stat = AsyncMock(return_value=(Result.OK, captured))
+    incomplete = AzureBlobListEntry("file.txt", etag="", is_folder=False, size=7, last_modified=captured.modified_time)
+    _, _, identity = await storage.make_resource_identity("azure://account/container/file.txt", incomplete, "file.txt")
+    assert identity.to_string() == "azure://account/container/file.txt?etag=%22abc123%22"
+    storage.stat.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_azure_directory_listing_requests_hash_metadata():
+    props = SimpleNamespace(
+        name="folder/file.txt",
+        size=7,
+        last_modified=datetime.now(),
+        etag='"abc123"',
+        version_id="version-1",
+        metadata={"nv_omniverse_nucleus_hash": "hash"},
+    )
+
+    async def blobs():
+        yield props
+
+    container = SimpleNamespace(get_container_properties=AsyncMock(), walk_blobs=Mock(return_value=blobs()))
+    client = SimpleNamespace(get_container_client=Mock(return_value=container))
+    storage = AzureBlobStorage("0.0.0-test", False, ThrottlingParameters())
+    storage._azure_client = SimpleNamespace(get_async_instance=AsyncMock(return_value=client))
+    entries = [entry async for entry in storage.list_directory("azure://account/container/folder/")]
+    container.walk_blobs.assert_called_once_with(name_starts_with="folder/", delimiter="/", include=["metadata"])
+    assert len(entries) == 1
+    assert entries[0].nucleus_hash == "hash"
+    assert entries[0].azure_version_id == "version-1"
+
+
+@pytest.mark.asyncio
+async def test_azure_read_resource_identity_honors_version_and_etag_OMPE_58312():
+    storage = AzureBlobStorage("0.0.0-test", False, ThrottlingParameters())
+    download_stream = AsyncMock()
+    download_stream.readall.return_value = b"identity bytes"
+    blob_client = AsyncMock()
+    blob_client.download_blob.return_value = download_stream
+
+    class _FakeAsyncClient:
+        def get_blob_client(self, **kwargs):
+            self.get_blob_client_kwargs = kwargs
+            return blob_client
+
+    fake_client = _FakeAsyncClient()
+
+    class _FakeWrapper:
+        async def get_async_instance(self):
+            return fake_client
+
+    storage._azure_client = _FakeWrapper()
+
+    result, content = await storage.read_resource_identity("azure://account/container/file.txt?versionid=version-1&etag=%22abc123%22")
+
+    assert result == Result.OK
+    assert content == b"identity bytes"
+    assert fake_client.get_blob_client_kwargs == {
+        "container": "container",
+        "blob": "file.txt",
+        "version_id": "version-1",
+    }
+    blob_client.download_blob.assert_awaited_once_with(
+        max_concurrency=WRAPP_AZURE_DOWNLOAD_MAX_CONCURRENCY,
+        etag='"abc123"',
+        match_condition=MatchConditions.IfNotModified,
+    )
+
+
+@pytest.mark.asyncio
+async def test_azure_read_resource_identity_mismatch_is_not_found_OMPE_58312():
+    storage = AzureBlobStorage("0.0.0-test", False, ThrottlingParameters())
+    blob_client = AsyncMock()
+    blob_client.download_blob.side_effect = ResourceModifiedError("etag mismatch")
+
+    class _FakeAsyncClient:
+        def get_blob_client(self, **_kwargs):
+            return blob_client
+
+    class _FakeWrapper:
+        async def get_async_instance(self):
+            return _FakeAsyncClient()
+
+    storage._azure_client = _FakeWrapper()
+
+    result, content = await storage.read_resource_identity("azure://account/container/file.txt?etag=%22abc123%22")
+
+    assert result == Result.ERROR_NOT_FOUND
+    assert content == b""
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("query", ["versionid=", "versionId=", "etag=", "versionid=version-1&etag="])
+async def test_azure_blank_resource_identity_parameter_is_not_found_OMPE_58312(query, tmp_path):
+    storage = AzureBlobStorage("0.0.0-test", False, ThrottlingParameters())
+    identity = f"azure://account/container/file.txt?{query}"
+
+    stat_result, item = await storage.stat(identity)
+    read_result, content = await storage.read_resource_identity(identity)
+    download_result = await storage.download_file(identity, path_to_file_url(str(tmp_path / "out.txt")), overwrite=True)
+    copy_result = await storage.copy_resource_identity(identity, "azure://account/destination/file.txt")
+
+    assert stat_result == Result.ERROR_NOT_FOUND
+    assert item is None
+    assert read_result == Result.ERROR_NOT_FOUND
+    assert content == b""
+    assert download_result == Result.ERROR_NOT_FOUND
+    assert copy_result == Result.ERROR_NOT_FOUND
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("exception_type", [ResourceModifiedError, ResourceNotModifiedError])
+async def test_azure_stat_resource_identity_mismatch_is_not_found_OMPE_58312(exception_type):
+    storage = AzureBlobStorage("0.0.0-test", False, ThrottlingParameters())
+    blob_client = AsyncMock()
+    blob_client.get_blob_properties.side_effect = exception_type("etag mismatch")
+
+    class _FakeContainerClient:
+        def get_blob_client(self, blob_name, version_id=None):
+            assert blob_name == "file.txt"
+            assert version_id is None
+            return blob_client
+
+    class _FakeAsyncClient:
+        def get_container_client(self, container_name):
+            assert container_name == "container"
+            return _FakeContainerClient()
+
+    class _FakeWrapper:
+        async def get_async_instance(self):
+            return _FakeAsyncClient()
+
+    storage._azure_client = _FakeWrapper()
+
+    result, item = await storage.stat("azure://account/container/file.txt?etag=%22abc123%22")
+
+    assert result == Result.ERROR_NOT_FOUND
+    assert item is None
+    blob_client.get_blob_properties.assert_awaited_once_with(etag='"abc123"', match_condition=MatchConditions.IfNotModified)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("exception_type", [ResourceModifiedError, ResourceNotModifiedError])
+@pytest.mark.parametrize("identity_download", [False, True, "materialize"])
+async def test_azure_download_resource_identity_mismatch_is_not_found_without_destination_OMPE_58312(
+    exception_type, tmp_path, identity_download
+):
+    storage = AzureBlobStorage("0.0.0-test", False, ThrottlingParameters())
+    blob_client = AsyncMock()
+    blob_client.download_blob.side_effect = exception_type("etag mismatch")
+
+    class _FakeAsyncClient:
+        def get_blob_client(self, **kwargs):
+            assert kwargs == {
+                "container": "container",
+                "blob": "file.txt",
+                "version_id": None,
+            }
+            return blob_client
+
+    class _FakeWrapper:
+        async def get_async_instance(self):
+            return _FakeAsyncClient()
+
+    storage._azure_client = _FakeWrapper()
+    destination = tmp_path / "downloaded.txt"
+
+    if identity_download == "materialize":
+        result, local_file = await storage.materialize(
+            "azure://account/container/current.txt",
+            str(destination),
+            resource_identity="azure://account/container/file.txt?etag=%22abc123%22",
+            expected_hash="catalog hash",
+        )
+        assert local_file is None
+    else:
+        download = storage.download_resource_identity if identity_download else storage.download_file
+        result = await download(
+            "azure://account/container/file.txt?etag=%22abc123%22",
+            path_to_file_url(str(destination)),
+            overwrite=True,
+            **({"expected_hash": "catalog hash"} if identity_download else {}),
+        )
+
+    assert result == Result.ERROR_NOT_FOUND
+    assert not destination.exists()
+    blob_client.download_blob.assert_awaited_once_with(
+        max_concurrency=WRAPP_AZURE_DOWNLOAD_MAX_CONCURRENCY,
+        etag='"abc123"',
+        match_condition=MatchConditions.IfNotModified,
+    )
+
+
+@pytest.mark.asyncio
+async def test_azure_copy_resource_identity_honors_version_and_etag_OMPE_58312():
+    storage = AzureBlobStorage("0.0.0-test", False, ThrottlingParameters())
+    src_blob_client = AsyncMock()
+    src_blob_client.url = "https://account.blob.core.windows.net/source/source.txt?versionid=version-1"
+    src_blob_client.get_blob_properties.return_value = SimpleNamespace(metadata={})
+    dst_blob_client = AsyncMock()
+    dst_blob_client.get_blob_properties.side_effect = ResourceNotFoundError("not found")
+    dst_blob_client.start_copy_from_url.return_value = {"copy_status": "success"}
+
+    class _FakeDestinationContainerClient:
+        get_container_properties = AsyncMock(return_value=None)
+
+        def get_blob_client(self, blob_name):
+            assert blob_name == "destination.txt"
+            return dst_blob_client
+
+    class _FakeAsyncClient:
+        def get_blob_client(self, **kwargs):
+            self.source_get_blob_client_kwargs = kwargs
+            return src_blob_client
+
+        def get_container_client(self, container_name):
+            assert container_name == "destination"
+            return _FakeDestinationContainerClient()
+
+    fake_client = _FakeAsyncClient()
+
+    class _FakeWrapper:
+        async def get_async_instance(self):
+            return fake_client
+
+    storage._azure_client = _FakeWrapper()
+
+    result = await storage.copy_resource_identity(
+        "azure://account/source/source.txt?versionid=version-1&etag=%22abc123%22",
+        "azure://account/destination/destination.txt",
+        overwrite=False,
+    )
+
+    assert result == Result.OK
+    assert fake_client.source_get_blob_client_kwargs == {
+        "container": "source",
+        "blob": "source.txt",
+        "version_id": "version-1",
+    }
+    src_blob_client.get_blob_properties.assert_awaited_once_with(
+        etag='"abc123"',
+        match_condition=MatchConditions.IfNotModified,
+    )
+    dst_blob_client.start_copy_from_url.assert_awaited_once_with(
+        "https://account.blob.core.windows.net/source/source.txt?versionid=version-1",
+        metadata={},
+        source_etag='"abc123"',
+        source_match_condition=MatchConditions.IfNotModified,
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("exception_type", [ResourceModifiedError, ResourceNotModifiedError])
+async def test_azure_copy_resource_identity_property_mismatch_is_not_found_without_copy_OMPE_58312(exception_type):
+    storage = AzureBlobStorage("0.0.0-test", False, ThrottlingParameters())
+    src_blob_client = AsyncMock()
+    src_blob_client.get_blob_properties.side_effect = exception_type("etag mismatch")
+    dst_blob_client = AsyncMock()
+
+    class _FakeDestinationContainerClient:
+        get_container_properties = AsyncMock(return_value=None)
+
+        def get_blob_client(self, _blob_name):
+            return dst_blob_client
+
+    class _FakeAsyncClient:
+        def get_blob_client(self, **_kwargs):
+            return src_blob_client
+
+        def get_container_client(self, _container_name):
+            return _FakeDestinationContainerClient()
+
+    class _FakeWrapper:
+        async def get_async_instance(self):
+            return _FakeAsyncClient()
+
+    storage._azure_client = _FakeWrapper()
+
+    result = await storage.copy_resource_identity(
+        "azure://account/source/source.txt?etag=%22abc123%22",
+        "azure://account/destination/destination.txt",
+        overwrite=False,
+    )
+
+    assert result == Result.ERROR_NOT_FOUND
+    src_blob_client.get_blob_properties.assert_awaited_once_with(etag='"abc123"', match_condition=MatchConditions.IfNotModified)
+    dst_blob_client.start_copy_from_url.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("exception_type", [ResourceModifiedError, ResourceNotModifiedError])
+async def test_azure_copy_resource_identity_start_copy_mismatch_is_not_found_OMPE_58312(exception_type):
+    storage = AzureBlobStorage("0.0.0-test", False, ThrottlingParameters())
+    src_blob_client = AsyncMock()
+    src_blob_client.url = "https://account.blob.core.windows.net/source/source.txt"
+    src_blob_client.get_blob_properties.return_value = SimpleNamespace(metadata={})
+    dst_blob_client = AsyncMock()
+    dst_blob_client.get_blob_properties.side_effect = ResourceNotFoundError("not found")
+    dst_blob_client.start_copy_from_url.side_effect = exception_type("etag mismatch")
+
+    class _FakeDestinationContainerClient:
+        get_container_properties = AsyncMock(return_value=None)
+
+        def get_blob_client(self, blob_name):
+            assert blob_name == "destination.txt"
+            return dst_blob_client
+
+    class _FakeAsyncClient:
+        def get_blob_client(self, **_kwargs):
+            return src_blob_client
+
+        def get_container_client(self, container_name):
+            assert container_name == "destination"
+            return _FakeDestinationContainerClient()
+
+    class _FakeWrapper:
+        async def get_async_instance(self):
+            return _FakeAsyncClient()
+
+    storage._azure_client = _FakeWrapper()
+
+    result = await storage.copy_resource_identity(
+        "azure://account/source/source.txt?etag=%22abc123%22",
+        "azure://account/destination/destination.txt",
+        overwrite=False,
+    )
+
+    assert result == Result.ERROR_NOT_FOUND
+    dst_blob_client.start_copy_from_url.assert_awaited_once_with(
+        "https://account.blob.core.windows.net/source/source.txt",
+        metadata={},
+        source_etag='"abc123"',
+        source_match_condition=MatchConditions.IfNotModified,
+    )
 
 
 def _make_azure_storage_with_fake_client(fake_blob_client, throttling) -> AzureBlobStorage:
@@ -500,7 +902,7 @@ async def test_upload_download_delete(test_container):
 
         # Upload the file to Azure Blob Storage
         blob_url = f"{test_container}/test_blob.bl"
-        result = await wrapp_copy(local_file_url, blob_url, overwrite=True)
+        result = await wrapp_copy_address(local_file_url, blob_url, overwrite=True)
         assert result == Result.OK
 
         # Check that the file exists
@@ -517,7 +919,7 @@ async def test_upload_download_delete(test_container):
             download_file_path = download_file.name
 
         download_file_url = path_to_file_url(download_file_path)
-        result = await wrapp_copy(blob_url, download_file_url, overwrite=True)
+        result = await wrapp_copy_address(blob_url, download_file_url, overwrite=True)
         assert result == Result.OK
 
         # Check that the downloaded file has the correct content
@@ -564,7 +966,7 @@ async def test_list_directory(test_container):
 
             # Upload the file to Azure Blob Storage
             blob_url = f"{test_container}/{file_name}"
-            result = await wrapp_copy(local_file_url, blob_url, overwrite=True)
+            result = await wrapp_copy_address(local_file_url, blob_url, overwrite=True)
             assert result == Result.OK
 
             # Clean up the temporary file

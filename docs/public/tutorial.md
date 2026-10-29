@@ -319,8 +319,8 @@ The art director needs a frozen copy of the vegetation assets for a client demo.
 [freeze](commands/freeze.md) to copy everything to an archive location:
 
 ```bash
-ovpackage freeze omniverse://example.com/lib/props/vegetation \
-    omniverse://example.com/archive/vegetation_20230505
+ovpackage freeze omniverse://content.example.com/lib/props/vegetation \
+    omniverse://content.example.com/archive/vegetation_20230505
 ```
 
 For CI/CD pipelines, freeze directly to local disk:

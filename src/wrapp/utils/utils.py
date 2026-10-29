@@ -20,16 +20,18 @@ import re
 import string
 from typing import (
     TYPE_CHECKING,
+    Iterable,
     List,
     Optional,
     overload,
 )
 from urllib.parse import (
+    quote,
+    unquote,
     urlparse,
     urlsplit,
-    urlunparse,
-    urlunsplit,
 )
+from urllib.parse import urlunsplit as _stdlib_urlunsplit
 
 from .api_marker import wrapp_public_api
 from .storage_interface import (
@@ -43,6 +45,28 @@ if TYPE_CHECKING:
     from wrapp.datastructures.patch import Patch
 
 logger = logging.getLogger("omni.wrapp")
+
+
+def urlunsplit(components: Iterable[str]) -> str:
+    """Reconstruct a URL with consistent WRAPP file-URL normalization.
+
+    WRAPP treats ``file:relative/path`` as ``file:///relative/path``. Python's
+    relative-path reconstruction changed between patch releases, so enforce
+    this convention explicitly. Other schemes and schemeless paths retain
+    the standard library's behavior.
+    """
+    scheme, netloc, path, query, fragment = components
+    if scheme == "file" and not netloc and path and not path.startswith("/"):
+        path = "/" + path
+    return _stdlib_urlunsplit((scheme, netloc, path, query, fragment))
+
+
+def urlunparse(components: Iterable[str]) -> str:
+    """Reconstruct a URL including path parameters using WRAPP's URL convention."""
+    scheme, netloc, path, params, query, fragment = components
+    if params:
+        path = path + ";" + params
+    return urlunsplit((scheme, netloc, path, query, fragment))
 
 
 def parse_env_int(env_var: str, default: int, *, minimum: Optional[int] = None) -> int:
@@ -222,6 +246,37 @@ def join_paths(*path_segments) -> str:
     return str(os.path.join(*path_segments).replace(os.sep, "/"))
 
 
+def join_url_path(base: str, *relative_paths: str) -> str:
+    """Append literal paths to an address, escaping URL delimiters exactly once.
+
+    The suffixes are filenames, not relative URL references. Native filesystem
+    paths retain their literal spelling; URL paths use percent encoding.
+    """
+    if is_windows_path(base) or not urlsplit(base).scheme:
+        return join_paths(base, *relative_paths)
+    parsed = urlsplit(base)
+    suffix = quote(join_paths(*relative_paths).replace("\\", "/").lstrip("/"), safe="/")
+    return urlunsplit(parsed._replace(path=parsed.path.rstrip("/") + "/" + suffix))
+
+
+def escape_legacy_storage_address(address: str) -> str:
+    """Convert pre-v6 remote addresses from literal paths to URL paths.
+
+    Nucleus, Storage API, and cloud SDK adapters previously escaped literal
+    percent signs themselves. File URLs and ordinary HTTP URLs already used
+    URL escaping and must retain their spelling. Call only during migration,
+    never on current-format addresses.
+    """
+    parsed = urlsplit(address)
+    hostname = parsed.hostname or ""
+    cloud_http = parsed.scheme in ("http", "https") and (
+        hostname.endswith(".amazonaws.com") or hostname.endswith(".blob.core.windows.net") or hostname == "storage.googleapis.com"
+    )
+    if parsed.scheme in ("omni", "omniverse", "s3", "azure", "gs") or cloud_http:
+        return urlunsplit(parsed._replace(path=quote(parsed.path, safe="/")))
+    return address
+
+
 def format_size(size: Optional[float]) -> str:
     if size is None:
         return "unknown"
@@ -243,7 +298,11 @@ def drop_parameters_from_url(url: str) -> str:
 
 
 def get_path_from_url(url: str) -> str:
-    if is_windows_path(url):
+    """Extract the path without URL-decoding it; preserve native paths literally.
+
+    Use :func:`file_url_to_path` at native filesystem I/O boundaries instead.
+    """
+    if is_windows_path(url) or not urlsplit(url).scheme:
         return url
 
     parsed_url = urlparse(url)
@@ -267,6 +326,26 @@ def get_path_from_url(url: str) -> str:
             path = path[1:]
 
     return path
+
+
+def file_url_to_path(address: str) -> str:
+    """Convert a local address to the native path used for filesystem I/O.
+
+    Native paths retain their literal spelling. File URL paths are decoded
+    exactly once, so ``sp%20ace.txt`` and ``sp%2520ace.txt`` select different
+    files. Use this at storage adapters' local I/O boundaries, not when
+    extracting remote URL paths or reading opaque resource identities. On POSIX,
+    surrogate escapes preserve undecodable filename bytes for filesystem I/O.
+    """
+    if is_windows_path(address):
+        return address
+    scheme = urlsplit(address).scheme
+    if not scheme:
+        return address
+    if scheme != "file":
+        raise ValueError(f"Expected a file URL or native filesystem path: {address}")
+    errors = "surrogateescape" if os.name == "posix" else "replace"
+    return unquote(get_path_from_url(address), errors=errors)
 
 
 def get_base_directory_from_url(url: str) -> str:
@@ -402,11 +481,16 @@ def make_file_url_absolute(url: str) -> str:
         # On Windows, urlparse misinterprets drive letters (e.g. C:\path) as URL schemes,
         # so we must convert the original path directly.
         abs_path = os.path.abspath(url).replace("\\", "/")
-        return "file:///" + abs_path
+        return "file:///" + quote(abs_path, safe="/:")
+    if not urlsplit(url).scheme:
+        abs_path = os.path.abspath(url).replace("\\", "/")
+        if not abs_path.startswith("/"):
+            abs_path = "/" + abs_path
+        return "file://" + quote(abs_path, safe="/:")
     parsed_url = urlparse(url)
     if (parsed_url.scheme and parsed_url.scheme != "file") or parsed_url.netloc or not parsed_url.path:
         return url
-    path = parsed_url.path
+    path = unquote(parsed_url.path)
     # On Windows, file:///C:/path is parsed as path="/C:/path". Strip the leading "/"
     # before os.path.abspath, which otherwise treats it as root-relative on the current
     # drive and duplicates the drive letter (e.g. /C:/foo -> C:\C:\foo).
@@ -416,7 +500,7 @@ def make_file_url_absolute(url: str) -> str:
     abs_path = os.path.abspath(path).replace("\\", "/")
     if not abs_path.startswith("/"):
         abs_path = "/" + abs_path
-    parsed_url = parsed_url._replace(path=abs_path, scheme="file", netloc="")
+    parsed_url = parsed_url._replace(path=quote(abs_path, safe="/:"), scheme="file", netloc="")
     return str(urlunparse(parsed_url))
 
 

@@ -16,7 +16,6 @@
 from typing import Optional
 from urllib.parse import (
     urlparse,
-    urlunparse,
 )
 
 from wrapp.utils.storage import (
@@ -30,6 +29,7 @@ from wrapp.utils.utils import (
     is_relative_path,
     join_paths,
     make_file_url_absolute,
+    urlunparse,
 )
 
 
@@ -60,7 +60,7 @@ class Repository:
         elif fallback_base is not None:
             # If no repo_url is specified, the default repository is the same server as the base url
             source_url = urlparse(fallback_base)
-            self._url = str(urlunparse((source_url.scheme, source_url.netloc, "/", None, None, None)))
+            self._url = str(urlunparse((source_url.scheme, source_url.netloc, "/", "", "", "")))
         else:
             raise Exception("You need to specify either repo_url or fallback_base or both!")
 

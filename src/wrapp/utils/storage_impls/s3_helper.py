@@ -27,11 +27,12 @@ def parse_s3_bucket_key(url: str) -> Tuple[str, str, Optional[str]]:
     Raises ValueError if the URL is not a valid S3 URL."""
     # Local import, so we don't accidentally use urlparse anywhere else.
     from urllib.parse import (
+        unquote,
         urlparse,
     )
 
     parsed = urlparse(url)
-    pure_path = parsed.path.lstrip("/")
+    pure_path = unquote(parsed.path.lstrip("/"))
     if parsed.hostname is None:
         raise ValueError(f"No hostname in URL {url}")
     if parsed.scheme == "s3":

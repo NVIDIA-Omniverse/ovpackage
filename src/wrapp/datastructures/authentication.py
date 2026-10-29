@@ -57,7 +57,7 @@ class AuthManager:
     Example code for setting up credentials for Nucleus and using them::
 
         >>> def download_file_from_staging(url, api_token):
-        >>>     with AuthManager([StorageAuthInfo.nucleus(server_url="omniverse://staging.nvidia.com", username= "$omni-api-token", password_or_token= api_token)], interactive_fallback=False) as auth:
+        >>>     with AuthManager([StorageAuthInfo.nucleus(server_url="omniverse://staging.example.com", username= "$omni-api-token", password_or_token= api_token)], interactive_fallback=False) as auth:
         >>>         result, version, content = wrapp_read_file_content(url)
         >>>     if result == Result.OK:
         >>>         return content

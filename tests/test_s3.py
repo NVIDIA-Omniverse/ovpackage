@@ -24,6 +24,7 @@ import re
 import sys
 from collections import Counter
 from datetime import datetime
+from pathlib import Path
 from unittest.mock import (
     AsyncMock,
     MagicMock,
@@ -61,6 +62,7 @@ try:
         S3ClientWrapper,
         S3ListEntry,
         S3Storage,
+        _s3_identity_request_args,
     )
 except (StorageMissingDependenciesError, ModuleNotFoundError) as e:
     pytest.skip(f"Missing dependencies for S3Storage: {e}", allow_module_level=True)
@@ -80,6 +82,66 @@ def _recording_sleep():
         delays.append(delay)
 
     return sleep, delays
+
+
+@pytest.mark.parametrize(
+    "query",
+    [
+        "versionId=",
+        "versionId",
+        "etag=",
+        "etag",
+        "versionId=&etag=valid",
+        "versionId=valid&etag=",
+        "versionId=&versionId=valid",
+        "versionId=valid&versionId=",
+        "etag=&etag=valid",
+        "etag=valid&etag=",
+    ],
+)
+def test_s3_identity_parser_rejects_blank_selectors(query):
+    with pytest.raises(ValueError, match="must not be empty"):
+        _s3_identity_request_args(f"s3://test-bucket/file.txt?{query}")
+
+
+@pytest.mark.parametrize(
+    "query,expected",
+    [
+        ("", {}),
+        ("unrelated=", {}),
+        ("versionId=null", {"VersionId": "null"}),
+        ("etag=%22abc123%22", {"IfMatch": '"abc123"'}),
+        ("versionId=first&versionId=last&etag=old&etag=new", {"VersionId": "last", "IfMatch": "new"}),
+    ],
+)
+def test_s3_identity_parser_preserves_valid_selector_semantics(query, expected):
+    assert _s3_identity_request_args(f"s3://test-bucket/file.txt?{query}") == expected
+
+
+@pytest.mark.asyncio
+@force_wrapp_thread
+@pytest.mark.parametrize(
+    "query", ["versionId=", "versionId", "etag=", "etag", "versionId=valid&etag=", "versionId=&versionId=valid", "etag=valid&etag="]
+)
+async def test_s3_blank_identity_never_reaches_sdk(query, tmp_path):
+    client = AsyncMock()
+    provider = _FakeClientProvider(client)
+    storage = S3Storage("test-version", False, ThrottlingParameters(), client_provider=provider)
+    identity = f"s3://test-bucket/file.txt?{query}"
+    destination = tmp_path / "downloaded.txt"
+
+    result, item = await storage.stat(identity)
+    assert result == Result.ERROR_NOT_FOUND and item is None
+    result, content = await storage.read_resource_identity(identity)
+    assert result == Result.ERROR_NOT_FOUND and content == b""
+    result = await storage.download_resource_identity(identity, str(destination), overwrite=True)
+    assert result == Result.ERROR_NOT_FOUND and not destination.exists()
+    result = await storage.copy_resource_identity(identity, "s3://destination-bucket/file.txt", overwrite=True)
+    assert result == Result.ERROR_NOT_FOUND
+    result, local_file = await storage.materialize("s3://test-bucket/current.txt", str(destination), resource_identity=identity)
+    assert result == Result.ERROR_NOT_FOUND and local_file is None
+    assert not destination.exists()
+    assert client.mock_calls == []
 
 
 class _FakeClientProvider:
@@ -119,6 +181,7 @@ class _FakeS3Client:
         self._head_exception = head_exception
         self._list_objects_v2_result = {} if list_objects_v2_result is None else list_objects_v2_result
         self.head_object_call_count = 0
+        self.head_object_calls = []
         self.list_objects_v2_call_count = 0
 
     async def get_object(self, *args, **kwargs):
@@ -127,6 +190,7 @@ class _FakeS3Client:
 
     async def head_object(self, *args, **kwargs):
         self.head_object_call_count += 1
+        self.head_object_calls.append((args, kwargs))
         if self._head_exception is not None:
             raise self._head_exception
         return self._head_object_result
@@ -435,7 +499,7 @@ async def test_s3_storage_invalid_credentials():
     storage: S3Storage | None = None
     try:
         # Set invalid AWS credentials
-        os.environ["AWS_ACCESS_KEY_ID"] = "AKIAINVALID12345678"
+        os.environ["AWS_ACCESS_KEY_ID"] = "INVALIDACCESSKEY123"
         os.environ["AWS_SECRET_ACCESS_KEY"] = "InvalidSecretKey12345678901234567890"
 
         # Create S3Storage instance
@@ -496,6 +560,181 @@ def _create_client_error(error_code="InternalError", message="Test error", http_
 def _create_s3_entry(key: str, size: int) -> S3ListEntry:
     """Helper to create an S3ListEntry for testing."""
     return S3ListEntry.file_from_head_object(key, {"ContentLength": size, "LastModified": datetime.now(), "ETag": '"abc123"'})
+
+
+@pytest.mark.asyncio
+@force_wrapp_thread
+@pytest.mark.parametrize("operation", ["stat", "read", "download_head", "download_get", "copy", "materialize_head", "materialize_get"])
+@pytest.mark.parametrize("query", ["", "?etag=%22abc123%22", "?versionId=version-1", "?versionId=null"])
+@pytest.mark.parametrize("error_code", ["AccessDenied", "403"])
+async def test_s3_version_access_denied_names_required_permission(operation, query, error_code, tmp_path, caplog):
+    denied = _create_client_error(error_code=error_code, message="Access denied", http_status=403)
+    client = AsyncMock()
+    client.head_object.return_value = {"ContentLength": 7, "LastModified": datetime.now(), "ETag": '"abc123"'}
+    client.list_objects_v2.return_value = {}
+    if operation in ("stat", "download_head", "materialize_head"):
+        client.head_object.side_effect = denied
+    elif operation in ("read", "download_get", "materialize_get"):
+        client.get_object.side_effect = denied
+    else:
+        client.copy_object.side_effect = denied
+    sleep, delays = _recording_sleep()
+    storage = S3Storage("test-version", False, ThrottlingParameters(), client_provider=_FakeClientProvider(client), sleep=sleep)
+    source = "s3://source-bucket/file.txt" + query
+    destination = tmp_path / "out.txt"
+
+    with caplog.at_level(logging.ERROR, logger="omni.wrapp"):
+        if operation == "stat":
+            result, entry = await storage.stat(source)
+            assert entry is None
+        elif operation == "read":
+            result, content = await storage.read_resource_identity(source)
+            assert content == b""
+        elif operation.startswith("download"):
+            result = await storage.download_resource_identity(source, destination.as_uri(), overwrite=True)
+            assert not destination.exists()
+        elif operation.startswith("materialize"):
+            result, local_file = await storage.materialize("s3://source-bucket/current.txt", str(destination), resource_identity=source)
+            assert local_file is None
+            assert not destination.exists()
+        else:
+            with patch.object(storage, "stat", new_callable=AsyncMock, return_value=(Result.ERROR_NOT_FOUND, None)):
+                result = await storage.copy_resource_identity(source, "s3://destination-bucket/file.txt", overwrite=True)
+
+    assert result == (Result.ERROR if operation in ("stat", "copy") else Result.ERROR_ACCESS_DENIED)
+    assert delays == []
+    assert ("s3:GetObjectVersion" in caplog.text) == ("versionId=" in query)
+    assert "Access denied" in caplog.text
+    if operation in ("read", "download_get", "materialize_get"):
+        assert client.get_object.await_count == 1
+    if operation == "copy":
+        assert client.copy_object.await_count == 1
+
+
+@pytest.mark.asyncio
+@force_wrapp_thread
+async def test_s3_make_resource_identity_keeps_source_and_uses_object_version_OMPE_58312():
+    client = AsyncMock()
+    client.head_object.return_value = {
+        "ContentLength": 7,
+        "LastModified": datetime.now(),
+        "ETag": '"abc123"',
+        "VersionId": "version-1",
+        "Metadata": {"nv-omniverse-nucleus-hash": "sha-256-flat;1048576;hash"},
+    }
+    client.list_objects_v2.return_value = {}
+    storage = S3Storage(
+        "test-version",
+        False,
+        ThrottlingParameters(),
+        client_provider=_FakeClientProvider(client),
+    )
+    listed_item = S3ListEntry.file_from_list_objects(
+        "",
+        {"Key": "file.txt", "Size": 7, "LastModified": datetime.now(), "ETag": '"abc123"'},
+    )
+    source_url = "s3://test-bucket/file.txt"
+
+    absolute_url, relative_url, identity = await storage.make_resource_identity(source_url, listed_item, "file.txt")
+
+    assert absolute_url == source_url
+    assert relative_url == "file.txt"
+    assert identity.to_string() == "s3://test-bucket/file.txt?versionId=version-1&etag=%22abc123%22"
+    assert listed_item.nucleus_hash == "sha-256-flat;1048576;hash"
+    client.head_object.assert_awaited_once()
+    client.list_objects_v2.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@force_wrapp_thread
+@pytest.mark.parametrize("version_id", [None, "version-1", "null"])
+async def test_s3_identity_reuses_head_metadata_without_another_request(version_id):
+    """A missing VersionId on a HEAD response also describes a complete observation."""
+    client = AsyncMock()
+    storage = S3Storage("test-version", False, ThrottlingParameters(), client_provider=_FakeClientProvider(client))
+    metadata = {"ContentLength": 7, "LastModified": datetime.now(), "ETag": '"abc123"', "Metadata": {}}
+    if version_id is not None:
+        metadata["VersionId"] = version_id
+    entry = S3ListEntry.file_from_head_object("file.txt", metadata)
+    _, _, identity = await storage.make_resource_identity("s3://test-bucket/file.txt", entry, "file.txt")
+    expected = "s3://test-bucket/file.txt?" + (f"versionId={version_id}&" if version_id is not None else "") + "etag=%22abc123%22"
+    assert identity.to_string() == expected
+    client.head_object.assert_not_awaited()
+    client.list_objects_v2.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@force_wrapp_thread
+@pytest.mark.parametrize("changed_field", ["size", "etag"])
+async def test_s3_identity_rejects_object_changed_after_listing(changed_field):
+    client = AsyncMock()
+    client.head_object.return_value = {"ContentLength": 7, "LastModified": datetime.now(), "ETag": '"abc123"', "Metadata": {}}
+    storage = S3Storage("test-version", False, ThrottlingParameters(), client_provider=_FakeClientProvider(client))
+    listed = S3ListEntry.file_from_list_objects(
+        "",
+        {
+            "Key": "file.txt",
+            "Size": 8 if changed_field == "size" else 7,
+            "LastModified": datetime.now(),
+            "ETag": '"changed"' if changed_field == "etag" else '"abc123"',
+        },
+    )
+    with pytest.raises(StorageOperationError, match="changed"):
+        await storage.make_resource_identity("s3://test-bucket/file.txt", listed, "file.txt")
+    client.head_object.assert_awaited_once()
+    client.list_objects_v2.assert_not_awaited()
+
+
+@pytest.mark.xdist_incompatible
+@pytest.mark.asyncio
+@force_wrapp_thread
+async def test_s3_observation_recalculation_does_not_stat_twice(wrapp_init, monkeypatch):
+    from wrapp.utils import storage as storage_utils
+    from wrapp.utils.nucleus_hash import calc_nucleus_hash_from_stream
+    from wrapp.utils.utils import get_path_from_url
+
+    payload = b"payload"
+    expected_hash, _ = calc_nucleus_hash_from_stream(io.BytesIO(payload))
+    client = AsyncMock()
+    client.head_object.return_value = {"ContentLength": len(payload), "LastModified": datetime.now(), "ETag": '"abc123"', "Metadata": {}}
+    client.list_objects_v2.return_value = {}
+    backend = S3Storage("test-version", False, ThrottlingParameters(), client_provider=_FakeClientProvider(client))
+    monkeypatch.setattr(storage_utils, "wrapp_stat", backend.stat)
+    monkeypatch.setattr(storage_utils, "wrapp_make_resource_identity", backend.make_resource_identity)
+
+    async def download(identity, target, **kwargs):
+        assert identity == "s3://test-bucket/file.txt?etag=%22abc123%22"
+        Path(get_path_from_url(target)).write_bytes(payload)
+        return Result.OK
+
+    monkeypatch.setattr(storage_utils, "wrapp_download_resource_identity", download)
+    observation = await storage_utils.wrapp_capture_file_observation("s3://test-bucket/file.txt", "file.txt", expected_hash=expected_hash)
+    assert observation.hash == expected_hash
+    assert observation.size == len(payload)
+    client.head_object.assert_awaited_once()
+    # The initial generic stat still determines file versus folder; minting
+    # from its HEAD result must add neither a HEAD nor a folder-prefix LIST.
+    client.list_objects_v2.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+@force_wrapp_thread
+async def test_s3_stat_identity_miss_does_not_fall_back_to_folder_OMPE_58312():
+    client = _FakeS3Client(
+        head_exception=_create_client_error(error_code="PreconditionFailed", http_status=412),
+        list_objects_v2_result={"Contents": [{"Key": "file.txt/child.txt"}]},
+    )
+    storage = S3Storage(
+        "test-version",
+        False,
+        ThrottlingParameters(),
+        client_provider=_FakeClientProvider(client),
+    )
+
+    result, item = await storage.stat("s3://test-bucket/file.txt?etag=%22stale-etag%22")
+
+    assert result == Result.ERROR_NOT_FOUND
+    assert item is None
 
 
 def _create_upload_mock(fail_count: int, exception_type=None):
@@ -943,6 +1182,104 @@ async def test_read_retry_single_failure_OMPE_98588():
 
 @pytest.mark.asyncio
 @force_wrapp_thread
+async def test_s3_read_resource_identity_honors_version_and_etag_OMPE_58312():
+    get_object_calls = []
+
+    async def mock_get_object(*args, **kwargs):
+        get_object_calls.append((args, kwargs))
+        return {"Body": _FakeStreamingBody(b"identity bytes")}
+
+    with _ReadRetryTestContext(mock_get_object) as ctx:
+        result, content = await ctx.storage.read_resource_identity("s3://test-bucket/file.txt?versionId=version-1&etag=%22abc123%22")
+
+    assert result == Result.OK
+    assert content == b"identity bytes"
+    assert get_object_calls == [
+        (
+            (),
+            {
+                "Bucket": "test-bucket",
+                "Key": "file.txt",
+                "VersionId": "version-1",
+                "IfMatch": '"abc123"',
+            },
+        )
+    ]
+
+
+@pytest.mark.asyncio
+@force_wrapp_thread
+async def test_s3_read_resource_identity_mismatch_is_not_found_OMPE_58312():
+    precondition_failed = _create_client_error(error_code="PreconditionFailed", http_status=412)
+    mock_get_object, call_count = _create_read_mock(fail_count=1, exception=precondition_failed)
+
+    with _ReadRetryTestContext(mock_get_object) as ctx:
+        result, content = await ctx.storage.read_resource_identity("s3://test-bucket/file.txt?etag=%22catalog-etag%22")
+
+    assert result == Result.ERROR_NOT_FOUND
+    assert content == b""
+    assert call_count[0] == 1
+    assert ctx.sleep_delays == []
+
+
+@pytest.mark.asyncio
+@force_wrapp_thread
+async def test_s3_copy_resource_identity_honors_version_and_etag_OMPE_58312():
+    client = AsyncMock()
+    client.copy_object.return_value = {}
+    storage = S3Storage(
+        "test-version",
+        False,
+        ThrottlingParameters(),
+        client_provider=_FakeClientProvider(client),
+    )
+
+    with patch.object(storage, "stat", new_callable=AsyncMock, return_value=(Result.ERROR_NOT_FOUND, None)):
+        result = await storage.copy_resource_identity(
+            "s3://source-bucket/source.txt?versionId=version-1&etag=%22abc123%22",
+            "s3://dest-bucket/dest.txt",
+            overwrite=False,
+        )
+
+    assert result == Result.OK
+    client.copy_object.assert_awaited_once_with(
+        CopySource={"Bucket": "source-bucket", "Key": "source.txt", "VersionId": "version-1"},
+        Bucket="dest-bucket",
+        Key="dest.txt",
+        CopySourceIfMatch='"abc123"',
+    )
+
+
+@pytest.mark.asyncio
+@force_wrapp_thread
+async def test_s3_large_copy_fallback_preserves_stale_identity_result_OMPE_58312():
+    client = AsyncMock()
+    client.copy_object.side_effect = _create_client_error(error_code="InvalidRequest")
+    storage = S3Storage(
+        "test-version",
+        False,
+        ThrottlingParameters(),
+        client_provider=_FakeClientProvider(client),
+    )
+
+    with patch.object(
+        storage,
+        "stat",
+        new_callable=AsyncMock,
+        side_effect=[(Result.ERROR_NOT_FOUND, None), (Result.ERROR_NOT_FOUND, None)],
+    ):
+        result = await storage.copy_resource_identity(
+            "s3://source-bucket/source.txt?versionId=stale-version",
+            "s3://dest-bucket/dest.txt",
+            overwrite=False,
+        )
+
+    assert result == Result.ERROR_NOT_FOUND
+    client.copy.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@force_wrapp_thread
 async def test_read_retry_multiple_failures_OMPE_98588():
     """read_file_content succeeds after multiple failures with increasing backoff."""
     mock_get_object, call_count = _create_read_mock(fail_count=2)
@@ -1274,6 +1611,30 @@ async def test_download_metadata_uses_head_object_not_list_OMPE_98951(tmp_path):
     assert dst_path.read_bytes() == data
     assert ctx.mock_client.head_object_call_count == 1
     assert ctx.mock_client.list_objects_v2_call_count == 0
+
+
+@pytest.mark.asyncio
+@force_wrapp_thread
+@pytest.mark.parametrize("identity_download", [False, True])
+async def test_download_stale_resource_identity_is_not_found_OMPE_58312(tmp_path, identity_download):
+    dst_path = tmp_path / "out.bin"
+    precondition_failed = _create_client_error(error_code="PreconditionFailed", http_status=412)
+    mock_get = _RangedGetMock(b"replacement")
+
+    with _DownloadTestContext(mock_get, size=11, head_exception=precondition_failed) as ctx:
+        download = ctx.storage.download_resource_identity if identity_download else ctx.storage.download_file
+        result = await download(
+            "s3://test-bucket/test-file.txt?etag=%22catalog-etag%22",
+            str(dst_path),
+            overwrite=True,
+            **({"expected_hash": "catalog hash"} if identity_download else {}),
+        )
+
+    assert result == Result.ERROR_NOT_FOUND
+    assert not dst_path.exists()
+    assert ctx.mock_client.head_object_call_count == 1
+    assert ctx.mock_client.head_object_calls == [((), {"Bucket": "test-bucket", "Key": "test-file.txt", "IfMatch": '"catalog-etag"'})]
+    assert mock_get.calls == []
 
 
 @pytest.mark.asyncio

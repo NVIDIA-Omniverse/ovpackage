@@ -14,11 +14,15 @@
 # limitations under the License.
 
 import asyncio
+import io
+import json
 import logging
 import os
 import sys
+import tempfile
 from collections.abc import AsyncGenerator
 from datetime import datetime
+from pathlib import Path
 from typing import (
     Any,
     Callable,
@@ -30,15 +34,18 @@ from typing import (
 )
 from urllib.parse import (
     quote,
+    unquote,
     urlparse,
-    urlunparse,
 )
 
 import semver
 
 from wrapp.datastructures.command_context import ThrottlingParameters
 from wrapp.utils import storage_interface
-from wrapp.utils.nucleus_hash import is_nucleus_hash
+from wrapp.utils.nucleus_hash import (
+    calc_nucleus_hash_from_stream,
+    is_nucleus_hash,
+)
 from wrapp.utils.scheduler_task_node import SchedulerTaskGroupNode
 from wrapp.utils.stats import (
     Stats,
@@ -57,9 +64,11 @@ from wrapp.utils.utils import (
     StorageMissingDependenciesError,
     StorageOperationError,
     drop_parameters_from_url,
+    file_url_to_path,
     get_base_directory_from_url,
     is_file_url,
     is_nucleus_url,
+    urlunparse,
 )
 
 logger = logging.getLogger("omni.wrapp")
@@ -68,7 +77,12 @@ try:
     import omni.client
 except ImportError as e:
     # The list of dependencies should be the same as in pyproject.toml
-    error_msg = f"failed to import omni.client. As of now omni.client is required for WRAPP. Required dependencies: omniverseclient>=2.53.0. Install with 'pip install ovpackage[nucleus]'. Exception: {e}"
+    error_msg = (
+        "failed to import omni.client (Nucleus support is optional). "
+        "Required dependencies: omniverseclient>=2.53.0. "
+        "Install with 'pip install \"ovpackage[nucleus]\"'. "
+        f"Exception: {e}"
+    )
     raise StorageMissingDependenciesError(error_msg) from e
 
 
@@ -138,18 +152,108 @@ class ClientLibListEntry(storage_interface.ListEntry):
 
 
 class ClientLibResourceIdentity(storage_interface.ResourceIdentity):
-    def __init__(self, checkpoint_url: str):
-        # TODO - should we check a checkpoint number is appended? Not sure, there were Nucleus versions which
-        # allowed non-checkpointed URLs for file versions
+    TYPE = "nucleus"
+    VERSION = 1
+
+    def __init__(self, checkpoint_url: str, content_hash: str):
+        if not isinstance(checkpoint_url, str) or not is_nucleus_url(checkpoint_url):
+            raise ValueError("Nucleus resource identity must be a Nucleus URL")
+        if not urlparse(checkpoint_url).query:
+            raise ValueError("Nucleus resource identity must identify a checkpoint")
+        if not isinstance(content_hash, str) or not content_hash:
+            raise ValueError("Nucleus resource identity must include a content hash")
         self._checkpoint_url = checkpoint_url
+        self._content_hash = content_hash
+
+    @classmethod
+    def from_string(cls, resource_identity: str, *, expected_hash: Optional[str] = None) -> "ClientLibResourceIdentity":
+        try:
+            payload = json.loads(resource_identity)
+        except (json.JSONDecodeError, TypeError):
+            # Catalogs written before the self-verifying identity format stored
+            # only the checkpoint URL. They remain readable when the catalog's
+            # separately stored hash is supplied by the caller.
+            if not expected_hash:
+                raise ValueError("Legacy Nucleus resource identity requires an expected content hash")
+            return cls(resource_identity, expected_hash)
+        if not isinstance(payload, dict) or payload.get("type") != cls.TYPE or payload.get("version") != cls.VERSION:
+            raise ValueError("Unsupported Nucleus resource identity")
+        checkpoint_url = payload.get("checkpoint_url")
+        content_hash = payload.get("hash")
+        if not isinstance(checkpoint_url, str) or not isinstance(content_hash, str):
+            raise ValueError("Nucleus resource identity has invalid checkpoint or hash fields")
+        return cls(checkpoint_url, content_hash)
+
+    @classmethod
+    def can_decode(cls, resource_identity: str) -> bool:
+        try:
+            payload = json.loads(resource_identity)
+        except (json.JSONDecodeError, TypeError):
+            try:
+                return is_nucleus_url(resource_identity) and bool(urlparse(resource_identity).query)
+            except (TypeError, ValueError):
+                return False
+        return isinstance(payload, dict) and payload.get("type") == cls.TYPE
+
+    @property
+    def checkpoint_url(self) -> str:
+        return self._checkpoint_url
+
+    @property
+    def content_hash(self) -> str:
+        return self._content_hash
+
+    def matches_hash(self, actual_hash: str) -> bool:
+        if actual_hash == self._content_hash:
+            return True
+        logger.error(
+            "Nucleus resource identity %s returned hash %s instead of %s",
+            self._checkpoint_url,
+            actual_hash,
+            self._content_hash,
+        )
+        return False
+
+    async def verify_checkpoint_hash(self, storage) -> storage_interface.Result:
+        """Check the recorded hash against checkpoint metadata before reading.
+
+        Trust a matching server hash to avoid hashing large files. This detects
+        checkpoints rewritten before stat; a rewrite between stat and read is
+        an accepted race. Missing metadata requires verification of the bytes.
+        """
+        result, entry = await storage.stat(self._checkpoint_url)
+        if result != storage_interface.Result.OK or entry is None or not entry.nucleus_hash:
+            return storage_interface.Result.ERROR_NOT_SUPPORTED
+        if not self.matches_hash(entry.nucleus_hash):
+            return storage_interface.Result.ERROR_BAD_VERSION
+        return storage_interface.Result.OK
 
     async def read_data(self, storage) -> Tuple[storage_interface.Result, bytes]:
-        # TODO How can we validate this actually works? We could store the hash in addition, and check on
-        # read that the data returned matches the hash we expected
-        return await storage.read_file_content(self._checkpoint_url)
+        verification = await self.verify_checkpoint_hash(storage)
+        if verification == storage_interface.Result.ERROR_BAD_VERSION:
+            return verification, b""
+        result, content = await storage.read_file_content(self._checkpoint_url)
+        if result != storage_interface.Result.OK:
+            return result, content
+        if verification != storage_interface.Result.OK:
+            actual_hash, _ = calc_nucleus_hash_from_stream(io.BytesIO(content))
+            if not self.matches_hash(actual_hash):
+                return storage_interface.Result.ERROR_BAD_VERSION, b""
+        return result, content
 
-    def to_string(self) -> str:
-        return self._checkpoint_url
+    def to_string(self) -> storage_interface.SerializedResourceIdentity:
+        return storage_interface.SerializedResourceIdentity(
+            json.dumps(
+                {
+                    "checkpoint_url": self._checkpoint_url,
+                    "hash": self._content_hash,
+                    "type": self.TYPE,
+                    "version": self.VERSION,
+                },
+                separators=(",", ":"),
+                sort_keys=True,
+            )
+        )
 
 
 class ClientLibServerInfo(storage_interface.ServerInfo):
@@ -297,21 +401,15 @@ class ClientLibStorage(storage_interface.StorageInterface):
 
     @staticmethod
     def _encode_url_for_omniclient(url: str) -> str:
-        """Percent-encode the path component of an Omniverse URL for omni.client.
+        """Normalize URL path escaping without reinterpreting query selectors.
 
-        omni.client treats URL paths as percent-encoded, so literal special
-        characters in path names (e.g. '%' in a folder named "Mini%20map")
-        must be encoded before being passed to the client library.  Without
-        this, omni.client would decode "%20" to a space and fail to find the
-        actual item on the server.
-
-        Only omniverse:// and omni:// URLs are encoded; other schemes (e.g.
-        file://) are returned unchanged.  Query parameters (used for
-        checkpoints) and fragments are preserved as-is.
+        Catalog filenames are escaped when constructing addresses. Decode and
+        re-encode once so a literal percent escape stays distinct from the
+        character it resembles and repeated normalization is harmless.
         """
         parsed = urlparse(url)
         if parsed.scheme in ("omniverse", "omni"):
-            encoded_path = quote(parsed.path, safe="/")
+            encoded_path = quote(unquote(parsed.path), safe="/")
             return urlunparse((parsed.scheme, parsed.netloc, encoded_path, parsed.params, parsed.query, parsed.fragment))
         return url
 
@@ -431,14 +529,197 @@ class ClientLibStorage(storage_interface.StorageInterface):
                 # Append the  checkpoint found
                 new_absolute_source_url = file_url + "?" + checkpoint_found.relative_path
                 new_relative_source_url = relative_url
-            return new_absolute_source_url, new_relative_source_url, ClientLibResourceIdentity(new_absolute_source_url)
+            checkpoint_hash = item.nucleus_hash or checkpoint_found.nucleus_hash
+            if not checkpoint_hash:
+                read_result, checkpoint_content = await self.read_file_content(new_absolute_source_url)
+                if read_result != storage_interface.Result.OK:
+                    raise StorageOperationError(
+                        f"Failed to read checkpoint {new_absolute_source_url} while constructing its resource identity: {read_result}",
+                        read_result,
+                    )
+                if item.size is not None and len(checkpoint_content) != item.size:
+                    raise StorageOperationError(
+                        f"Checkpoint {new_absolute_source_url} changed size while constructing its resource identity: "
+                        f"{len(checkpoint_content)} != {item.size}",
+                        storage_interface.Result.ERROR_BAD_VERSION,
+                    )
+                checkpoint_hash, _ = calc_nucleus_hash_from_stream(io.BytesIO(checkpoint_content))
+            if not item.nucleus_hash:
+                item.nucleus_hash = checkpoint_hash
+            return (
+                new_absolute_source_url,
+                new_relative_source_url,
+                ClientLibResourceIdentity(new_absolute_source_url, checkpoint_hash),
+            )
         else:
-            if len(checkpoints) > 0 and checkpoints[-1].nucleus_hash == item.nucleus_hash:
+            if len(checkpoints) > 0 and item.nucleus_hash and checkpoints[-1].nucleus_hash == item.nucleus_hash:
                 clean_url = drop_parameters_from_url(file_url)
                 new_absolute_source_url = clean_url + "?" + checkpoints[-1].relative_path
-                return new_absolute_source_url, relative_url, ClientLibResourceIdentity(new_absolute_source_url)
+                return new_absolute_source_url, relative_url, ClientLibResourceIdentity(new_absolute_source_url, item.nucleus_hash)
             else:
                 raise StorageOperationError(f"Error: Checkpoint not found for {file_url} item {item} in {checkpoints}")
+
+    def can_handle_resource_identity(self, resource_identity: storage_interface.SerializedResourceIdentity) -> bool:
+        return ClientLibResourceIdentity.can_decode(resource_identity)
+
+    def resource_identity_for_manifest(
+        self,
+        resource_identity: storage_interface.SerializedResourceIdentity,
+        *,
+        expected_hash: Optional[str] = None,
+    ) -> storage_interface.SerializedResourceIdentity:
+        identity = ClientLibResourceIdentity.from_string(resource_identity, expected_hash=expected_hash)
+        return storage_interface.SerializedResourceIdentity(identity.checkpoint_url)
+
+    async def read_resource_identity(
+        self,
+        resource_identity: storage_interface.SerializedResourceIdentity,
+        *,
+        expected_hash: Optional[str] = None,
+    ) -> Tuple[storage_interface.Result, bytes]:
+        try:
+            identity = ClientLibResourceIdentity.from_string(resource_identity, expected_hash=expected_hash)
+        except ValueError as e:
+            logger.error("Invalid Nucleus resource identity: %s", e)
+            return storage_interface.Result.ERROR_BAD_REQUEST, b""
+        return await identity.read_data(self)
+
+    async def materialize(
+        self,
+        address: storage_interface.ResourceAddress,
+        staging_path: str,
+        *,
+        resource_identity: Optional[storage_interface.SerializedResourceIdentity] = None,
+        expected_hash: Optional[str] = None,
+    ) -> Tuple[storage_interface.Result, Optional[storage_interface.LocalReadOnlyFile]]:
+        """Borrow a pinned Hub file after verifying the recorded checkpoint.
+
+        Compare the checkpoint's server hash with the identity before opening
+        Hub. A matching hash avoids rehashing; missing metadata requires
+        verification of the returned bytes. The stat/read race accepted by
+        ``verify_checkpoint_hash`` applies here too.
+
+        Client Library stats the checkpoint for its Hub lookup and prefers a
+        hash-based cache key. The lease pins that file until the caller closes
+        it. If Hub is unavailable, download the same verified identity through
+        the shared implementation rather than reading the logical address.
+        """
+        if resource_identity is not None:
+            try:
+                identity = ClientLibResourceIdentity.from_string(resource_identity, expected_hash=expected_hash)
+            except ValueError as e:
+                logger.error("Invalid Nucleus resource identity: %s", e)
+                return storage_interface.Result.ERROR_BAD_REQUEST, None
+            verification = await identity.verify_checkpoint_hash(self)
+            if verification == storage_interface.Result.ERROR_BAD_VERSION:
+                return verification, None
+            if self.can_be_cached(identity.checkpoint_url):
+                # Client Library stats this exact checkpoint URL and keys Hub
+                # by its returned hash. It holds the cache entry open until
+                # the returned lease is closed by the materialize context.
+                Stats.get().increment(StatType.GET_LOCAL_FILE_ASYNC)
+                result, cached_file = await self.get_cached_file_async(identity.checkpoint_url, download=True)
+                if cached_file is not None:
+                    keep_file = False
+                    try:
+                        if result == storage_interface.Result.OK:
+                            if verification != storage_interface.Result.OK:
+                                with open(cached_file.local_path(), "rb") as stream:
+                                    actual_hash, _ = calc_nucleus_hash_from_stream(stream)
+                                if not identity.matches_hash(actual_hash):
+                                    return storage_interface.Result.ERROR_BAD_VERSION, None
+                            keep_file = True
+                            return result, cached_file
+                    finally:
+                        if not keep_file:
+                            cached_file.close()
+        # No Hub, or a Hub failure: download the same identity through the
+        # existing verified path. An ordinary address keeps ordinary semantics.
+        return await super().materialize(address, staging_path, resource_identity=resource_identity, expected_hash=expected_hash)
+
+    async def copy_resource_identity(
+        self,
+        resource_identity: storage_interface.SerializedResourceIdentity,
+        dst_url: storage_interface.ResourceAddress,
+        overwrite: bool = False,
+        message: str = "",
+    ) -> storage_interface.Result:
+        # Legacy checkpoint-only identities need the catalog's expected hash,
+        # supplied to the generic layer's verified download fallback.
+        if is_nucleus_url(resource_identity):
+            return storage_interface.Result.ERROR_NOT_SUPPORTED
+        try:
+            identity = ClientLibResourceIdentity.from_string(resource_identity)
+        except ValueError as e:
+            logger.error("Invalid Nucleus resource identity: %s", e)
+            return storage_interface.Result.ERROR_BAD_REQUEST
+        if not is_nucleus_url(dst_url) or urlparse(identity.checkpoint_url).netloc.lower() != urlparse(dst_url).netloc.lower():
+            # The optimized copy layer already tries the hash on the target
+            # server. If unavailable there, it downloads the verified identity
+            # and uploads it rather than attempting the same hash twice.
+            return storage_interface.Result.ERROR_NOT_SUPPORTED
+        # Try this server's hash store first. Copying by hash remains exact
+        # even if the checkpoint address has been rewritten.
+        Stats.get().increment(StatType.CREATE_WITH_HASH_ASYNC)
+        result = await self.create_with_hash(dst_url, identity.content_hash, overwrite)
+        if result == storage_interface.Result.ERROR:
+            # Copies originating in a mount can be readable on this server
+            # without their hash being available to create_with_hash. The
+            # generic fallback verifies the checkpoint identity before upload.
+            return storage_interface.Result.ERROR_NOT_SUPPORTED
+        return result
+
+    async def download_resource_identity(
+        self,
+        resource_identity: storage_interface.SerializedResourceIdentity,
+        dst_url: storage_interface.ResourceAddress,
+        overwrite: bool,
+        *,
+        expected_hash: Optional[str] = None,
+    ) -> storage_interface.Result:
+        """Download identity-locked bytes to the literal local destination path."""
+        try:
+            identity = ClientLibResourceIdentity.from_string(resource_identity, expected_hash=expected_hash)
+        except ValueError as e:
+            logger.error("Invalid Nucleus resource identity: %s", e)
+            return storage_interface.Result.ERROR_BAD_REQUEST
+        if not is_file_url(dst_url):
+            raise RuntimeError(f"{dst_url} is not a file URL")
+        file_path = file_url_to_path(dst_url)
+        if not overwrite and os.path.exists(file_path):
+            return storage_interface.Result.ERROR_ALREADY_EXISTS
+        if os.path.isdir(file_path):
+            return storage_interface.Result.ERROR_WRONG_TYPE
+        verification = await identity.verify_checkpoint_hash(self)
+        if verification == storage_interface.Result.ERROR_BAD_VERSION:
+            return verification
+        parent = os.path.dirname(file_path)
+        os.makedirs(parent, exist_ok=True)
+        fd, attempt_path = tempfile.mkstemp(prefix=".wrapp-identity-", dir=parent)
+        os.close(fd)
+        try:
+            result = await self.download_file(identity.checkpoint_url, Path(attempt_path).as_uri(), overwrite=True)
+            if result != storage_interface.Result.OK:
+                return result
+            if verification != storage_interface.Result.OK:
+                with open(attempt_path, "rb") as downloaded:
+                    actual_hash, _ = calc_nucleus_hash_from_stream(downloaded)
+                if not identity.matches_hash(actual_hash):
+                    return storage_interface.Result.ERROR_BAD_VERSION
+            if overwrite:
+                os.replace(attempt_path, file_path)
+            else:
+                try:
+                    # The verified temporary file is adjacent to the target,
+                    # so a hard link atomically installs it only if the target
+                    # still does not exist.
+                    os.link(attempt_path, file_path)
+                except FileExistsError:
+                    return storage_interface.Result.ERROR_ALREADY_EXISTS
+            return storage_interface.Result.OK
+        finally:
+            if os.path.exists(attempt_path):
+                os.unlink(attempt_path)
 
     async def stat(self, url: str) -> Tuple[storage_interface.Result, Optional[storage_interface.ListEntry]]:
         encoded = self._encode_url_for_omniclient(url)
@@ -484,7 +765,13 @@ class ClientLibStorage(storage_interface.StorageInterface):
         Stats.get().increment(StatType.CHECKPOINTS, len(checkpoints))
         return self._map_result(result), [self._map_list_entry(e) for e in checkpoints]
 
-    async def copy(self, src_url: str, dst_url: str, overwrite: bool = False, message: str = "") -> storage_interface.Result:
+    async def copy_address(
+        self,
+        src_url: str,
+        dst_url: str,
+        overwrite: bool = False,
+        message: str = "",
+    ) -> storage_interface.Result:
         encoded_src = self._encode_url_for_omniclient(src_url)
         encoded_dst = self._encode_url_for_omniclient(dst_url)
         # This additional stat is required because of the HUB-808 bug, which leads to copy not failing during async copy operations when target exists

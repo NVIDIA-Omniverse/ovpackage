@@ -195,7 +195,7 @@ class ProgressReport:
     def throttled_resource_names(self) -> Iterable[str]:
         """
         The names of all resources limiting concurrent execution of tasks spawned directly by this job.
-        The name of a resource is given by WRAPP and user readable, examples are "nucleus_server.nvidia.com (max requests)",
+        The name of a resource is given by WRAPP and user readable, examples are "nucleus.example.com (max requests)",
         "S3:my_bucket (max data transfers)", "CPU threads".
         """
         return self._throttled_resource_data.keys()

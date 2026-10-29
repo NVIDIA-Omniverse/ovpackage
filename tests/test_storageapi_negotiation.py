@@ -21,7 +21,6 @@ what the server advertises via ListServices, supports explicit env overrides,
 and that copy fallback works when on v1beta (no server-side Copy RPC).
 """
 
-import asyncio
 import logging
 import os
 from types import SimpleNamespace
@@ -65,6 +64,7 @@ try:
         _STORAGE_API_VERSION_ENV_VARS,
         NUCLEUS_HASH_METADATA_KEY,
         StorageAPIListEntry,
+        StorageAPIResourceIdentity,
         StorageAPIStorageGRPC,
         cap_pb2_v1alpha,
         cap_pb2_v1beta,
@@ -79,6 +79,11 @@ try:
     )
 except (ImportError, ModuleNotFoundError, StorageMissingDependenciesError) as e:
     pytest.skip(f"Missing dependencies for StorageAPI: {e}", allow_module_level=True)
+
+
+@pytest.fixture(autouse=True)
+def _deterministic_storageapi_retry_jitter(monkeypatch):
+    monkeypatch.setattr("wrapp.utils.storage_impls.storageapi.random.uniform", lambda _low, high: high)
 
 
 def _make_list_services_response(services_dict, pb2_module):
@@ -416,7 +421,7 @@ def _wire_metadata_stubs(backend) -> None:
 
 
 @pytest.mark.asyncio
-async def test_set_nucleus_hash_retries_on_unavailable(caplog):
+async def test_set_identity_nucleus_hash_retries_on_unavailable(caplog):
     """UNAVAILABLE on the metadata UpdateMetadata path should be retried with
     exponential backoff (1s, 2s, …), matching write_file_content."""
     backend = _make_backend()
@@ -426,6 +431,7 @@ async def test_set_nucleus_hash_retries_on_unavailable(caplog):
 
     call_count = 0
     sleeps: list[float] = []
+    retry_delay_calls = []
 
     async def fake_run_grpc(throttler, method, request, **kwargs):
         nonlocal call_count
@@ -437,14 +443,20 @@ async def test_set_nucleus_hash_retries_on_unavailable(caplog):
     async def fake_sleep(d):
         sleeps.append(d)
 
+    def fake_retry_delay(attempt):
+        retry_delay_calls.append(attempt)
+        return {1: 21.0, 2: 22.0}[attempt]
+
     with (
         patch.object(backend, "_run_grpc", side_effect=fake_run_grpc),
         patch("wrapp.utils.storage_impls.storageapi.asyncio.sleep", side_effect=fake_sleep),
+        patch("wrapp.utils.storage_impls.storageapi._retry_delay", side_effect=fake_retry_delay),
     ):
-        await backend._set_nucleus_hash("https://example/blob", "deadbeef")
+        await backend._set_nucleus_hash_for_identity("identity-token", "deadbeef")
 
     assert call_count == 3
-    assert sleeps == [1.0, 2.0]
+    assert retry_delay_calls == [1, 2]
+    assert sleeps == [21.0, 22.0]
     # No final WARNING when retries eventually succeed
     warning_records = [r for r in caplog.records if r.levelno >= logging.WARNING]
     assert not any("Failed to store nucleus hash metadata" in r.message for r in warning_records)
@@ -454,7 +466,7 @@ async def test_set_nucleus_hash_retries_on_unavailable(caplog):
 
 
 @pytest.mark.asyncio
-async def test_set_nucleus_hash_warns_after_exhausting_retries(caplog):
+async def test_set_identity_nucleus_hash_warns_after_exhausting_retries(caplog):
     """If every attempt times out the user gets exactly one final warning
     (best-effort semantics preserved)."""
     backend = _make_backend()
@@ -472,14 +484,14 @@ async def test_set_nucleus_hash_warns_after_exhausting_retries(caplog):
         patch.object(backend, "_run_grpc", side_effect=fake_run_grpc),
         patch("wrapp.utils.storage_impls.storageapi.asyncio.sleep", new=AsyncMock()),
     ):
-        await backend._set_nucleus_hash("https://example/blob", "deadbeef")
+        await backend._set_nucleus_hash_for_identity("identity-token", "deadbeef")
 
     assert call_count == 3  # default attempts
-    assert "Failed to store nucleus hash metadata for https://example/blob" in caplog.text
+    assert "Failed to store nucleus hash metadata for 'identity-token'" in caplog.text
 
 
 @pytest.mark.asyncio
-async def test_set_nucleus_hash_does_not_retry_non_retryable_codes(caplog):
+async def test_set_identity_nucleus_hash_does_not_retry_non_retryable_codes(caplog):
     """Non-retryable codes (e.g. PERMISSION_DENIED) fail on the first attempt."""
     backend = _make_backend()
     _wire_metadata_stubs(backend)
@@ -496,7 +508,7 @@ async def test_set_nucleus_hash_does_not_retry_non_retryable_codes(caplog):
         patch.object(backend, "_run_grpc", side_effect=fake_run_grpc),
         patch("wrapp.utils.storage_impls.storageapi.asyncio.sleep", new=AsyncMock()),
     ):
-        await backend._set_nucleus_hash("https://example/blob", "deadbeef")
+        await backend._set_nucleus_hash_for_identity("identity-token", "deadbeef")
 
     assert call_count == 1
     assert "Failed to store nucleus hash metadata" in caplog.text
@@ -519,7 +531,7 @@ async def test_metadata_retries_env_var_caps_attempts():
         patch.object(backend, "_run_grpc", side_effect=fake_run_grpc),
         patch("wrapp.utils.storage_impls.storageapi.asyncio.sleep", new=AsyncMock()),
     ):
-        await backend._set_nucleus_hash("https://example/blob", "deadbeef")
+        await backend._set_nucleus_hash_for_identity("identity-token", "deadbeef")
 
     assert call_count == 1
 
@@ -574,8 +586,8 @@ async def test_get_nucleus_hash_not_found_does_not_retry():
 
 
 @pytest.mark.asyncio
-async def test_delete_nucleus_hash_builds_encoded_request():
-    """_delete_nucleus_hash targets the encoded address with the nucleus hash key."""
+async def test_delete_identity_nucleus_hash_uses_opaque_identity():
+    """Identity metadata uses the opaque identity byte-for-byte, without URL encoding."""
     backend = _make_backend()
     _wire_metadata_stubs(backend)
 
@@ -587,12 +599,12 @@ async def test_delete_nucleus_hash_builds_encoded_request():
         return SimpleNamespace()
 
     with patch.object(backend, "_run_grpc", side_effect=fake_run_grpc):
-        await backend._delete_nucleus_hash("https://example/My Blob.usd")
+        await backend._delete_nucleus_hash_for_identity("opaque identity token")
 
     assert captured["method"] is backend._metadata_api.DeleteMetadata
     assert captured["request"] == "delete-req"
     backend._metadata_msgs.DeleteMetadataRequest.assert_called_once_with(
-        uri="https://example/My%20Blob.usd",
+        uri="opaque identity token",
         user_metadata_key=NUCLEUS_HASH_METADATA_KEY,
     )
 
@@ -609,7 +621,7 @@ async def test_delete_nucleus_hash_tolerates_missing_key(caplog, code):
         raise _make_grpc_error(code, "no such key")
 
     with patch.object(backend, "_run_grpc", side_effect=fake_run_grpc):
-        await backend._delete_nucleus_hash("https://example/blob")
+        await backend._delete_nucleus_hash_for_identity("identity-token")
 
     assert "Failed to delete nucleus hash metadata" not in caplog.text
 
@@ -625,9 +637,9 @@ async def test_delete_nucleus_hash_warns_on_other_errors(caplog):
         raise _make_grpc_error(grpc.StatusCode.PERMISSION_DENIED, "no access")
 
     with patch.object(backend, "_run_grpc", side_effect=fake_run_grpc):
-        await backend._delete_nucleus_hash("https://example/blob")
+        await backend._delete_nucleus_hash_for_identity("identity-token")
 
-    assert "Failed to delete nucleus hash metadata for https://example/blob" in caplog.text
+    assert "Failed to delete nucleus hash metadata for 'identity-token'" in caplog.text
 
 
 @pytest.mark.asyncio
@@ -638,9 +650,9 @@ async def test_set_nucleus_hash_skips_when_metadata_disabled():
     backend._metadata_msgs = None
 
     with patch.object(backend, "_run_grpc", side_effect=AssertionError("must not be called")):
-        await backend._set_nucleus_hash("https://example/blob", "deadbeef")
+        await backend._set_nucleus_hash_for_identity("identity-token", "deadbeef")
         assert await backend._get_nucleus_hash("https://example/blob") is None
-        await backend._delete_nucleus_hash("https://example/blob")
+        await backend._delete_nucleus_hash_for_identity("identity-token")
 
 
 @pytest.mark.asyncio
@@ -664,7 +676,7 @@ async def test_metadata_calls_and_retries_are_counted_in_stats():
         patch.object(backend, "_run_grpc", side_effect=fake_set_run_grpc),
         patch("wrapp.utils.storage_impls.storageapi.asyncio.sleep", new=AsyncMock()),
     ):
-        await backend._set_nucleus_hash("https://example/blob", "deadbeef")
+        await backend._set_nucleus_hash_for_identity("identity-token", "deadbeef")
 
     assert Stats.get().get_stat(StatType.SET_METADATA_ASYNC) == 1
     assert Stats.get().get_stat(StatType.GRPC_RETRY) == 2  # 2 sleeps, then success on 3rd
@@ -697,7 +709,7 @@ async def test_metadata_calls_and_retries_are_counted_in_stats():
         return SimpleNamespace()
 
     with patch.object(backend, "_run_grpc", side_effect=fake_delete_run_grpc):
-        await backend._delete_nucleus_hash("https://example/blob")
+        await backend._delete_nucleus_hash_for_identity("identity-token")
 
     assert Stats.get().get_stat(StatType.DELETE_METADATA_ASYNC) == 1
     assert Stats.get().get_stat(StatType.SET_METADATA_ASYNC) == 0
@@ -712,7 +724,7 @@ async def test_disabled_metadata_does_not_count_in_stats():
     backend._metadata_msgs = None
     Stats.get().clear()
 
-    await backend._set_nucleus_hash("https://example/blob", "deadbeef")
+    await backend._set_nucleus_hash_for_identity("identity-token", "deadbeef")
     assert await backend._get_nucleus_hash("https://example/blob") is None
 
     assert Stats.get().get_stat(StatType.SET_METADATA_ASYNC) == 0
@@ -828,20 +840,58 @@ async def test_copy_uses_server_side_when_v1alpha():
     async def fake_server_copy(src, dst):
         nonlocal server_copy_called
         server_copy_called = True
-        from wrapp.utils.storage_interface import Result
-
         return Result.OK
 
     with (
         patch.object(backend, "_ensure_grpc_stubs", new_callable=AsyncMock),
         patch.object(backend, "_sanitize_address_for_storage_service", side_effect=_passthrough),
+        patch.object(backend, "stat", new_callable=AsyncMock, return_value=(Result.ERROR_NOT_FOUND, None)),
         patch.object(backend, "_server_side_copy", side_effect=fake_server_copy),
     ):
-        from wrapp.utils.storage_interface import Result
-
-        result = await backend.copy("src://a", "dst://b")
+        result = await backend.copy_address("src://a", "dst://b")
         assert result == Result.OK
         assert server_copy_called
+
+
+@pytest.mark.asyncio
+async def test_copy_uses_supplied_source_identity_without_restatting_address():
+    """A catalog copy must use its recorded identity, not resolve the address again.
+
+    The Storage API Copy RPC requires a source identity.  When WRAPP already
+    has that identity, statting the mutable source address can select different
+    bytes and must not occur.
+    """
+    backend = _make_backend()
+    backend._channel = MagicMock()
+    backend._fileobject_version = "v1alpha"
+    backend._fileobject_msgs = fo_svc_pb2_v1alpha
+    backend._fileobject_types = fo_pb2_v1alpha
+    backend._fileobject_api = MagicMock()
+    copy_requests = []
+
+    async def fake_run_grpc(throttler, method, request, **kwargs):
+        if method is backend._fileobject_api.Stat:
+            pytest.fail("A known catalog resource identity must not be replaced by stat(address)")
+        if method is backend._fileobject_api.Copy:
+            copy_requests.append(request)
+            return SimpleNamespace(resource_identity=SimpleNamespace(encoded_identity="destination-identity"))
+        raise AssertionError(f"Unexpected RPC method: {method!r}")
+
+    with (
+        patch.object(backend, "_ensure_grpc_stubs", new_callable=AsyncMock),
+        patch.object(backend, "_sanitize_address_for_storage_service", side_effect=_passthrough),
+        patch.object(backend, "stat", new_callable=AsyncMock, return_value=(Result.ERROR_NOT_FOUND, None)),
+        patch.object(backend, "_run_grpc", side_effect=fake_run_grpc),
+        patch.object(backend, "_get_nucleus_hash_for_identity", new_callable=AsyncMock, return_value=None),
+    ):
+        result = await backend.copy_resource_identity(
+            StorageAPIResourceIdentity("catalog-identity").to_string(),
+            "https://content.example/destination.usd",
+        )
+
+    assert result == Result.OK
+    assert len(copy_requests) == 1
+    assert copy_requests[0].source_resource_identity.encoded_identity == "catalog-identity"
 
 
 @pytest.mark.asyncio
@@ -859,7 +909,7 @@ async def test_copy_raises_not_implemented_when_v1beta():
         patch.object(backend, "_sanitize_address_for_storage_service", side_effect=_passthrough),
     ):
         with pytest.raises(NotImplementedError):
-            await backend.copy("src://a", "dst://b")
+            await backend.copy_address("src://a", "dst://b")
 
 
 @pytest.mark.asyncio
@@ -880,10 +930,11 @@ async def test_copy_raises_not_implemented_on_unimplemented_even_on_v1alpha():
     with (
         patch.object(backend, "_ensure_grpc_stubs", new_callable=AsyncMock),
         patch.object(backend, "_sanitize_address_for_storage_service", side_effect=_passthrough),
+        patch.object(backend, "stat", new_callable=AsyncMock, return_value=(Result.ERROR_NOT_FOUND, None)),
         patch.object(backend, "_server_side_copy", side_effect=fake_server_copy),
     ):
         with pytest.raises(NotImplementedError):
-            await backend.copy("src://a", "dst://b")
+            await backend.copy_address("src://a", "dst://b")
 
 
 # ---------------------------------------------------------------------------
@@ -977,6 +1028,37 @@ async def test_get_nucleus_hash_returns_hash():
 
 
 @pytest.mark.asyncio
+async def test_get_nucleus_hash_for_identity_uses_identity_as_metadata_uri():
+    """Identity metadata is queried using the exact Storage API read token."""
+    from google.protobuf.struct_pb2 import Value
+
+    backend = _make_backend()
+    backend._metadata_msgs = md_pb2_v1alpha
+    backend._metadata_api = MagicMock()
+
+    fake_response = SimpleNamespace(
+        user_metadata={
+            NUCLEUS_HASH_METADATA_KEY: SimpleNamespace(
+                value=Value(string_value="sha-256-flat;1048576;identity"),
+                etag="etag1",
+            )
+        }
+    )
+    requests = []
+
+    async def fake_run_grpc(throttler, method, request, **kwargs):
+        requests.append(request)
+        return fake_response
+
+    with patch.object(backend, "_run_grpc", side_effect=fake_run_grpc):
+        result = await backend._get_nucleus_hash_for_identity("opaque-read-token")
+
+    assert result == "sha-256-flat;1048576;identity"
+    assert len(requests) == 1
+    assert requests[0].uri == "opaque-read-token"
+
+
+@pytest.mark.asyncio
 async def test_get_nucleus_hash_returns_none_when_key_missing():
     """_get_nucleus_hash returns None when the metadata key does not exist."""
     backend = _make_backend()
@@ -1023,8 +1105,8 @@ async def test_get_nucleus_hash_returns_none_when_no_metadata_api():
 
 
 @pytest.mark.asyncio
-async def test_set_nucleus_hash_calls_update_metadata():
-    """_set_nucleus_hash calls UpdateMetadata with the correct key and value."""
+async def test_set_identity_nucleus_hash_calls_update_metadata():
+    """Identity hashes are stored against the opaque identity token."""
     backend = _make_backend()
     backend._metadata_msgs = md_pb2_v1alpha
     backend._metadata_api = MagicMock()
@@ -1036,28 +1118,28 @@ async def test_set_nucleus_hash_calls_update_metadata():
         return SimpleNamespace(etag="etag1")
 
     with patch.object(backend, "_run_grpc", side_effect=fake_run_grpc):
-        await backend._set_nucleus_hash("https://example.com/file.usd", "sha-256-flat;1048576;abc123")
+        await backend._set_nucleus_hash_for_identity("opaque-identity", "sha-256-flat;1048576;abc123")
 
     assert len(calls) == 1
     req = calls[0]
-    assert req.uri == "https://example.com/file.usd"
+    assert req.uri == "opaque-identity"
     assert req.user_metadata_key == NUCLEUS_HASH_METADATA_KEY
     assert req.user_metadata.string_value == "sha-256-flat;1048576;abc123"
 
 
 @pytest.mark.asyncio
-async def test_set_nucleus_hash_noop_when_no_metadata_api():
-    """_set_nucleus_hash is a no-op when the Metadata API is not available."""
+async def test_set_identity_nucleus_hash_noop_when_no_metadata_api():
+    """_set_nucleus_hash_for_identity is a no-op when the Metadata API is not available."""
     backend = _make_backend()
     assert backend._metadata_api is None
 
     # Should not raise
-    await backend._set_nucleus_hash("https://example.com/file.usd", "sha-256-flat;1048576;abc123")
+    await backend._set_nucleus_hash_for_identity("opaque-identity", "sha-256-flat;1048576;abc123")
 
 
 @pytest.mark.asyncio
-async def test_set_nucleus_hash_logs_on_failure():
-    """_set_nucleus_hash logs a warning but does not raise on gRPC errors."""
+async def test_set_identity_nucleus_hash_logs_on_failure():
+    """_set_nucleus_hash_for_identity logs a warning but does not raise on gRPC errors."""
     backend = _make_backend()
     backend._metadata_msgs = md_pb2_v1alpha
     backend._metadata_api = MagicMock()
@@ -1069,7 +1151,7 @@ async def test_set_nucleus_hash_logs_on_failure():
 
     with patch.object(backend, "_run_grpc", side_effect=fake_run_grpc):
         # Should not raise
-        await backend._set_nucleus_hash("https://example.com/file.usd", "sha-256-flat;1048576;abc123")
+        await backend._set_nucleus_hash_for_identity("opaque-identity", "sha-256-flat;1048576;abc123")
 
 
 # ---------------------------------------------------------------------------
@@ -1105,7 +1187,7 @@ async def test_stat_returns_hash_when_metadata_available():
         patch.object(backend, "_ensure_grpc_stubs", new_callable=AsyncMock),
         patch.object(backend, "_sanitize_address_for_storage_service", side_effect=_passthrough),
         patch.object(backend, "_run_grpc", side_effect=fake_run_grpc),
-        patch.object(backend, "_get_nucleus_hash", new_callable=AsyncMock, return_value=expected_hash),
+        patch.object(backend, "_get_nucleus_hash_for_identity", new_callable=AsyncMock, return_value=expected_hash) as get_hash,
     ):
         from wrapp.utils.storage_interface import Result
 
@@ -1114,6 +1196,7 @@ async def test_stat_returns_hash_when_metadata_available():
     assert result == Result.OK
     assert entry is not None
     assert entry.nucleus_hash == expected_hash
+    get_hash.assert_awaited_once_with("rid1")
 
 
 @pytest.mark.asyncio
@@ -1170,6 +1253,7 @@ async def test_stat_retries_on_unavailable():
 
     call_count = 0
     sleeps: list[float] = []
+    retry_delay_calls = []
 
     async def fake_run_grpc(throttler, method, request, **kwargs):
         nonlocal call_count
@@ -1181,12 +1265,17 @@ async def test_stat_retries_on_unavailable():
     async def fake_sleep(delay):
         sleeps.append(delay)
 
+    def fake_retry_delay(attempt):
+        retry_delay_calls.append(attempt)
+        return {1: 23.0, 2: 24.0}[attempt]
+
     with (
         patch.object(backend, "_ensure_grpc_stubs", new_callable=AsyncMock),
         patch.object(backend, "_sanitize_address_for_storage_service", side_effect=_passthrough),
         patch.object(backend, "_run_grpc", side_effect=fake_run_grpc),
-        patch.object(backend, "_get_nucleus_hash", new_callable=AsyncMock, return_value=None),
+        patch.object(backend, "_get_nucleus_hash_for_identity", new_callable=AsyncMock, return_value=None),
         patch("wrapp.utils.storage_impls.storageapi.asyncio.sleep", side_effect=fake_sleep),
+        patch("wrapp.utils.storage_impls.storageapi._retry_delay", side_effect=fake_retry_delay),
     ):
         from wrapp.utils.storage_interface import Result
 
@@ -1196,8 +1285,32 @@ async def test_stat_retries_on_unavailable():
     assert entry is not None
     assert entry.version == "rid1"
     assert call_count == 3
-    assert sleeps == [1.0, 2.0]
+    assert retry_delay_calls == [1, 2]
+    assert sleeps == [23.0, 24.0]
     assert Stats.get().get_stat(StatType.GRPC_RETRY) == 2
+
+
+@pytest.mark.asyncio
+async def test_server_side_address_copy_rejects_stat_without_resource_identity():
+    backend = _make_backend()
+    backend._fileobject_version = "v1alpha"
+    backend._fileobject_msgs = fo_svc_pb2_v1alpha
+    backend._fileobject_types = fo_pb2_v1alpha
+    backend._fileobject_api = MagicMock()
+    backend._fileobject_api.Stat = object()
+    backend._fileobject_api.Copy = object()
+    stat_response = SimpleNamespace(
+        resource_info=SimpleNamespace(
+            resource_identity=SimpleNamespace(encoded_identity=""),
+            metadata=SimpleNamespace(data_object_size=100, last_modified_timestamp=None),
+        )
+    )
+    backend._run_grpc = AsyncMock(return_value=stat_response)
+
+    with pytest.raises(StorageOperationError, match="Stat returned no resource identity"):
+        await backend._server_side_copy("https://example.com/source", "https://example.com/destination")
+
+    backend._run_grpc.assert_awaited_once()
 
 
 # ---------------------------------------------------------------------------
@@ -1221,6 +1334,17 @@ class TestRoutePatternMatching:
 
     def test_double_star_matches_without_trailing_slash(self):
         assert self._matches("https://example.com/**", "https://example.com")
+
+    def test_trailing_double_star_requires_separator_boundary_OMPE_104629(self):
+        pattern = "https://prod.example.com/**"
+
+        assert self._matches(pattern, "https://prod.example.com")
+        assert self._matches(pattern, "https://prod.example.com/")
+        assert self._matches(pattern, "https://prod.example.com/a/b")
+        assert not self._matches(pattern, "https://prod.example.com.attacker.io/creds")
+        assert not self._matches(pattern, "https://prod.example.commercial.com/x")
+        assert not self._matches(pattern, "https://prod.example.comEVIL")
+        assert not self._matches("https://host.com/teamA/**", "https://host.com/teamApex/secret")
 
     def test_single_star_matches_identifier(self):
         assert self._matches("https://*.example.com/**", "https://mybucket.example.com/path/file")
@@ -1250,8 +1374,11 @@ class TestRoutePatternMatching:
         assert self._matches(pattern, "https://myaccount.blob.core.windows.net/container/blob")
         assert not self._matches(pattern, "https://myaccount.blob.core.windows.org/container/blob")
 
-    def test_single_star_allows_hyphens_underscores_dots(self):
-        assert self._matches("https://*.example.com/**", "https://my-bucket_v2.0.example.com/path")
+    def test_single_star_allows_hyphens_and_underscores(self):
+        assert self._matches("https://*.example.com/**", "https://my-bucket_v2.example.com/path")
+
+    def test_single_star_rejects_dots_OMPE_104654(self):
+        assert not self._matches("https://*.example.com/**", "https://my-bucket_v2.0.example.com/path")
 
 
 # ---------------------------------------------------------------------------
@@ -1309,9 +1436,14 @@ async def test_fetch_routes_retries_retryable_failure(monkeypatch):
     routes_response = _make_list_routes_response(["https://example.com/**"])
     call_count = 0
     sleep_calls = []
+    retry_delay_calls = []
 
     async def fake_sleep(delay):
         sleep_calls.append(delay)
+
+    def fake_retry_delay(attempt):
+        retry_delay_calls.append(attempt)
+        return 25.0
 
     async def fake_run_grpc(throttler, method, request, **kwargs):
         nonlocal call_count
@@ -1321,6 +1453,7 @@ async def test_fetch_routes_retries_retryable_failure(monkeypatch):
         return routes_response
 
     monkeypatch.setattr("wrapp.utils.storage_impls.storageapi.asyncio.sleep", fake_sleep)
+    monkeypatch.setattr("wrapp.utils.storage_impls.storageapi._retry_delay", fake_retry_delay)
     with (
         patch.object(backend, "_run_grpc", side_effect=fake_run_grpc),
         patch("wrapp.utils.router.g_list_routes_enabled", True),
@@ -1330,7 +1463,8 @@ async def test_fetch_routes_retries_retryable_failure(monkeypatch):
     assert result is True
     assert backend._routes == ["https://example.com/**"]
     assert call_count == 2
-    assert sleep_calls == [1.0]
+    assert retry_delay_calls == [1]
+    assert sleep_calls == [25.0]
     assert Stats.get().get_stat(StatType.GRPC_RETRY) == 1
 
 
@@ -1377,16 +1511,25 @@ async def test_fetch_routes_skipped_when_disabled():
 
 
 @pytest.mark.asyncio
-async def test_fetch_routes_skipped_when_v1beta():
-    """ListRoutes is only in v1alpha; _fetch_routes returns False for v1beta."""
+async def test_fetch_routes_uses_v1alpha_method_when_v1beta_was_negotiated():
+    """ListRoutes is probed through v1alpha even when other capabilities calls use v1beta."""
     backend = _make_backend()
+    backend._channel = MagicMock()
     backend._capabilities_version = "v1beta"
+    route_api = MagicMock()
+    routes_response = _make_list_routes_response(["storage-id://service/**"])
 
-    with patch("wrapp.utils.router.g_list_routes_enabled", True):
+    with (
+        patch("wrapp.utils.storage_impls.storageapi.cap_grpc_v1alpha.CapabilitiesServiceStub", return_value=route_api),
+        patch.object(backend, "_run_control_grpc_with_retries", new=AsyncMock(return_value=routes_response)) as run_routes,
+        patch("wrapp.utils.router.g_list_routes_enabled", True),
+    ):
         result = await backend._fetch_routes()
 
-    assert result is False
-    assert backend._routes is None
+    assert result is True
+    assert backend._routes == ["storage-id://service/**"]
+    run_routes.assert_awaited_once()
+    assert run_routes.await_args.args[1] is route_api.ListRoutes
 
 
 @pytest.mark.asyncio
@@ -1418,6 +1561,13 @@ async def test_fetch_routes_empty_response_falls_back():
 
 class TestIsUrlInScopeWithRoutes:
     """Tests for is_url_in_scope when route patterns are active."""
+
+    def test_non_trailing_double_star_requires_leading_separator_OMPE_104629(self):
+        backend = _make_backend()
+        backend._route_regexes = [StorageAPIStorageGRPC._compile_route_pattern("foo/**/bar")]
+
+        assert backend.is_url_in_scope("foo/a/b/bar")
+        assert not backend.is_url_in_scope("fooX/bar")
 
     def test_uses_routes_when_available(self):
         backend = _make_backend()
@@ -1614,9 +1764,14 @@ async def test_fetch_top_level_addresses_retries_retryable_failure(monkeypatch):
     tla_response = _make_top_level_addresses_response(["https://example.com/storage/"])
     call_count = 0
     sleep_calls = []
+    retry_delay_calls = []
 
     async def fake_sleep(delay):
         sleep_calls.append(delay)
+
+    def fake_retry_delay(attempt):
+        retry_delay_calls.append(attempt)
+        return 26.0
 
     async def fake_run_grpc(throttler, method, request, **kwargs):
         nonlocal call_count
@@ -1626,12 +1781,14 @@ async def test_fetch_top_level_addresses_retries_retryable_failure(monkeypatch):
         return tla_response
 
     monkeypatch.setattr("wrapp.utils.storage_impls.storageapi.asyncio.sleep", fake_sleep)
+    monkeypatch.setattr("wrapp.utils.storage_impls.storageapi._retry_delay", fake_retry_delay)
     with patch.object(backend, "_run_grpc", side_effect=fake_run_grpc):
         await backend._fetch_top_level_addresses()
 
     assert backend._top_level_addresses == ["https://example.com/storage"]
     assert call_count == 2
-    assert sleep_calls == [1.0]
+    assert retry_delay_calls == [1]
+    assert sleep_calls == [26.0]
     assert Stats.get().get_stat(StatType.GRPC_RETRY) == 1
 
 
@@ -1712,20 +1869,20 @@ async def test_write_file_stores_hash():
     content = b"hello world"
     set_hash_calls = []
 
-    async def fake_set_hash(resource_address, nucleus_hash):
-        set_hash_calls.append((resource_address, nucleus_hash))
+    async def fake_set_hash(resource_identity, nucleus_hash):
+        set_hash_calls.append((resource_identity, nucleus_hash))
 
     async def fake_write_source_content(resource_address, source):
         from wrapp.utils.storage_interface import Result
 
         # No sent-bytes hash observed -> write_file hashes the content itself.
-        return Result.OK, None
+        return Result.OK, None, "written-identity"
 
     with (
         patch.object(backend, "_ensure_grpc_stubs", new_callable=AsyncMock),
         patch.object(backend, "_sanitize_address_for_storage_service", side_effect=_passthrough),
         patch.object(backend, "_write_source_content", side_effect=fake_write_source_content),
-        patch.object(backend, "_set_nucleus_hash", side_effect=fake_set_hash),
+        patch.object(backend, "_set_nucleus_hash_for_identity", side_effect=fake_set_hash),
     ):
         from wrapp.utils.storage_interface import Result
 
@@ -1733,8 +1890,8 @@ async def test_write_file_stores_hash():
 
     assert result == Result.OK
     assert len(set_hash_calls) == 1
-    addr, stored_hash = set_hash_calls[0]
-    assert addr == "https://example.com/file.usd"
+    identity, stored_hash = set_hash_calls[0]
+    assert identity == "written-identity"
     assert stored_hash.startswith("sha-256-flat;1048576;")
 
 
@@ -1752,19 +1909,19 @@ async def test_write_file_skips_hash_on_error():
 
     set_hash_calls = []
 
-    async def fake_set_hash(resource_address, nucleus_hash):
-        set_hash_calls.append((resource_address, nucleus_hash))
+    async def fake_set_hash(resource_identity, nucleus_hash):
+        set_hash_calls.append((resource_identity, nucleus_hash))
 
     async def fake_write_source_content(resource_address, source):
         from wrapp.utils.storage_interface import Result
 
-        return Result.ERROR, None
+        return Result.ERROR, None, None
 
     with (
         patch.object(backend, "_ensure_grpc_stubs", new_callable=AsyncMock),
         patch.object(backend, "_sanitize_address_for_storage_service", side_effect=_passthrough),
         patch.object(backend, "_write_source_content", side_effect=fake_write_source_content),
-        patch.object(backend, "_set_nucleus_hash", side_effect=fake_set_hash),
+        patch.object(backend, "_set_nucleus_hash_for_identity", side_effect=fake_set_hash),
     ):
         from wrapp.utils.storage_interface import Result
 
@@ -1787,7 +1944,7 @@ async def test_write_file_no_metadata_service():
     async def fake_write_source_content(resource_address, source):
         from wrapp.utils.storage_interface import Result
 
-        return Result.OK, None
+        return Result.OK, None, "written-identity"
 
     with (
         patch.object(backend, "_ensure_grpc_stubs", new_callable=AsyncMock),
@@ -1891,22 +2048,22 @@ class TestRouterOmniverseRouting:
 
     def test_omniverse_url_in_route_scope_claimed_by_storage_api(self):
         router = self._build_router(nucleus_enabled=True)
-        router._storage_api = self._backend_with_routes(["omniverse://content.ov.nvidia.com/**"])
+        router._storage_api = self._backend_with_routes(["omniverse://content.example.com/**"])
 
-        assert router.is_storage_api_url("omniverse://content.ov.nvidia.com/eglanz-test3/") is True
-        assert router.is_storage_api_url("omniverse://content.ov.nvidia.com/eglanz-test3") is True
+        assert router.is_storage_api_url("omniverse://content.example.com/sample-project/") is True
+        assert router.is_storage_api_url("omniverse://content.example.com/sample-project") is True
 
     def test_omniverse_url_in_tla_scope_claimed_by_storage_api(self):
         # Mirrors v1beta servers, where ListRoutes is unavailable and TLAs are
         # the only source of routing scope.
         router = self._build_router(nucleus_enabled=True)
-        router._storage_api = self._backend_with_tlas(["omniverse://content.ov.nvidia.com"])
+        router._storage_api = self._backend_with_tlas(["omniverse://content.example.com"])
 
-        assert router.is_storage_api_url("omniverse://content.ov.nvidia.com/eglanz-test3/") is True
+        assert router.is_storage_api_url("omniverse://content.example.com/sample-project/") is True
 
     def test_omniverse_url_outside_scope_not_claimed(self):
         router = self._build_router(nucleus_enabled=True)
-        router._storage_api = self._backend_with_routes(["omniverse://content.ov.nvidia.com/**"])
+        router._storage_api = self._backend_with_routes(["omniverse://content.example.com/**"])
 
         assert router.is_storage_api_url("omniverse://other.host/something") is False
 
@@ -1926,7 +2083,7 @@ class TestRouterOmniverseRouting:
         assert backend.has_known_scope() is False
         router._storage_api = backend
 
-        assert router.is_storage_api_url("omniverse://content.ov.nvidia.com/x") is False
+        assert router.is_storage_api_url("omniverse://content.example.com/x") is False
         assert router.is_storage_api_url("file:///tmp/x") is False
         assert router.is_storage_api_url("/tmp/x") is False
 
@@ -1949,7 +2106,7 @@ class TestRouterOmniverseRouting:
         router = self._build_router(nucleus_enabled=True)
         router._storage_api = None
 
-        assert router.is_storage_api_url("omniverse://content.ov.nvidia.com/x") is False
+        assert router.is_storage_api_url("omniverse://content.example.com/x") is False
 
     def test_omniverse_in_scope_routes_to_storageapi_with_nucleus_disabled(self):
         """The exact user-reported scenario: ``wrapp ls omniverse://...`` with
@@ -1961,9 +2118,9 @@ class TestRouterOmniverseRouting:
         from wrapp.utils.router import StorageType
 
         router = self._build_router(nucleus_enabled=False)
-        router._storage_api = self._backend_with_tlas(["omniverse://content.ov.nvidia.com"])
+        router._storage_api = self._backend_with_tlas(["omniverse://content.example.com"])
 
-        storage, storage_type = router._get_storage("omniverse://content.ov.nvidia.com/eglanz-test3/")
+        storage, storage_type = router._get_storage("omniverse://content.example.com/sample-project/")
         assert storage_type == StorageType.StorageAPI
         assert storage is router._storage_api
 
@@ -1980,9 +2137,9 @@ class TestRouterOmniverseRouting:
         router = self._build_router(nucleus_enabled=True)
         # Inject a Nucleus mock so the dedicated branch would also be available.
         router._clientlib = MagicMock(name="ClientLibStorage")
-        router._storage_api = self._backend_with_routes(["omniverse://content.ov.nvidia.com/**"])
+        router._storage_api = self._backend_with_routes(["omniverse://content.example.com/**"])
 
-        _, storage_type = router._get_storage("omniverse://content.ov.nvidia.com/eglanz-test3/")
+        _, storage_type = router._get_storage("omniverse://content.example.com/sample-project/")
         assert storage_type == StorageType.StorageAPI
 
     def test_omniverse_outside_scope_falls_through_to_nucleus(self):
@@ -1999,7 +2156,7 @@ class TestRouterOmniverseRouting:
         router = self._build_router(nucleus_enabled=True)
         nucleus_mock = MagicMock(name="ClientLibStorage")
         router._clientlib = nucleus_mock
-        router._storage_api = self._backend_with_routes(["omniverse://content.ov.nvidia.com/**"])
+        router._storage_api = self._backend_with_routes(["omniverse://content.example.com/**"])
 
         storage, storage_type = router._get_storage("omniverse://other.host/folder/")
         assert storage_type == StorageType.Nucleus
@@ -2180,6 +2337,9 @@ class TestWrappConfigRouteOverride:
         backend._route_regexes = [
             StorageAPIStorageGRPC._compile_route_pattern("https://server-says.example.com/**"),
         ]
+        backend._identity_route_regexes = [
+            StorageAPIStorageGRPC._compile_route_pattern("storage-id://server-says/**"),
+        ]
 
         with caplog.at_level(logging.INFO, logger="omni.wrapp"):
             backend._apply_config_route_overrides_to_scope()
@@ -2188,6 +2348,7 @@ class TestWrappConfigRouteOverride:
         assert backend.has_known_scope() is True
         assert backend.is_url_in_scope("omniverse://configured.example.com/x") is True
         assert backend.is_url_in_scope("https://server-says.example.com/x") is False
+        assert backend.can_handle_resource_identity("storage-id://server-says/opaque-version") is True
         # The server's claim is still visible in the logs.
         assert "https://server-says.example.com/**" in caplog.text
         assert "configured" in caplog.text or "configured.example.com" in caplog.text
@@ -2196,6 +2357,7 @@ class TestWrappConfigRouteOverride:
         cfg = self._make_config_with_routes(["omniverse://configured.example.com/**"])
         backend = _make_backend(wrapp_config=cfg)
         backend._top_level_addresses = ["https://server-says.example.com"]
+        backend._identity_top_level_addresses = ["https://server-says.example.com"]
 
         with caplog.at_level(logging.INFO, logger="omni.wrapp"):
             backend._apply_config_route_overrides_to_scope()
@@ -2206,6 +2368,7 @@ class TestWrappConfigRouteOverride:
         assert backend._routes == ["omniverse://configured.example.com/**"]
         assert backend.is_url_in_scope("omniverse://configured.example.com/x") is True
         assert backend.is_url_in_scope("https://server-says.example.com/x") is False
+        assert backend.can_handle_resource_identity("https://server-says.example.com/x?checkpoint=7") is True
         assert "https://server-says.example.com" in caplog.text
 
     def test_apply_override_noop_when_no_config(self):
@@ -2229,7 +2392,7 @@ class TestWrappConfigRouteOverride:
 
         from wrapp.utils.router import StorageType
 
-        cfg = self._make_config_with_routes(["omniverse://content.ov.nvidia.com/**"])
+        cfg = self._make_config_with_routes(["omniverse://content.example.com/**"])
         backend = _make_backend(wrapp_config=cfg)
         # Simulate the post-_ensure_grpc_stubs state where the override has
         # been applied to scope.
@@ -2240,7 +2403,7 @@ class TestWrappConfigRouteOverride:
         router = TestRouterOmniverseRouting._build_router(nucleus_enabled=False)
         router._storage_api = backend
 
-        _, storage_type = router._get_storage("omniverse://content.ov.nvidia.com/eglanz-test3/")
+        _, storage_type = router._get_storage("omniverse://content.example.com/sample-project/")
         assert storage_type == StorageType.StorageAPI
 
 
@@ -2526,9 +2689,14 @@ async def test_list_file_tree_retries_rst_stream_and_skips_duplicates(monkeypatc
     base = "https://srv.example/bucket/1k"
     call_count = 0
     sleep_calls = []
+    retry_delay_calls = []
 
     async def fake_sleep(delay):
         sleep_calls.append(delay)
+
+    def fake_retry_delay(attempt):
+        retry_delay_calls.append(attempt)
+        return 27.0
 
     async def fake_iterate_grpc(throttler, method, request, *a, **k):
         nonlocal call_count
@@ -2552,6 +2720,7 @@ async def test_list_file_tree_retries_rst_stream_and_skips_duplicates(monkeypatc
         raise AssertionError(f"Unexpected stat call for {address}")
 
     monkeypatch.setattr("wrapp.utils.storage_impls.storageapi.asyncio.sleep", fake_sleep)
+    monkeypatch.setattr("wrapp.utils.storage_impls.storageapi._retry_delay", fake_retry_delay)
     with (
         patch.object(backend, "_iterate_grpc", side_effect=fake_iterate_grpc),
         patch.object(backend, "_ensure_grpc_stubs", new=AsyncMock()),
@@ -2562,7 +2731,8 @@ async def test_list_file_tree_retries_rst_stream_and_skips_duplicates(monkeypatc
 
     assert [item.relative_path for item in items] == ["file-1", "file-2"]
     assert call_count == 2
-    assert sleep_calls == [1.0]
+    assert retry_delay_calls == [1]
+    assert sleep_calls == [27.0]
     assert Stats.get().get_stat(StatType.GRPC_RETRY) == 1
 
 
@@ -2612,9 +2782,14 @@ async def test_list_directory_retries_rst_stream_and_skips_duplicates(monkeypatc
     base = "https://srv.example/bucket/1k"
     call_count = 0
     sleep_calls = []
+    retry_delay_calls = []
 
     async def fake_sleep(delay):
         sleep_calls.append(delay)
+
+    def fake_retry_delay(attempt):
+        retry_delay_calls.append(attempt)
+        return 28.0
 
     async def fake_iterate_grpc(throttler, method, request, *a, **k):
         nonlocal call_count
@@ -2635,6 +2810,7 @@ async def test_list_directory_retries_rst_stream_and_skips_duplicates(monkeypatc
         )
 
     monkeypatch.setattr("wrapp.utils.storage_impls.storageapi.asyncio.sleep", fake_sleep)
+    monkeypatch.setattr("wrapp.utils.storage_impls.storageapi._retry_delay", fake_retry_delay)
     with (
         patch.object(backend, "_iterate_grpc", side_effect=fake_iterate_grpc),
         patch.object(backend, "_ensure_grpc_stubs", new=AsyncMock()),
@@ -2645,7 +2821,8 @@ async def test_list_directory_retries_rst_stream_and_skips_duplicates(monkeypatc
     assert [item.relative_path for item in items] == ["file-1", "file-2"]
     assert [item.version for item in items] == ["identity-1", "identity-2"]
     assert call_count == 2
-    assert sleep_calls == [1.0]
+    assert retry_delay_calls == [1]
+    assert sleep_calls == [28.0]
     assert Stats.get().get_stat(StatType.GRPC_RETRY) == 1
 
 
@@ -2687,7 +2864,7 @@ async def test_make_resource_identity_lazy_stats_when_missing():
         _u2, _r2, ident2 = await backend.make_resource_identity("https://srv.example/bucket/1k/file-1", enumerate_entry, "file-1")
 
     assert ident1.to_string() == "encoded-identity-from-stat"
-    assert ident2.to_string() == "encoded-identity-from-stat"
+    assert ident2.to_string() == ident1.to_string()
     assert stat_mock.await_count == 1
     assert enumerate_entry._resource_identity == "encoded-identity-from-stat"
     assert enumerate_entry.nucleus_hash == "sha-256-flat;1048576;from-stat"
@@ -2695,9 +2872,8 @@ async def test_make_resource_identity_lazy_stats_when_missing():
 
 
 @pytest.mark.asyncio
-async def test_make_resource_identity_with_existing_identity_does_not_stat():
-    """Entries that already carry an identity (from list_directory's
-    ListStat path) must not pay an extra Stat round-trip."""
+async def test_make_resource_identity_with_existing_identity_reads_version_metadata_without_stat():
+    """Identity metadata can supply the hash without resolving the address again."""
     from wrapp.utils.storage_impls.storageapi import StorageAPIListEntry
 
     backend = _make_backend()
@@ -2710,11 +2886,38 @@ async def test_make_resource_identity_with_existing_identity_does_not_stat():
     )
 
     stat_mock = AsyncMock()
-    with patch.object(backend, "stat", stat_mock):
+    identity_hash_mock = AsyncMock(return_value="sha-256-flat;1048576;from-identity")
+    with patch.object(backend, "stat", stat_mock), patch.object(backend, "_get_nucleus_hash_for_identity", identity_hash_mock):
         _u, _r, ident = await backend.make_resource_identity("https://srv.example/bucket/1k/file-1", entry, "file-1")
 
     assert ident.to_string() == "already-have-it"
+    assert entry.nucleus_hash == "sha-256-flat;1048576;from-identity"
+    identity_hash_mock.assert_awaited_once_with("already-have-it")
     stat_mock.assert_not_called()
+
+
+def test_storageapi_resource_identity_routes_by_its_own_scope():
+    backend = _make_backend()
+    backend._identity_route_regexes = [backend._compile_route_pattern("storage-id://srv/**")]
+    identity = "storage-id://srv/opaque-version"
+
+    assert backend.can_handle_resource_identity(identity)
+    assert not backend.can_handle_resource_identity("opaque-version")
+
+
+def test_storage_core_resource_identity_routes_by_top_level_address():
+    backend = _make_backend()
+    backend._identity_top_level_addresses = ["omniverse://storage-core.example"]
+
+    assert backend.can_handle_resource_identity("omniverse://storage-core.example/project/asset.usd?&7")
+    assert not backend.can_handle_resource_identity("omniverse://other.example/project/asset.usd?&7")
+
+
+def test_storageapi_does_not_claim_resource_identity_before_scope_is_known():
+    backend = _make_backend()
+    backend._endpoint = "storage-api.example:443"
+
+    assert not backend.can_handle_resource_identity("omniverse://nucleus.example/project/asset.usd?&7")
 
 
 @pytest.mark.asyncio

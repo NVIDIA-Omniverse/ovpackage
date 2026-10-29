@@ -45,8 +45,8 @@ API service connected at the same time (multi-service support). A named
     # response is still fetched and logged for diagnostics, but routing
     # decisions use this list.
     routes = [
-        "omniverse://content.ov.nvidia.com/**",
-        "https://content.ov.nvidia.com/**",
+        "omniverse://content.example.com/**",
+        "https://content.example.com/**",
     ]
 
     # A second Storage API service, connected alongside ``default``. Give each

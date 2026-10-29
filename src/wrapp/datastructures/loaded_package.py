@@ -48,19 +48,15 @@ from wrapp.utils.scheduler_task_node import (
     SchedulerTreeNode,
 )
 from wrapp.utils.storage import (
-    Router,
-    wrapp_stat,
-    wrapp_stat_and_calculate_hash_if_missing,
+    wrapp_capture_file_observation,
 )
-from wrapp.utils.storage_interface import Result
 from wrapp.utils.utils import (
     FailedCommand,
     StorageOperationError,
     get_base_directory_from_url,
-    has_checkpoint,
     is_relative_path,
     is_wrapp_file_url,
-    join_paths,
+    join_url_path,
     make_relative_url,
 )
 
@@ -157,7 +153,11 @@ class LoadedPackage:
                 # Clear location-dependent fields that don't affect actual content
                 item.source_path = ""
                 item.resource_identity = None
-            catalog_str = json.dumps(catalog_copy.model_dump(), sort_keys=True)
+            # Preserve the established v5 content projection. Neither new
+            # observation fields nor serialization-version changes are content.
+            fingerprint_data = catalog_copy.model_dump(exclude={"items": {"__all__": {"resource_identity_v2", "modified_time"}}})
+            fingerprint_data["format_version"] = {"version_string": "5.0"}
+            catalog_str = json.dumps(fingerprint_data, sort_keys=True)
             catalog_fingerprint = "wrappcatalog-fingerprint;" + hashlib.sha256(catalog_str.encode(), usedforsecurity=False).hexdigest()
             return catalog_fingerprint
         else:
@@ -182,7 +182,9 @@ class LoadedPackage:
         if hashed_package_info.dependencies:
             for dependency in hashed_package_info.dependencies:
                 dependency.repository = None
-        hashed_package_info_str = json.dumps(hashed_package_info.model_dump(), sort_keys=True)
+        fingerprint_data = hashed_package_info.model_dump()
+        fingerprint_data["format_version"] = {"version_string": "5.2"}
+        hashed_package_info_str = json.dumps(fingerprint_data, sort_keys=True)
         package_fingerprint = "wrappfile-fingerprint;" + hashlib.sha256(hashed_package_info_str.encode(), usedforsecurity=False).hexdigest()
         return package_fingerprint, len(hashed_package_info_str)
 
@@ -191,7 +193,7 @@ class LoadedPackage:
         if not found:
             raise Exception("Program error - could not locate dependency install path in package setup")
         if is_relative_path(dependency.relative_destination):
-            return join_paths(self.install_base, dependency.relative_destination)
+            return join_url_path(self.install_base, dependency.relative_destination)
         else:
             return dependency.relative_destination
 
@@ -205,7 +207,7 @@ class LoadedPackage:
 
         # Add the dependencies. Load all directly dependent wrapp files and add their catalog to the result
         async def read_package_with_dependencies(tree_node: SchedulerTreeNode, dep: Dependency):
-            dep_install_path = join_paths(self.install_base, dep.relative_destination)
+            dep_install_path = join_url_path(self.install_base, dep.relative_destination)
             if use_repo_path:
                 dep_wrapp_file = wrapp_file_in_repo(Repository(repo_url=dep.repository), dep.package, dep.version)
             else:
@@ -217,38 +219,20 @@ class LoadedPackage:
                 use_repo_path=use_repo_path, add_subpackage_wrapp_files=add_subpackage_wrapp_files, task_node=tree_node
             )
             if add_subpackage_wrapp_files:
-                item_hash, item_size = dep_package.package_fingerprint()
                 source_base = get_base_directory_from_url(dep_package.wrapp_file_url)
-                stat_result, stat_item = await wrapp_stat_and_calculate_hash_if_missing(dep_package.wrapp_file_url)
-                if stat_result != Result.OK:
-                    raise StorageOperationError(f"Can't stat wrapp file at {dep_package.wrapp_file_url}")
-                if stat_item.nucleus_hash is None:
-                    raise FailedCommand(f"no hash for {dep_package.wrapp_file_url}")
-
-                # Generate resource identity if supported
-                resource_identity = None
                 relative_path = make_relative_url(source_base, dep_package.wrapp_file_url)
-                if has_checkpoint(stat_item):
-                    storage = Router.me().storage_for_read(dep_package.wrapp_file_url)
-                    try:
-                        new_absolute_url, new_relative_path, resource_identity_obj = await storage.make_resource_identity(
-                            dep_package.wrapp_file_url, stat_item, relative_path
-                        )
-                        resource_identity = resource_identity_obj.to_string()
-                        relative_path = new_relative_path
-                    except (NotImplementedError, TypeError):
-                        # Storage doesn't support permalinks
-                        pass
+                observation = await wrapp_capture_file_observation(dep_package.wrapp_file_url, relative_path)
 
                 wrapp_file_catalog = Catalog(
                     root=source_base,
                     items=[
                         CatalogItem(
-                            source_path=new_absolute_url if resource_identity else dep_package.wrapp_file_url,
+                            source_path=dep_package.wrapp_file_url,
                             relative_path=relative_path,
-                            hash=stat_item.nucleus_hash,
-                            size=stat_item.size,
-                            resource_identity=resource_identity,
+                            hash=observation.hash,
+                            size=observation.size,
+                            resource_identity_v2=observation.resource_identity,
+                            modified_time=observation.modified_time,
                         )
                     ],
                 )
@@ -415,46 +399,27 @@ async def collect_super_packages(named_package_setup: LoadedPackage) -> list[Loa
 
 
 async def _recalculate_catalog_resource_identities(catalog: Catalog, context: CommandParameters, scheduler: SchedulerContext) -> None:
+    """Explicitly establish v2 for legacy entries, verifying their recorded bytes.
+
+    Stage every observation before changing the catalog; failure must not leave
+    a partially promoted catalog behind. Deprecated tokens are never consulted.
     """
-    Recalculate resource identities for catalog items that don't have them.
-    This is useful for old catalogs that were created before the resource_identity field was added.
-    """
-    items_without_identities = [item for item in catalog.items if not item.resource_identity]
+    items_without_identities = [item for item in catalog.items if item.resource_identity_v2 is None]
 
     if not items_without_identities:
         logger.info("All catalog items already have resource identities")
         return
 
-    logger.info(f"Recalculating resource_identity for {len(items_without_identities)} catalog items")
+    logger.info(f"Recalculating resource_identity_v2 for {len(items_without_identities)} catalog items")
+    observations = []
 
     async def recalculate_item_resource_identity(item):
-        # Get the full URL from the source_path
-        source_url = item.source_path
-
-        # Stat the file to get the ListEntry with checkpoint info
-        result, stat_item = await wrapp_stat(source_url)
-        if result != Result.OK:
-            logger.warning(f"Failed to stat {source_url} for permalink calculation: {result}")
-            return
-
-        # Try to generate resource_identity if the storage supports it
-        if has_checkpoint(stat_item):
-            storage = Router.me().storage_for_read(source_url)
-            try:
-                new_absolute_url, _new_relative_path, resource_identity_obj = await storage.make_resource_identity(
-                    source_url, stat_item, item.relative_path
-                )
-                item.resource_identity = resource_identity_obj.to_string()
-                # Update source_path to use the resource_identity
-                item.source_path = new_absolute_url
-                if context.verbose:
-                    logger.info(f"Generated resource_identity for {item.relative_path}: {item.resource_identity}")
-            except (NotImplementedError, TypeError) as e:
-                if context.verbose:
-                    logger.debug(f"Storage doesn't support resource_identity for {source_url}: {e}")
-        else:
-            if context.verbose:
-                logger.debug(f"No checkpoint available for {source_url}")
+        if not item.hash:
+            raise FailedCommand(f"Cannot validate identity recalculation for {item.source_path}: no recorded content hash")
+        observation = await wrapp_capture_file_observation(
+            item.source_path, item.relative_path, expected_hash=item.hash, expected_size=item.size
+        )
+        observations.append((item, observation))
 
     # Process all items in parallel
     async with scheduler.parent_task_node().create_task_group_node(
@@ -462,3 +427,7 @@ async def _recalculate_catalog_resource_identities(catalog: Catalog, context: Co
     ) as task_node:
         for item in items_without_identities:
             task_node.create_task(recalculate_item_resource_identity(item), name="Recalculate resource_identity")
+    for item, observation in observations:
+        item.resource_identity_v2 = observation.resource_identity
+        item.size = observation.size
+        item.modified_time = observation.modified_time

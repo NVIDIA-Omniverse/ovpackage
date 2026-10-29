@@ -57,7 +57,6 @@ from wrapp.utils.coro import (
 from wrapp.utils.ensure_scheduler import ensure_scheduler
 from wrapp.utils.storage import (
     Result,
-    wrapp_copy,
     wrapp_read_file_content,
     wrapp_url_is_folder,
 )

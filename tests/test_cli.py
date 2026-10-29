@@ -20,6 +20,7 @@ from typing import (
 )
 
 import pytest
+from typer.main import get_command
 
 import wrapp
 from wrapp.cli import *
@@ -49,6 +50,20 @@ def insert_variables(command_line: List[str], values: Dict):
         new_command_line.append(c.format(**values))
     assert not any(["{" in new_command_line])  # Make sure all variables were specified and no {} are left after format()
     return new_command_line
+
+
+def test_all_cli_commands_accept_log_file_OMPE_104725(cli_runner, local_tmp_folder):
+    """Every registered command accepts the shared logging option."""
+    root_command = get_command(app)
+    failures = {}
+
+    for command_name in sorted(root_command.commands):
+        log_file = os.path.join(local_tmp_folder, f"{command_name}.log")
+        result = cli_runner.invoke(app, [command_name, "--log-file", log_file, "--help"])
+        if result.exit_code != 0:
+            failures[command_name] = result.output
+
+    assert failures == {}
 
 
 @pytest.mark.parametrize(
@@ -491,8 +506,8 @@ async def test_delete_packages_parameters(command_line, expected_exit_code, auth
     [
         (
             ["{wrapp_file}", "{output_file}"],
-            0,
-        ),  # First test that this command works with valid parameters
+            1,
+        ),  # Arguments are valid, but local files cannot supply storage-core identities
         (
             [],
             "missing_param",
@@ -500,7 +515,9 @@ async def test_delete_packages_parameters(command_line, expected_exit_code, auth
         (["{wrapp_file}"], "missing_param"),  # Missing output argument
         (["{output_file}"], "missing_param"),  # Missing wrapp_file argument
         (["{nonexistent_file}", "{output_file}"], 1),  # Non-existent wrapp file
-        (["{wrapp_file}", "{output_file}", "--overwrite"], 0),  # With overwrite flag
+        (["{wrapp_file}", "{output_file}", "--overwrite"], 1),  # Overwrite does not relax the identity requirement
+        (["{wrapp_file}", "{output_file}", "--recalculate-identities"], 1),
+        (["{wrapp_file}", "{output_file}", "--no-recalculate-identities"], 1),
     ],
 )
 @pytest.mark.asyncio

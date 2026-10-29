@@ -37,7 +37,7 @@ def initialize(debug_level: bool = False, throttling_params: Optional[Throttling
     Initialization performs the following steps in order:
 
     1. **Router** — Creates all enabled storage backend objects (S3, Azure, GCS,
-       Nucleus, Local, and optionally Storage API). Each backend is only created
+       Hugging Face, Nucleus, Local, and optionally Storage API). Each backend is only created
        when its corresponding environment flag allows it (e.g.
        ``WRAPP_ENABLE_STORAGE_API=True``).
     2. **Event loop thread** — Starts the internal async event loop used by all

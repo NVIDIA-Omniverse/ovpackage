@@ -36,6 +36,9 @@ from wrapp.app import (
     measure_time,
     print_stats,
 )
+from wrapp.commands.case_insensitive_paths import (
+    raise_if_case_insensitive_path_conflicts,
+)
 from wrapp.commands.catalog import catalog
 from wrapp.datastructures.authentication import capture_auth
 from wrapp.datastructures.catalog import (
@@ -51,6 +54,7 @@ from wrapp.datastructures.command_context import (
 )
 from wrapp.datastructures.package import (
     PackageInfo,
+    apply_source_policy,
     is_package_file_name,
     write_package_info,
 )
@@ -64,6 +68,7 @@ from wrapp.datastructures.package_standard import (
 )
 from wrapp.options import (
     AuthOption,
+    CanonicalSourceOption,
     DebugLevelFlag,
     FileTransferJobsNumber,
     InteractiveAuthFlag,
@@ -73,6 +78,7 @@ from wrapp.options import (
     ProgressReportOption,
     RepoRequiredOption,
     StatsFlag,
+    StripSourceFlag,
     TimeFlag,
     VerboseFlag,
 )
@@ -86,15 +92,17 @@ from wrapp.utils.coro import (
 from wrapp.utils.ensure_scheduler import ensure_scheduler
 from wrapp.utils.storage import (
     Result,
-    wrapp_copy_item_optimized,
+    wrapp_copy_address_optimized,
+    wrapp_require_writable,
     wrapp_url_exists,
     wrapp_write_file_bytes,
 )
+from wrapp.utils.storage_interface import ResourceAddress
 from wrapp.utils.temp_file_manager import TempFileManager
 from wrapp.utils.utils import (
     FailedCommand,
     StorageOperationError,
-    join_paths,
+    join_url_path,
     validate_non_empty_string,
 )
 from wrapp.utils.wrapp_init_for_cmd import wrapp_init_for_cmd
@@ -114,6 +122,8 @@ async def import_command(
     package_file: str = typer.Argument(..., help="Specify the name of the tar package to import"),
     repo: str = RepoRequiredOption,
     overwrite: bool = OverwriteFlag,
+    strip_source: bool = StripSourceFlag,
+    canonical_source: Optional[str] = CanonicalSourceOption,
     auth: Optional[List[str]] = AuthOption,
     interactive_auth: bool = InteractiveAuthFlag,
     file_transfer_jobs: int = FileTransferJobsNumber,
@@ -132,7 +142,15 @@ async def import_command(
     try:
         async with WrappSchedulerCLI(params=scheduler_params) as scheduler:
             logger.info(f"Connecting to repository {repo}...")
-            await import_package(package_file, repo, overwrite=overwrite, context=context, scheduler=scheduler)
+            await import_package(
+                package_file,
+                repo,
+                overwrite=overwrite,
+                strip_source=strip_source,
+                canonical_source=canonical_source,
+                context=context,
+                scheduler=scheduler,
+            )
 
     except FailedCommand as e:
         logger.error(f"Failure to import '{package_file}' to '{repo}': {e}")
@@ -227,6 +245,8 @@ async def import_package(
     repository: str,
     overwrite: bool = False,
     *,
+    strip_source: bool = False,
+    canonical_source: Optional[str] = None,
     context: CommandParameters = CommandParameters(),
     scheduler: Optional[SchedulerContext] = None,
 ) -> None:
@@ -236,6 +256,8 @@ async def import_package(
     :param package_file: Name of tar file to import. Note the naming convention is that it is either <package_name>.tar or <package_name>.<version>.tar
     :param repository: URL of the repository to write the package to (excluding the .packages directory)
     :param overwrite: Set this to allow overwriting an existing package. Note this might leave extra files in the repository.
+    :param strip_source: When True, clear the source and repository provenance fields in the imported .wrapp file so internal addresses are not published. Mutually exclusive with canonical_source.
+    :param canonical_source: When set, record this canonical base URL as the source/repository provenance instead of the internal address. Mutually exclusive with strip_source.
     :param context: Global configuration parameters
     :param scheduler: Optionally pre-constructed SchedulerContext. When calling many functions in a row make sure to pre-construct the scheduler.
 
@@ -243,9 +265,12 @@ async def import_package(
     :raises StorageOperationError: Raised when network or file operations fail
     """
     validate_non_empty_string("repository", repository)
+    wrapp_require_writable(repository)
 
     if scheduler is None:
         raise RuntimeError("No scheduler present and ensure_scheduler malfunctioned, program error!")
+    if strip_source and canonical_source:
+        raise FailedCommand("Use either --strip-source or --canonical-source, not both.")
     logger.info(f"Opening tar {package_file}...")
     # Task structure:
     #  Uploading files
@@ -270,6 +295,7 @@ async def import_package(
             stripped_package.catalog.items = [
                 item for item in stripped_package.catalog.items if not is_package_standard_sidecar_path(item.relative_path)
             ]
+            raise_if_case_insensitive_path_conflicts(stripped_package.catalog, target_url)
 
             # Now loop the catalog content.
             # Concurrency is bounded by TempFileManager's capacity limits
@@ -306,7 +332,7 @@ async def import_package(
         if len(not_updated) != 1:
             for item in not_updated:
                 logger.warning(f"Could not update source_path of item '{item.relative_path}', missing in import destination")
-        upload_path = join_paths(target_url, package_catalog_in_tar.path)
+        upload_path = join_url_path(target_url, package_catalog_in_tar.path)
         # Carry whatever package-standard sidecars the archive contains, verbatim. The import trusts the
         # archive's .wrapp catalog and content hashes without re-validation, so the sidecars are trusted the
         # same way: no license, dependency, or schema gating, and no regeneration or re-hashing.
@@ -315,7 +341,9 @@ async def import_package(
             await _write_imported_sidecar(context, sidecar_paths.definition_url, package_standard_definition_seed, overwrite=overwrite)
         target_metadata_dir = package_standard_metadata_folder_url(upload_path)
         for rel_path, metadata_bytes in package_standard_metadata.items():
-            await _write_imported_sidecar(context, join_paths(target_metadata_dir, rel_path), metadata_bytes, overwrite=overwrite)
+            await _write_imported_sidecar(context, join_url_path(target_metadata_dir, rel_path), metadata_bytes, overwrite=overwrite)
+        # Keep internal source addresses out of the imported (published) package if requested
+        apply_source_policy(stripped_package, strip_source=strip_source, canonical_source=canonical_source)
         await write_package_info(upload_path, stripped_package, context)
 
 
@@ -328,7 +356,7 @@ async def upload_task(
     package_file: str,
     catalog: Catalog,
 ):
-    upload_path = join_paths(target_url, item.relative_path)
+    upload_path = join_url_path(target_url, item.relative_path)
     if progress_verbosity == ProgressReportVerbosity.off:
         logger.info(f"Uploading {upload_path}")
     storage_path = catalog.get_storage_path_for_item(item)
@@ -345,6 +373,13 @@ async def upload_task(
         with open(tmp.path, "wb") as tmp_file:
             shutil.copyfileobj(file_obj, tmp_file)
         tmp.write_completed()
-        result = await wrapp_copy_item_optimized(context, tmp.url, upload_path, item.hash, overwrite=True, force_upload=False)
+        result = await wrapp_copy_address_optimized(
+            context,
+            ResourceAddress(tmp.url),
+            ResourceAddress(upload_path),
+            item.hash,
+            overwrite=True,
+            force_upload=False,
+        )
         if result != Result.OK:
             raise StorageOperationError(f"Failed to upload file to {upload_path}: {result}")

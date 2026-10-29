@@ -107,9 +107,31 @@ class PatchOpList_V2_0(WRAPPFileModel):
         return PatchOpList_V2_0(**data_dict)
 
 
+class PatchOpCopy_V3_0(PatchOpCopy_V1):
+    resource_identity_v2: Optional[str] = Field(default=None, min_length=1)
+
+
+PatchOpUnion_V3_0 = Annotated[
+    Union[PatchOpCopy_V3_0, PatchOpDelete_V1, PatchOpCreateFolder_V1, PatchOpAddTag_V1, PatchOpDeleteTag_V1],
+    Field(discriminator="operation_type"),
+]
+
+
+class PatchOpList_V3_0(WRAPPFileModel):
+    format_version: WRAPPModelVersion = WRAPPModelVersion(version_string="3.0")
+    operations: list[PatchOpUnion_V3_0]
+
+    @classmethod
+    def migrate_major_version(cls, read_data: PatchOpList_V2_0) -> "PatchOpList_V3_0":
+        data_dict = read_data.model_dump()
+        data_dict.pop("format_version")
+        return PatchOpList_V3_0(**data_dict)
+
+
 # Versioned classes above are compatibility snapshots. Do not edit an
 # existing class body after it has shipped; add a new class and registry entry
 # for a new file format version instead.
 all_old_file_model_classes[("PatchOpList", WRAPPModelVersion(version_string="0"))] = PatchOpList_V1
 all_old_file_model_classes[("PatchOpList", WRAPPModelVersion(version_string="1"))] = PatchOpList_V1
 all_old_file_model_classes[("PatchOpList", WRAPPModelVersion(version_string="2.0"))] = PatchOpList_V2_0
+all_old_file_model_classes[("PatchOpList", WRAPPModelVersion(version_string="3.0"))] = PatchOpList_V3_0

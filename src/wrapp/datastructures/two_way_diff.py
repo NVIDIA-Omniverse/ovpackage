@@ -30,7 +30,7 @@ from wrapp.utils.utils import get_path_from_url
 
 
 class Diff:
-    not_to_compare_fields = ["source_path", "version", "resource_identity"]
+    not_to_compare_fields = ["source_path", "version", "resource_identity", "resource_identity_v2", "modified_time"]
 
     @staticmethod
     def _build_compare_field_list(a: List[Dict], b: List[Dict], fields_to_ignore: List[str]):

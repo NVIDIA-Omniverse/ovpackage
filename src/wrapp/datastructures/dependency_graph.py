@@ -52,6 +52,7 @@ from wrapp.utils.utils import (
     drop_trailing_slashes,
     get_base_directory_from_url,
     join_paths,
+    join_url_path,
     make_relative_url,
     normalize_url,
 )
@@ -178,7 +179,7 @@ class DependencyGraph:
             context,
             task_node,
             LoadedPackage(normalized_dependency_file, dependency_setup),
-            join_paths(root, dependency.relative_destination),
+            join_url_path(root, dependency.relative_destination),
             ignore_version_conflicts=ignore_version_conflicts,
             fallback_repo=Repository(repo_url=dependency.repository),
             opened_dependency_files=opened_dependency_files,  # Pass the list of opened files
@@ -360,7 +361,7 @@ async def _collect_recursive_dependency(
     else:
         # Load the dependent package from the installation location
         dependency_install_path = named_package_setup.dependency_install_path(dependency)
-        dependency_package_file = join_paths(dependency_install_path, f".{dependency.package}.wrapp")
+        dependency_package_file = join_url_path(dependency_install_path, f".{dependency.package}.wrapp")
         if not await wrapp_url_exists(dependency_package_file):
             raise FailedCommand(
                 f"Failed to collect files of recorded dependency at {dependency_package_file} imported by '{named_package_setup.package.name}', package incomplete!"
@@ -400,7 +401,7 @@ async def _collect_recursive_dependency(
             raise FailedCommand(f"Discovered sub package without catalog: {dependency_package_file} - please remove empty package")
 
         for item in dependency_setup.catalog.items:
-            absolute_path = join_paths(dependency_install_path, item.relative_path)
+            absolute_path = join_url_path(dependency_install_path, item.relative_path)
             skip_files.add(absolute_path)
         results.append(skip_files)
         more_skip_files = await collect_recursive_dependencies(

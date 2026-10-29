@@ -1,0 +1,15 @@
+{
+  "format_version": {"version_string": "5.0"},
+  "root": "s3://legacy-bucket/legacy%20root",
+  "items": [
+    {
+      "source_path": "s3://legacy-bucket/legacy%20root/asset%3F.txt",
+      "relative_path": "asset%3F.txt",
+      "hash": null,
+      "size": null,
+      "tags": null,
+      "resource_identity": null
+    }
+  ],
+  "storage_map": null
+}

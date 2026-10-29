@@ -45,6 +45,7 @@ class UploadMethod(int, metaclass=_enum_type_wrapper.EnumTypeWrapper):
     UPLOAD_METHOD_UNSPECIFIED: _ClassVar[UploadMethod]
     UPLOAD_METHOD_POST: _ClassVar[UploadMethod]
     UPLOAD_METHOD_PUT: _ClassVar[UploadMethod]
+
 DOWNLOAD_PREFERENCE_UNSPECIFIED: DownloadPreference
 DOWNLOAD_PREFERENCE_BODY: DownloadPreference
 DOWNLOAD_PREFERENCE_REDIRECT: DownloadPreference
@@ -86,7 +87,11 @@ class ReadRequest(_message.Message):
     DOWNLOAD_PREFERENCE_FIELD_NUMBER: _ClassVar[int]
     resource_identity: _fileobject_pb2.ResourceIdentity
     download_preference: DownloadPreference
-    def __init__(self, resource_identity: _Optional[_Union[_fileobject_pb2.ResourceIdentity, _Mapping]] = ..., download_preference: _Optional[_Union[DownloadPreference, str]] = ...) -> None: ...
+    def __init__(
+        self,
+        resource_identity: _Optional[_Union[_fileobject_pb2.ResourceIdentity, _Mapping]] = ...,
+        download_preference: _Optional[_Union[DownloadPreference, str]] = ...,
+    ) -> None: ...
 
 class ReadResponse(_message.Message):
     __slots__ = ("metadata", "chunk", "redirect")
@@ -96,7 +101,12 @@ class ReadResponse(_message.Message):
     metadata: _fileobject_pb2.Metadata
     chunk: _fileobject_pb2.Chunk
     redirect: _fileobject_pb2.Redirect
-    def __init__(self, metadata: _Optional[_Union[_fileobject_pb2.Metadata, _Mapping]] = ..., chunk: _Optional[_Union[_fileobject_pb2.Chunk, _Mapping]] = ..., redirect: _Optional[_Union[_fileobject_pb2.Redirect, _Mapping]] = ...) -> None: ...
+    def __init__(
+        self,
+        metadata: _Optional[_Union[_fileobject_pb2.Metadata, _Mapping]] = ...,
+        chunk: _Optional[_Union[_fileobject_pb2.Chunk, _Mapping]] = ...,
+        redirect: _Optional[_Union[_fileobject_pb2.Redirect, _Mapping]] = ...,
+    ) -> None: ...
 
 class ReadFromAddressRequest(_message.Message):
     __slots__ = ("resource_address", "download_preference")
@@ -104,7 +114,9 @@ class ReadFromAddressRequest(_message.Message):
     DOWNLOAD_PREFERENCE_FIELD_NUMBER: _ClassVar[int]
     resource_address: str
     download_preference: DownloadPreference
-    def __init__(self, resource_address: _Optional[str] = ..., download_preference: _Optional[_Union[DownloadPreference, str]] = ...) -> None: ...
+    def __init__(
+        self, resource_address: _Optional[str] = ..., download_preference: _Optional[_Union[DownloadPreference, str]] = ...
+    ) -> None: ...
 
 class ReadFromAddressResponse(_message.Message):
     __slots__ = ("resource_info", "chunk", "redirect")
@@ -114,7 +126,12 @@ class ReadFromAddressResponse(_message.Message):
     resource_info: _fileobject_pb2.ResourceInfo
     chunk: _fileobject_pb2.Chunk
     redirect: _fileobject_pb2.Redirect
-    def __init__(self, resource_info: _Optional[_Union[_fileobject_pb2.ResourceInfo, _Mapping]] = ..., chunk: _Optional[_Union[_fileobject_pb2.Chunk, _Mapping]] = ..., redirect: _Optional[_Union[_fileobject_pb2.Redirect, _Mapping]] = ...) -> None: ...
+    def __init__(
+        self,
+        resource_info: _Optional[_Union[_fileobject_pb2.ResourceInfo, _Mapping]] = ...,
+        chunk: _Optional[_Union[_fileobject_pb2.Chunk, _Mapping]] = ...,
+        redirect: _Optional[_Union[_fileobject_pb2.Redirect, _Mapping]] = ...,
+    ) -> None: ...
 
 class FetchWriteTypeInfoRequest(_message.Message):
     __slots__ = ("destination_resource_address",)
@@ -130,7 +147,12 @@ class WriteTypeForSizeInterval(_message.Message):
     minimum_data_object_size: int
     maximum_data_object_size: int
     preferred_upload_method: UploadPreference
-    def __init__(self, minimum_data_object_size: _Optional[int] = ..., maximum_data_object_size: _Optional[int] = ..., preferred_upload_method: _Optional[_Union[UploadPreference, str]] = ...) -> None: ...
+    def __init__(
+        self,
+        minimum_data_object_size: _Optional[int] = ...,
+        maximum_data_object_size: _Optional[int] = ...,
+        preferred_upload_method: _Optional[_Union[UploadPreference, str]] = ...,
+    ) -> None: ...
 
 class FetchWriteTypeInfoResponse(_message.Message):
     __slots__ = ("write_type_intervals",)
@@ -144,19 +166,30 @@ class WriteRequest(_message.Message):
     CHUNK_FIELD_NUMBER: _ClassVar[int]
     params: WriteParameters
     chunk: _fileobject_pb2.Chunk
-    def __init__(self, params: _Optional[_Union[WriteParameters, _Mapping]] = ..., chunk: _Optional[_Union[_fileobject_pb2.Chunk, _Mapping]] = ...) -> None: ...
+    def __init__(
+        self, params: _Optional[_Union[WriteParameters, _Mapping]] = ..., chunk: _Optional[_Union[_fileobject_pb2.Chunk, _Mapping]] = ...
+    ) -> None: ...
 
 class WriteParameters(_message.Message):
-    __slots__ = ("destination_resource_address", "previous_version", "data_object_size", "upload_preference")
+    __slots__ = ("destination_resource_address", "previous_version", "data_object_size", "upload_preference", "fail_if_exists")
     DESTINATION_RESOURCE_ADDRESS_FIELD_NUMBER: _ClassVar[int]
     PREVIOUS_VERSION_FIELD_NUMBER: _ClassVar[int]
     DATA_OBJECT_SIZE_FIELD_NUMBER: _ClassVar[int]
     UPLOAD_PREFERENCE_FIELD_NUMBER: _ClassVar[int]
+    FAIL_IF_EXISTS_FIELD_NUMBER: _ClassVar[int]
     destination_resource_address: str
     previous_version: _fileobject_pb2.ResourceIdentity
     data_object_size: int
     upload_preference: UploadPreference
-    def __init__(self, destination_resource_address: _Optional[str] = ..., previous_version: _Optional[_Union[_fileobject_pb2.ResourceIdentity, _Mapping]] = ..., data_object_size: _Optional[int] = ..., upload_preference: _Optional[_Union[UploadPreference, str]] = ...) -> None: ...
+    fail_if_exists: bool
+    def __init__(
+        self,
+        destination_resource_address: _Optional[str] = ...,
+        previous_version: _Optional[_Union[_fileobject_pb2.ResourceIdentity, _Mapping]] = ...,
+        data_object_size: _Optional[int] = ...,
+        upload_preference: _Optional[_Union[UploadPreference, str]] = ...,
+        fail_if_exists: bool = ...,
+    ) -> None: ...
 
 class WriteRedirectProperties(_message.Message):
     __slots__ = ("redirect_target_url", "method", "additional_headers", "completion_header_names")
@@ -168,7 +201,13 @@ class WriteRedirectProperties(_message.Message):
     method: UploadMethod
     additional_headers: _containers.RepeatedCompositeFieldContainer[_fileobject_pb2.Header]
     completion_header_names: _containers.RepeatedScalarFieldContainer[str]
-    def __init__(self, redirect_target_url: _Optional[str] = ..., method: _Optional[_Union[UploadMethod, str]] = ..., additional_headers: _Optional[_Iterable[_Union[_fileobject_pb2.Header, _Mapping]]] = ..., completion_header_names: _Optional[_Iterable[str]] = ...) -> None: ...
+    def __init__(
+        self,
+        redirect_target_url: _Optional[str] = ...,
+        method: _Optional[_Union[UploadMethod, str]] = ...,
+        additional_headers: _Optional[_Iterable[_Union[_fileobject_pb2.Header, _Mapping]]] = ...,
+        completion_header_names: _Optional[_Iterable[str]] = ...,
+    ) -> None: ...
 
 class WriteChunksAccepted(_message.Message):
     __slots__ = ()
@@ -184,7 +223,13 @@ class WriteResponse(_message.Message):
     resource_info: _fileobject_pb2.ResourceInfo
     write_redirect: WriteRedirectProperties
     multipart_upload: CreateMultipartUploadResponse
-    def __init__(self, write_chunks_accepted: _Optional[_Union[WriteChunksAccepted, _Mapping]] = ..., resource_info: _Optional[_Union[_fileobject_pb2.ResourceInfo, _Mapping]] = ..., write_redirect: _Optional[_Union[WriteRedirectProperties, _Mapping]] = ..., multipart_upload: _Optional[_Union[CreateMultipartUploadResponse, _Mapping]] = ...) -> None: ...
+    def __init__(
+        self,
+        write_chunks_accepted: _Optional[_Union[WriteChunksAccepted, _Mapping]] = ...,
+        resource_info: _Optional[_Union[_fileobject_pb2.ResourceInfo, _Mapping]] = ...,
+        write_redirect: _Optional[_Union[WriteRedirectProperties, _Mapping]] = ...,
+        multipart_upload: _Optional[_Union[CreateMultipartUploadResponse, _Mapping]] = ...,
+    ) -> None: ...
 
 class CompleteRedirectUploadRequest(_message.Message):
     __slots__ = ("destination_resource_address", "additional_headers")
@@ -192,7 +237,11 @@ class CompleteRedirectUploadRequest(_message.Message):
     ADDITIONAL_HEADERS_FIELD_NUMBER: _ClassVar[int]
     destination_resource_address: str
     additional_headers: _containers.RepeatedCompositeFieldContainer[_fileobject_pb2.Header]
-    def __init__(self, destination_resource_address: _Optional[str] = ..., additional_headers: _Optional[_Iterable[_Union[_fileobject_pb2.Header, _Mapping]]] = ...) -> None: ...
+    def __init__(
+        self,
+        destination_resource_address: _Optional[str] = ...,
+        additional_headers: _Optional[_Iterable[_Union[_fileobject_pb2.Header, _Mapping]]] = ...,
+    ) -> None: ...
 
 class CompleteRedirectUploadResponse(_message.Message):
     __slots__ = ("resource_info",)
@@ -212,7 +261,14 @@ class CreateMultipartUploadResponse(_message.Message):
     maximum_parts_number: int
     minimum_size_per_part: int
     maximum_size_per_part: int
-    def __init__(self, upload_id: _Optional[str] = ..., first_part_write_redirect: _Optional[_Union[WriteRedirectProperties, _Mapping]] = ..., maximum_parts_number: _Optional[int] = ..., minimum_size_per_part: _Optional[int] = ..., maximum_size_per_part: _Optional[int] = ...) -> None: ...
+    def __init__(
+        self,
+        upload_id: _Optional[str] = ...,
+        first_part_write_redirect: _Optional[_Union[WriteRedirectProperties, _Mapping]] = ...,
+        maximum_parts_number: _Optional[int] = ...,
+        minimum_size_per_part: _Optional[int] = ...,
+        maximum_size_per_part: _Optional[int] = ...,
+    ) -> None: ...
 
 class UploadPartRequest(_message.Message):
     __slots__ = ("upload_id", "destination_resource_address", "part_number", "part_count")
@@ -224,7 +280,13 @@ class UploadPartRequest(_message.Message):
     destination_resource_address: str
     part_number: int
     part_count: int
-    def __init__(self, upload_id: _Optional[str] = ..., destination_resource_address: _Optional[str] = ..., part_number: _Optional[int] = ..., part_count: _Optional[int] = ...) -> None: ...
+    def __init__(
+        self,
+        upload_id: _Optional[str] = ...,
+        destination_resource_address: _Optional[str] = ...,
+        part_number: _Optional[int] = ...,
+        part_count: _Optional[int] = ...,
+    ) -> None: ...
 
 class UploadPartResponse(_message.Message):
     __slots__ = ("part_write_redirects",)
@@ -238,7 +300,9 @@ class CompletedUploadPart(_message.Message):
     HEADERS_FIELD_NUMBER: _ClassVar[int]
     part_number: int
     headers: _containers.RepeatedCompositeFieldContainer[_fileobject_pb2.Header]
-    def __init__(self, part_number: _Optional[int] = ..., headers: _Optional[_Iterable[_Union[_fileobject_pb2.Header, _Mapping]]] = ...) -> None: ...
+    def __init__(
+        self, part_number: _Optional[int] = ..., headers: _Optional[_Iterable[_Union[_fileobject_pb2.Header, _Mapping]]] = ...
+    ) -> None: ...
 
 class CompleteMultipartUploadRequest(_message.Message):
     __slots__ = ("upload_id", "destination_resource_address", "parts")
@@ -248,7 +312,12 @@ class CompleteMultipartUploadRequest(_message.Message):
     upload_id: str
     destination_resource_address: str
     parts: _containers.RepeatedCompositeFieldContainer[CompletedUploadPart]
-    def __init__(self, upload_id: _Optional[str] = ..., destination_resource_address: _Optional[str] = ..., parts: _Optional[_Iterable[_Union[CompletedUploadPart, _Mapping]]] = ...) -> None: ...
+    def __init__(
+        self,
+        upload_id: _Optional[str] = ...,
+        destination_resource_address: _Optional[str] = ...,
+        parts: _Optional[_Iterable[_Union[CompletedUploadPart, _Mapping]]] = ...,
+    ) -> None: ...
 
 class CompleteMultipartUploadResponse(_message.Message):
     __slots__ = ("resource_info",)
@@ -274,7 +343,9 @@ class DeleteRequest(_message.Message):
     PREVIOUS_VERSION_FIELD_NUMBER: _ClassVar[int]
     resource_address: str
     previous_version: _fileobject_pb2.ResourceIdentity
-    def __init__(self, resource_address: _Optional[str] = ..., previous_version: _Optional[_Union[_fileobject_pb2.ResourceIdentity, _Mapping]] = ...) -> None: ...
+    def __init__(
+        self, resource_address: _Optional[str] = ..., previous_version: _Optional[_Union[_fileobject_pb2.ResourceIdentity, _Mapping]] = ...
+    ) -> None: ...
 
 class DeleteResponse(_message.Message):
     __slots__ = ()

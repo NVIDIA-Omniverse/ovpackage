@@ -28,7 +28,15 @@ from typing import (
     Optional,
     Tuple,
 )
-from urllib.parse import urlparse
+from urllib.parse import (
+    parse_qs,
+    parse_qsl,
+    unquote,
+    urlencode,
+    urlparse,
+    urlsplit,
+    urlunsplit,
+)
 
 from wrapp.datastructures.command_context import ThrottlingParameters
 from wrapp.utils.nucleus_hash import calc_nucleus_hash_from_stream
@@ -44,6 +52,7 @@ from wrapp.utils.storage_interface import (
     ServerInfo,
     StorageAuthInfo,
     StorageInterface,
+    URLResourceIdentity,
 )
 from wrapp.utils.task_throttler import (
     TaskThrottler,
@@ -52,7 +61,7 @@ from wrapp.utils.task_throttler import (
 from wrapp.utils.utils import (
     StorageMissingDependenciesError,
     StorageOperationError,
-    get_path_from_url,
+    file_url_to_path,
     parse_env_float,
 )
 
@@ -72,6 +81,7 @@ try:
         Forbidden,
         GoogleAPICallError,
         NotFound,
+        PreconditionFailed,
         RetryError,
     )
     from google.api_core.retry import Retry
@@ -87,12 +97,20 @@ try:
 except ImportError as e:
     # The list of dependencies should be the same as in pyproject.toml
     missing = getattr(e, "name", str(e))
-    error_msg = f"failed to import {missing}. Required dependency: google-cloud-storage. Install with 'pip install ovpackage[gcs]'. Exception: {e}"
+    error_msg = (
+        f"failed to import {missing}. Required dependency: google-cloud-storage. "
+        "Install with 'pip install \"ovpackage[gcs]\"'. "
+        f"Exception: {e}"
+    )
     raise StorageMissingDependenciesError(error_msg) from e
 
 
 # Constants
 NUCLEUS_HASH_METADATA_KEY = "nv_omniverse_nucleus_hash"
+
+
+class _InvalidGCSGenerationError(ValueError):
+    """Raised when a GCS identity URL contains a malformed generation."""
 
 
 def _log_gcs_retry(exc: Exception) -> None:
@@ -117,7 +135,7 @@ def parse_gcs_url(url: str) -> Tuple[str, str]:
     if parsed.scheme == "gs":
         # gs://bucket/key
         bucket_name = parsed.netloc
-        object_name = parsed.path.lstrip("/")
+        object_name = unquote(parsed.path.lstrip("/"))
         if url.endswith("/") and object_name != "" and not object_name.endswith("/"):
             object_name = object_name + "/"
         return bucket_name, object_name
@@ -126,7 +144,7 @@ def parse_gcs_url(url: str) -> Tuple[str, str]:
         # https://storage.googleapis.com/bucket/key
         path_parts = parsed.path.strip("/").split("/", 1)
         bucket_name = path_parts[0] if path_parts else ""
-        object_name = path_parts[1] if len(path_parts) > 1 else ""
+        object_name = unquote(path_parts[1]) if len(path_parts) > 1 else ""
         if url.endswith("/") and object_name != "":
             object_name = object_name + "/"
         return bucket_name, object_name
@@ -148,6 +166,33 @@ def is_gcs_url(url: str) -> bool:
         return bool(bucket_name)
     except ValueError:
         return False
+
+
+def _gcs_identity_request_args(url: str) -> Tuple[Optional[int], Dict[str, int]]:
+    """Decode a WRAPP GCS identity into its generation selector and guard."""
+    generation_value = parse_qs(urlparse(url).query, keep_blank_values=True).get("generation", [None])[-1]
+    if generation_value is None:
+        return None, {}
+    try:
+        generation = int(generation_value)
+    except (TypeError, ValueError) as e:
+        raise _InvalidGCSGenerationError(f"Invalid GCS generation: {generation_value!r}") from e
+    if generation < 0:
+        raise _InvalidGCSGenerationError(f"Invalid GCS generation: {generation_value!r}")
+    # Selection already pins the immutable generation. Repeat it as a
+    # precondition so exactness still fails closed if a call path ever stops
+    # applying the Blob selector; this adds no extra request.
+    return generation, {"if_generation_match": generation}
+
+
+def _gcs_resource_identity_url(url: str, entry: "GCSListEntry") -> str:
+    """Mint a native generation-qualified identity from captured list/stat metadata."""
+    if entry.gcs_generation is None:
+        raise StorageOperationError(f"GCS object has no generation: {url}", Result.ERROR_BAD_VERSION)
+    split_url = urlsplit(url)
+    query = [(key, value) for key, value in parse_qsl(split_url.query) if key != "generation"]
+    query.append(("generation", str(entry.gcs_generation)))
+    return urlunsplit(split_url._replace(query=urlencode(query)))
 
 
 class GCSListEntry(ListEntry):
@@ -182,6 +227,7 @@ class GCSListEntry(ListEntry):
             size=size,
             last_modified=last_modified,
             nucleus_hash=nucleus_hash,
+            generation=int(blob.generation) if blob.generation is not None else None,
         )
 
     @classmethod
@@ -194,6 +240,7 @@ class GCSListEntry(ListEntry):
         etag: str = "",
         parent_path: str = "",
         nucleus_hash: Optional[str] = None,
+        generation: Optional[int] = None,
     ) -> "GCSListEntry":
         """Create a ListEntry from blob properties."""
         return GCSListEntry(
@@ -204,6 +251,7 @@ class GCSListEntry(ListEntry):
             size=size,
             last_modified=last_modified,
             nucleus_hash=nucleus_hash,
+            generation=generation,
         )
 
     @classmethod
@@ -233,6 +281,7 @@ class GCSListEntry(ListEntry):
         size: Optional[int] = None,
         last_modified: Optional[datetime] = None,
         nucleus_hash: Optional[str] = None,
+        generation: Optional[int] = None,
     ) -> None:
         if parent_path and not parent_path.endswith("/"):
             parent_path += "/"
@@ -243,6 +292,7 @@ class GCSListEntry(ListEntry):
         assert size is None or (isinstance(size, int) and size >= 0)
         assert last_modified is None or isinstance(last_modified, datetime)
         assert nucleus_hash is None or (isinstance(nucleus_hash, str) and nucleus_hash != "")
+        assert generation is None or (isinstance(generation, int) and generation >= 0)
 
         self._etag = etag
         self._is_folder = is_folder
@@ -250,6 +300,7 @@ class GCSListEntry(ListEntry):
         self._size = size
         self._last_modified = last_modified
         self._nucleus_hash = nucleus_hash
+        self._generation = generation
 
     @property
     def is_folder(self) -> bool:
@@ -261,11 +312,19 @@ class GCSListEntry(ListEntry):
 
     @property
     def has_checkpoint(self) -> bool:
-        return False
+        return self.is_regular_file
 
     @property
     def version(self) -> str:
-        return "1"
+        return str(self._generation) if self._generation is not None else "1"
+
+    @property
+    def gcs_generation(self) -> Optional[int]:
+        return self._generation
+
+    @property
+    def etag(self) -> str:
+        return self._etag
 
     @property
     def relative_path(self) -> str:
@@ -550,6 +609,7 @@ class GCSStorage(StorageInterface):
     async def stat(self, url: str) -> Tuple[Result, Optional[ListEntry]]:
         try:
             bucket_name, object_name = parse_gcs_url(url)
+            generation, identity_args = _gcs_identity_request_args(url)
             client = self.gcs_client().get_sync_client()
             bucket = client.bucket(bucket_name)
 
@@ -580,13 +640,16 @@ class GCSStorage(StorageInterface):
                         return Result.ERROR_NOT_FOUND, None
             else:
                 # For file-like paths, try to get the blob properties
-                blob = bucket.blob(object_name)
+                blob = bucket.blob(object_name, generation=generation)
+                request_args = {**self._sdk_call_kwargs, **identity_args}
                 try:
                     await self._throttler_roundtrip.run(
-                        asyncio.get_running_loop().run_in_executor(None, lambda: blob.reload(**self._sdk_call_kwargs))
+                        asyncio.get_running_loop().run_in_executor(None, lambda: blob.reload(**request_args))
                     )
                     return Result.OK, GCSListEntry.file_from_blob(object_name, blob)
-                except NotFound:
+                except (NotFound, PreconditionFailed):
+                    if generation is not None or identity_args:
+                        return Result.ERROR_NOT_FOUND, None
                     # Check if there's a directory with this name
                     directory_path = object_name + "/"
                     blobs = list(
@@ -610,7 +673,7 @@ class GCSStorage(StorageInterface):
             logger.error(f"GCS stat {url} failed because of permission error: {e}")
             self._last_connection_status = ConnectionStatus.AUTH_ERROR
             return Result.ERROR_ACCESS_DENIED, None
-        except NotFound:
+        except (_InvalidGCSGenerationError, NotFound, PreconditionFailed):
             return Result.ERROR_NOT_FOUND, None
         except (GoogleAPICallError, RetryError) as e:
             logger.error(f"GCS error during stat {url}: {e}")
@@ -618,7 +681,25 @@ class GCSStorage(StorageInterface):
             return Result.ERROR, None
 
     async def make_resource_identity(self, file_url, item: ListEntry, relative_url) -> Tuple[str, str, ResourceIdentity]:
-        raise NotImplementedError("Resource identities not supported for GCS yet")
+        if not isinstance(item, GCSListEntry) or not item.is_regular_file:
+            raise TypeError("Can only generate resource identities for GCS files")
+        if item.gcs_generation is not None:
+            # Listing and stat both return the generation and its hash metadata.
+            # Preserve that observation rather than querying the mutable head.
+            return file_url, relative_url, URLResourceIdentity(_gcs_resource_identity_url(file_url, item))
+        result, stat_item = await self.stat(file_url)
+        if result != Result.OK or not isinstance(stat_item, GCSListEntry):
+            raise StorageOperationError(f"Cannot generate GCS resource identity for {file_url}: stat returned {result}", result)
+        if item.size is not None and stat_item.size != item.size:
+            raise StorageOperationError(f"GCS object changed size while cataloging {file_url}", Result.ERROR_BAD_VERSION)
+        if item.gcs_generation is not None and stat_item.gcs_generation != item.gcs_generation:
+            raise StorageOperationError(f"GCS object changed generation while cataloging {file_url}", Result.ERROR_BAD_VERSION)
+        if item.etag and stat_item.etag and stat_item.etag != item.etag:
+            raise StorageOperationError(f"GCS object changed ETag while cataloging {file_url}", Result.ERROR_BAD_VERSION)
+        if stat_item.nucleus_hash and not item.nucleus_hash:
+            item.nucleus_hash = stat_item.nucleus_hash
+        identity_url = _gcs_resource_identity_url(file_url, stat_item)
+        return file_url, relative_url, URLResourceIdentity(identity_url)
 
     async def is_folder(self, url: str) -> Tuple[Result, bool]:
         result, item = await self.stat(url)
@@ -756,13 +837,43 @@ class GCSStorage(StorageInterface):
         # GCS doesn't have a direct equivalent to checkpoints
         return Result.ERROR_NOT_SUPPORTED, []
 
-    async def copy(self, src_url: str, dst_url: str, overwrite: bool = False, message: str = "") -> Result:
+    async def copy_address(
+        self,
+        src_url: str,
+        dst_url: str,
+        overwrite: bool = False,
+        message: str = "",
+    ) -> Result:
         if not is_gcs_url(src_url):
             raise ValueError(f"'{src_url}' is not supported by the Google Cloud Storage backend.")
         if not is_gcs_url(dst_url):
             raise ValueError(f"'{dst_url}' is not supported by the Google Cloud Storage backend.")
 
         return await self._copy_blob_gcs_gcs(src_url, dst_url, overwrite)
+
+    async def copy_resource_identity(
+        self,
+        resource_identity: str,
+        dst_url: str,
+        overwrite: bool = False,
+        message: str = "",
+    ) -> Result:
+        return await self.copy_address(resource_identity, dst_url, overwrite, message)
+
+    async def read_resource_identity(self, resource_identity: str, *, expected_hash: Optional[str] = None) -> Tuple[Result, bytes]:
+        """Read a GCS identity through its generation-qualified URL."""
+        return await URLResourceIdentity(resource_identity).read_data(self)
+
+    async def download_resource_identity(
+        self,
+        resource_identity: str,
+        dst_url: str,
+        overwrite: bool,
+        *,
+        expected_hash: Optional[str] = None,
+    ) -> Result:
+        """Stream the version-qualified object with its backend preconditions."""
+        return await self.download_file(resource_identity, dst_url, overwrite)
 
     def supports_create_with_hash(self, target_url: str, hash: str) -> bool:
         return False
@@ -773,18 +884,18 @@ class GCSStorage(StorageInterface):
     async def read_file_content(self, file_url: str) -> Tuple[Result, bytes]:
         try:
             bucket_name, object_name = parse_gcs_url(file_url)
+            generation, identity_args = _gcs_identity_request_args(file_url)
 
             if object_name.endswith("/"):
                 return Result.ERROR_WRONG_TYPE, bytes()
 
             client = self.gcs_client().get_sync_client()
             bucket = client.bucket(bucket_name)
-            blob = bucket.blob(object_name)
+            blob = bucket.blob(object_name, generation=generation)
+            request_args = {**self._sdk_call_kwargs, **identity_args}
 
             loop = asyncio.get_running_loop()
-            content = await self._throttler_networkdata.run(
-                loop.run_in_executor(None, lambda: blob.download_as_bytes(**self._sdk_call_kwargs))
-            )
+            content = await self._throttler_networkdata.run(loop.run_in_executor(None, lambda: blob.download_as_bytes(**request_args)))
 
             return Result.OK, content
 
@@ -796,7 +907,7 @@ class GCSStorage(StorageInterface):
             logger.error(f"GCS read_file_content {file_url} failed because of permission error: {e}")
             self._last_connection_status = ConnectionStatus.AUTH_ERROR
             return Result.ERROR_ACCESS_DENIED, bytes()
-        except NotFound:
+        except (_InvalidGCSGenerationError, NotFound, PreconditionFailed):
             return Result.ERROR_NOT_FOUND, bytes()
         except (GoogleAPICallError, RetryError) as e:
             logger.error(f"GCS error during read_file_content {file_url}: {e}")
@@ -944,8 +1055,9 @@ class GCSStorage(StorageInterface):
         return False
 
     async def upload_file(self, src_url: str, dst_url: str, overwrite: bool, message: Optional[str] = None) -> Result:
+        """Upload a native local path or an escaped file URL to this backend."""
         try:
-            src_path = get_path_from_url(src_url)
+            src_path = file_url_to_path(src_url)
 
             with open(src_path, "rb") as f_src:
                 nucleus_hash, _ = calc_nucleus_hash_from_stream(f_src)
@@ -995,14 +1107,17 @@ class GCSStorage(StorageInterface):
             return Result.ERROR
 
     async def download_file(self, src_url: str, dst_url: str, overwrite: bool) -> Result:
+        """Download an address to a native path or an escaped file URL."""
         try:
             bucket_name, object_name = parse_gcs_url(src_url)
+            generation, identity_args = _gcs_identity_request_args(src_url)
 
             client = self.gcs_client().get_sync_client()
             bucket = client.bucket(bucket_name)
-            blob = bucket.blob(object_name)
+            blob = bucket.blob(object_name, generation=generation)
+            request_args = {**self._sdk_call_kwargs, **identity_args}
 
-            dst_path = get_path_from_url(dst_url)
+            dst_path = file_url_to_path(dst_url)
             dst_dir = os.path.dirname(dst_path)
             os.makedirs(dst_dir, exist_ok=True)
 
@@ -1010,9 +1125,7 @@ class GCSStorage(StorageInterface):
                 return Result.ERROR_ALREADY_EXISTS
 
             loop = asyncio.get_running_loop()
-            await self._throttler_networkdata.run(
-                loop.run_in_executor(None, lambda: blob.download_to_filename(dst_path, **self._sdk_call_kwargs))
-            )
+            await self._throttler_networkdata.run(loop.run_in_executor(None, lambda: blob.download_to_filename(dst_path, **request_args)))
             return Result.OK
 
         except FileNotFoundError:
@@ -1020,7 +1133,7 @@ class GCSStorage(StorageInterface):
         except PermissionError as e:
             logger.error(f"GCS download_file, permission error {src_url}: {e}")
             return Result.ERROR_ACCESS_DENIED
-        except NotFound:
+        except (_InvalidGCSGenerationError, NotFound, PreconditionFailed):
             return Result.ERROR_NOT_FOUND
         except GoogleAuthError as e:
             logger.error(f"GCS authentication error during download_file {src_url}: {e}")
@@ -1094,6 +1207,7 @@ class GCSStorage(StorageInterface):
         try:
             src_bucket_name, src_object_name = parse_gcs_url(src_url)
             dst_bucket_name, dst_object_name = parse_gcs_url(dst_url)
+            src_generation, src_identity_args = _gcs_identity_request_args(src_url)
 
             # Check if source and destination are the same
             if src_bucket_name == dst_bucket_name and src_object_name == dst_object_name:
@@ -1101,13 +1215,14 @@ class GCSStorage(StorageInterface):
 
             client = self.gcs_client().get_sync_client()
             src_bucket = client.bucket(src_bucket_name)
-            src_blob = src_bucket.blob(src_object_name)
+            src_blob = src_bucket.blob(src_object_name, generation=src_generation)
+            src_request_args = {**self._sdk_call_kwargs, **src_identity_args}
 
             # Check if source exists
             loop = asyncio.get_running_loop()
             try:
-                await self._throttler_roundtrip.run(loop.run_in_executor(None, lambda: src_blob.reload(**self._sdk_call_kwargs)))
-            except NotFound:
+                await self._throttler_roundtrip.run(loop.run_in_executor(None, lambda: src_blob.reload(**src_request_args)))
+            except (NotFound, PreconditionFailed):
                 return Result.ERROR_NOT_FOUND
 
             dst_bucket = client.bucket(dst_bucket_name)
@@ -1120,8 +1235,12 @@ class GCSStorage(StorageInterface):
                     return Result.ERROR_ALREADY_EXISTS
 
             # Server-side copy
+            copy_args = dict(self._sdk_call_kwargs)
+            if src_generation is not None:
+                copy_args["source_generation"] = src_generation
+                copy_args["if_source_generation_match"] = src_generation
             await self._throttler_serverdata.run(
-                loop.run_in_executor(None, lambda: src_bucket.copy_blob(src_blob, dst_bucket, dst_object_name, **self._sdk_call_kwargs))
+                loop.run_in_executor(None, lambda: src_bucket.copy_blob(src_blob, dst_bucket, dst_object_name, **copy_args))
             )
 
             return Result.OK
@@ -1130,6 +1249,8 @@ class GCSStorage(StorageInterface):
             logger.error(f"GCS authentication error during copy {src_url} to {dst_url}: {e}")
             self._last_connection_status = ConnectionStatus.AUTH_ERROR
             return Result.ERROR_ACCESS_DENIED
+        except (_InvalidGCSGenerationError, NotFound, PreconditionFailed):
+            return Result.ERROR_NOT_FOUND
         except Forbidden as e:
             logger.error(f"GCS copy {src_url} to {dst_url} failed because of permission error: {e}")
             self._last_connection_status = ConnectionStatus.AUTH_ERROR

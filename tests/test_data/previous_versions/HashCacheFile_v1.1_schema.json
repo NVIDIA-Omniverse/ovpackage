@@ -1,0 +1,76 @@
+{
+    "$defs": {
+        "HashCacheEntry": {
+            "properties": {
+                "filesize": {
+                    "type": "integer"
+                },
+                "hash": {
+                    "type": "string"
+                },
+                "modification_time": {
+                    "format": "date-time",
+                    "type": "string"
+                }
+            },
+            "required": [
+                "modification_time",
+                "filesize",
+                "hash"
+            ],
+            "type": "object"
+        },
+        "IdentityHashCacheEntry": {
+            "properties": {
+                "filesize": {
+                    "type": "integer"
+                },
+                "hash": {
+                    "type": "string"
+                }
+            },
+            "required": [
+                "filesize",
+                "hash"
+            ],
+            "type": "object"
+        },
+        "WRAPPModelVersion": {
+            "properties": {
+                "version_string": {
+                    "pattern": "[0-9]+(\\.[0-9]+)?",
+                    "type": "string"
+                }
+            },
+            "required": [
+                "version_string"
+            ],
+            "type": "object"
+        }
+    },
+    "additionalProperties": true,
+    "properties": {
+        "entries": {
+            "additionalProperties": {
+                "$ref": "#/$defs/HashCacheEntry"
+            },
+            "type": "object"
+        },
+        "format_version": {
+            "$ref": "#/$defs/WRAPPModelVersion",
+            "default": {
+                "version_string": "1.1"
+            }
+        },
+        "identity_entries": {
+            "additionalProperties": {
+                "$ref": "#/$defs/IdentityHashCacheEntry"
+            },
+            "type": "object"
+        }
+    },
+    "required": [
+        "entries"
+    ],
+    "type": "object"
+}

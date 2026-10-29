@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import datetime
 from collections.abc import Iterable as _Iterable
 from collections.abc import Mapping as _Mapping
 from typing import ClassVar as _ClassVar
@@ -21,6 +22,7 @@ from typing import Union as _Union
 
 from google.protobuf import descriptor as _descriptor
 from google.protobuf import message as _message
+from google.protobuf import struct_pb2 as _struct_pb2
 from google.protobuf import timestamp_pb2 as _timestamp_pb2
 from google.protobuf.internal import containers as _containers
 
@@ -33,12 +35,27 @@ class Chunk(_message.Message):
     def __init__(self, chunk: _Optional[bytes] = ...) -> None: ...
 
 class Metadata(_message.Message):
-    __slots__ = ("data_object_size", "last_modified_timestamp")
+    __slots__ = ("data_object_size", "last_modified_timestamp", "native_metadata")
+
+    class NativeMetadataEntry(_message.Message):
+        __slots__ = ("key", "value")
+        KEY_FIELD_NUMBER: _ClassVar[int]
+        VALUE_FIELD_NUMBER: _ClassVar[int]
+        key: str
+        value: _struct_pb2.Value
+        def __init__(self, key: _Optional[str] = ..., value: _Optional[_Union[_struct_pb2.Value, _Mapping]] = ...) -> None: ...
     DATA_OBJECT_SIZE_FIELD_NUMBER: _ClassVar[int]
     LAST_MODIFIED_TIMESTAMP_FIELD_NUMBER: _ClassVar[int]
+    NATIVE_METADATA_FIELD_NUMBER: _ClassVar[int]
     data_object_size: int
     last_modified_timestamp: _timestamp_pb2.Timestamp
-    def __init__(self, data_object_size: _Optional[int] = ..., last_modified_timestamp: _Optional[_Union[_timestamp_pb2.Timestamp, _Mapping]] = ...) -> None: ...
+    native_metadata: _containers.MessageMap[str, _struct_pb2.Value]
+    def __init__(
+        self,
+        data_object_size: _Optional[int] = ...,
+        last_modified_timestamp: _Optional[_Union[datetime.datetime, _timestamp_pb2.Timestamp, _Mapping]] = ...,
+        native_metadata: _Optional[_Mapping[str, _struct_pb2.Value]] = ...,
+    ) -> None: ...
 
 class Header(_message.Message):
     __slots__ = ("name", "value")
@@ -56,7 +73,12 @@ class Redirect(_message.Message):
     redirect_target_url: str
     method: str
     additional_headers: _containers.RepeatedCompositeFieldContainer[Header]
-    def __init__(self, redirect_target_url: _Optional[str] = ..., method: _Optional[str] = ..., additional_headers: _Optional[_Iterable[_Union[Header, _Mapping]]] = ...) -> None: ...
+    def __init__(
+        self,
+        redirect_target_url: _Optional[str] = ...,
+        method: _Optional[str] = ...,
+        additional_headers: _Optional[_Iterable[_Union[Header, _Mapping]]] = ...,
+    ) -> None: ...
 
 class AddressInfo(_message.Message):
     __slots__ = ("resource_address", "metadata")
@@ -72,7 +94,9 @@ class ResourceInfo(_message.Message):
     METADATA_FIELD_NUMBER: _ClassVar[int]
     resource_identity: ResourceIdentity
     metadata: Metadata
-    def __init__(self, resource_identity: _Optional[_Union[ResourceIdentity, _Mapping]] = ..., metadata: _Optional[_Union[Metadata, _Mapping]] = ...) -> None: ...
+    def __init__(
+        self, resource_identity: _Optional[_Union[ResourceIdentity, _Mapping]] = ..., metadata: _Optional[_Union[Metadata, _Mapping]] = ...
+    ) -> None: ...
 
 class ResourceIdentity(_message.Message):
     __slots__ = ("encoded_identity",)

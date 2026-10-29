@@ -22,6 +22,7 @@ from typing import (
     Tuple,
     Union,
 )
+from urllib.parse import quote
 
 import typer
 
@@ -29,6 +30,9 @@ from wrapp.app import (
     app,
     measure_time,
     print_stats,
+)
+from wrapp.commands.case_insensitive_paths import (
+    raise_if_case_insensitive_path_conflicts,
 )
 from wrapp.commands.catalog import catalog
 from wrapp.datastructures.authentication import capture_auth
@@ -109,10 +113,10 @@ from wrapp.utils.router import Router
 from wrapp.utils.scheduler_task_node import SchedulerTaskGroupNode
 from wrapp.utils.storage import (
     Result,
-    wrapp_is_case_sensitive,
     wrapp_list_directory,
     wrapp_list_file_tree,
     wrapp_list_file_tree_supported,
+    wrapp_require_writable,
     wrapp_stat,
     wrapp_supports_tags,
     wrapp_url_exists,
@@ -126,6 +130,7 @@ from wrapp.utils.utils import (
     is_folder,
     is_regular_file,
     join_paths,
+    join_url_path,
     make_relative_url,
     normalize_url,
     random_string,
@@ -283,6 +288,8 @@ async def install(
     if not version.strip():
         raise FailedCommand("Version cannot be empty!")
 
+    wrapp_require_writable(destination)
+
     if tags and not await wrapp_supports_tags(destination):
         raise FailedCommand(f"Tags are not supported for target destination {destination}!")
 
@@ -388,12 +395,7 @@ async def install(
         add_subpackage_wrapp_files=True,
         task_node=scheduler.parent_task_node().create_tree_node("Analysing source package"),
     )
-    if not wrapp_is_case_sensitive(destination_normalized):
-        has_conflicts, conflicting_paths = full_source_catalog.check_case_insensitive_path_conflicts()
-        if has_conflicts:
-            raise FailedCommand(
-                f"Cross platform case insensitive path conflicts found: {conflicting_paths}. Please ensure that the paths are unique on all platforms (Windows, Linux, macOS)."
-            )
+    raise_if_case_insensitive_path_conflicts(full_source_catalog, destination_normalized)
 
     source_dict = full_source_catalog._catalog_to_dict()
 
@@ -452,7 +454,7 @@ async def install(
     if destination_exists:
         # Filter out ignored paths for cataloging
         paths_to_check = {p for p in paths_in_package if not default_ignore.is_ignored(p)}
-        file_list = [(destination, path) for path in paths_to_check]
+        file_list = [(destination, quote(path, safe="/")) for path in paths_to_check]
 
         destination_catalog: Catalog = await catalog(
             root_dir=destination,
@@ -506,7 +508,7 @@ async def install(
                     (
                         path,
                         PatchOpDelete(
-                            url=join_paths(destination, path),
+                            url=join_url_path(destination, path),
                             explanation=f"Extra: {path} in install target but not in source package",
                         ),
                     )
@@ -568,7 +570,7 @@ async def install(
         # Update the repository to record that we have installed this package from that repo, else we might still be pointing
         # to a mirror source
         source_setup.repository = source_repository.base_url()
-        destination_package_file_url = join_paths(destination, installee_package_file_name)
+        destination_package_file_url = join_url_path(destination, installee_package_file_name)
         await _write_package_info(
             destination_package_file_url,
             source_setup,
@@ -680,7 +682,7 @@ async def _write_wrapp_with_updated_repo_field(
     loaded_subpackages: dict[str, LoadedPackage],
     changed_subpackage_paths: set[str],
 ):
-    sub_wrapp_install_path = join_paths(destination_url, sub_wrapp.relative_path)
+    sub_wrapp_install_path = join_url_path(destination_url, sub_wrapp.relative_path)
     # This runs BEFORE the patch is applied, and the patch skips the copy of every subpackage handled here
     # (see install()). We use the loaded_subpackages cache filled during the diff/fingerprint phase so we
     # never have to read the file back from disk.
@@ -802,7 +804,7 @@ async def _enumerate_destination_files(destination: str) -> List[str]:
             if is_regular_file(item):
                 paths.append(rel_path)
             elif is_folder(item) and not use_tree:
-                await walk(join_paths(url, item.relative_path), rel_path)
+                await walk(join_url_path(url, item.relative_path), rel_path)
 
     await walk(destination, "")
     return paths

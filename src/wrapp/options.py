@@ -108,6 +108,7 @@ AuthOption = typer.Option(
     "S3: <URL,access_key_id,secret_access_key[,session_token]>. "
     "Azure: <URL,connection_string>. "
     "GCS: <URL,credentials_file_or_json> (omit credentials to use application default). "
+    "Hugging Face: <URL[,token[,endpoint]]>. "
     "Storage API discovery: <URL,bearer_token> for bearer auth, or <URL,client_id,client_secret> for client credentials auth. "
     "Can be used multiple times for different servers. "
     "In the WRAPP_AUTH environment variable, separate multiple values with ':' in Linux and ';' in Windows.",
@@ -123,7 +124,7 @@ CatalogOptionFlag = typer.Option(
 CheckpointsFlag = typer.Option(
     True,
     "--checkpoints/--no-checkpoints",
-    help="Set this to --no-checkpoints to list the HEAD revision of the files in the source. "
+    help="Set this to --no-checkpoints to omit resource identities (Nucleus, S3, Azure Blob Storage, GCS, and Storage API). "
     + "BEWARE: catalogs created like this will not be reproducible if the listed files are changed, "
     + "and should be used only for diff, not install or create.",
 )
@@ -144,6 +145,14 @@ CreatePackageStandardOption = typer.Option(
     help="Create package-standard sidecar metadata using the given SPDX license identifier when no sidecar license exists yet.",
 )
 DebugLevelFlag = typer.Option(False, "--debug/--no-debug", "-d", help="Set logging level of client library to debug")
+CanonicalSourceOption = typer.Option(
+    None,
+    "--canonical-source",
+    "--cs",
+    envvar="WRAPP_CANONICAL_SOURCE",
+    help="Record this canonical base URL as the source/repository provenance in written .wrapp files "
+    "instead of the internal address (e.g. https://simready.nvidia.com). Mutually exclusive with --strip-source.",
+)
 DedupFlag = typer.Option(
     False,
     "--dedup/--no-dedup",
@@ -235,6 +244,22 @@ ProgressReportOptionOff = typer.Option(
     envvar="WRAPP_PROGRESS_REPORT",
     help="Specify the verbosity of the progress report",
 )
+PublishRedirectCanonicalSourceOption = typer.Option(
+    None,
+    "--canonical-source",
+    "--cs",
+    envvar="WRAPP_CANONICAL_SOURCE",
+    help="Record this canonical base URL as the source provenance in written .wrapp files instead of the internal address "
+    "(e.g. https://simready.nvidia.com). The repository field remains the redirect repository. "
+    "Mutually exclusive with --strip-source.",
+)
+PublishRedirectStripSourceFlag = typer.Option(
+    False,
+    "--strip-source",
+    envvar="WRAPP_STRIP_SOURCE",
+    help="Clear the source provenance field in written .wrapp files so internal addresses are not published. "
+    "The repository field remains the redirect repository. Mutually exclusive with --canonical-source.",
+)
 RecalculateResourceIdentitiesFlag = typer.Option(
     False, "--recalculate-identities", help="Recalculate resource identities for old catalogs that don't have them"
 )
@@ -256,6 +281,13 @@ ResumeFlag = typer.Option(False, "--resume", help="If the destination already ex
 StatsFlag = typer.Option(False, "--stats/--no-stats", help="Collect and print statistics about this operation")
 ShowFlag = typer.Option(False, "--show/--no-show", help="print a list of all differences")
 SourceRepoOption = typer.Option(..., "--source-repo", "--sr", envvar="WRAPP_SOURCE_REPO", help="Specify the URL to the package repository")
+StripSourceFlag = typer.Option(
+    False,
+    "--strip-source",
+    envvar="WRAPP_STRIP_SOURCE",
+    help="Clear the source and repository provenance fields in written .wrapp files so internal "
+    "addresses are not published. Mutually exclusive with --canonical-source.",
+)
 TaggingJobsNumber = typer.Option(
     50,
     "--tagging-jobs",

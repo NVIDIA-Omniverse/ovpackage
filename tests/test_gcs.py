@@ -25,12 +25,17 @@ Environment variables:
 - WRAPP_GCS_PROJECT: GCS project ID (optional)
 - WRAPP_GCS_CREDENTIALS_FILE: Path to service account key file (optional)
 """
+
+import asyncio
 import logging
 import os
 import sys
 import tempfile
 import time
 import uuid
+from datetime import datetime
+from types import SimpleNamespace
+from unittest.mock import Mock
 
 import pytest
 
@@ -44,7 +49,7 @@ from wrapp.utils.router import g_gcs_enabled
 from wrapp.utils.storage import (
     Router,
     StorageType,
-    wrapp_copy,
+    wrapp_copy_address,
     wrapp_delete_item,
     wrapp_initialize,
     wrapp_list_directory,
@@ -69,10 +74,13 @@ try:
     # isort: off
     from wrapp.utils.storage_impls.gcs_storage import (
         DEFAULT_RETRY,
+        GCSListEntry,
         GCSStorage,
+        _gcs_identity_request_args,
         _log_gcs_retry,
         is_gcs_url,
     )
+    from google.api_core.exceptions import PreconditionFailed
 
     # isort: on
 except StorageMissingDependenciesError:
@@ -90,6 +98,268 @@ def test_is_gcs_url():
     assert not is_gcs_url("file:///path/to/file")
     assert not is_gcs_url("http://example.com")
     assert not is_gcs_url("azure://account/container/blob")
+
+
+def test_gcs_identity_request_args_uses_generation_precondition_OMPE_58312():
+    generation, args = _gcs_identity_request_args("gs://bucket/key?generation=1700000000000000")
+
+    assert generation == 1700000000000000
+    assert args == {"if_generation_match": 1700000000000000}
+
+
+class _FakeGCSClientWrapper:
+    def __init__(self, client):
+        self._client = client
+
+    def get_sync_client(self):
+        return self._client
+
+
+class _FakeGCSClient:
+    def __init__(self, buckets):
+        self._buckets = buckets
+
+    def bucket(self, bucket_name):
+        return self._buckets[bucket_name]
+
+
+class _FakeGCSBucket:
+    def __init__(self, blob):
+        self._blob = blob
+        self.blob_calls = []
+        self.copy_blob = Mock(return_value=None)
+
+    def blob(self, object_name, **kwargs):
+        self.blob_calls.append((object_name, kwargs))
+        return self._blob
+
+
+def _make_gcs_storage_with_buckets(buckets):
+    storage = GCSStorage("0.0.0-test", False, ThrottlingParameters())
+    storage._gcs_client = _FakeGCSClientWrapper(_FakeGCSClient(buckets))
+    return storage
+
+
+def _make_gcs_blob(**overrides):
+    values = {
+        "size": 7,
+        "updated": datetime(2026, 1, 1),
+        "etag": "etag-123",
+        "generation": 1700000000000000,
+        "metadata": {},
+    }
+    values.update(overrides)
+    blob = SimpleNamespace(**values)
+    blob.reload = Mock(return_value=None)
+    blob.download_as_bytes = Mock(return_value=b"identity bytes")
+    blob.download_to_filename = Mock(return_value=None)
+    return blob
+
+
+def _run_gcs_sdk_calls_inline(monkeypatch):
+    """Keep mocked synchronous SDK calls off asyncio's default thread pool."""
+    loop = asyncio.get_running_loop()
+
+    def run_in_executor(_executor, function):
+        future = loop.create_future()
+        try:
+            future.set_result(function())
+        except Exception as exc:
+            future.set_exception(exc)
+        return future
+
+    monkeypatch.setattr(loop, "run_in_executor", run_in_executor)
+
+
+@pytest.mark.asyncio
+async def test_gcs_make_resource_identity_keeps_source_and_uses_generation_OMPE_58312(monkeypatch):
+    _run_gcs_sdk_calls_inline(monkeypatch)
+    blob = _make_gcs_blob(metadata={"nv_omniverse_nucleus_hash": "sha-256-flat;1048576;hash"})
+    bucket = _FakeGCSBucket(blob)
+    storage = _make_gcs_storage_with_buckets({"bucket": bucket})
+    listed_item = GCSListEntry.file_from_blob("file.txt", blob)
+    source_url = "gs://bucket/file.txt"
+
+    absolute_url, relative_url, identity = await storage.make_resource_identity(source_url, listed_item, "file.txt")
+
+    assert absolute_url == source_url
+    assert relative_url == "file.txt"
+    assert identity.to_string() == "gs://bucket/file.txt?generation=1700000000000000"
+    assert listed_item.nucleus_hash == "sha-256-flat;1048576;hash"
+    blob.reload.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_gcs_identity_fetches_only_missing_generation(monkeypatch):
+    _run_gcs_sdk_calls_inline(monkeypatch)
+    blob = _make_gcs_blob()
+    storage = _make_gcs_storage_with_buckets({"bucket": _FakeGCSBucket(blob)})
+    entry = GCSListEntry.file_from_properties("file.txt", size=7, last_modified=blob.updated, etag=blob.etag)
+    _, _, identity = await storage.make_resource_identity("gs://bucket/file.txt", entry, "file.txt")
+    assert identity.to_string() == "gs://bucket/file.txt?generation=1700000000000000"
+    blob.reload.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_gcs_read_resource_identity_honors_generation_OMPE_58312(monkeypatch):
+    _run_gcs_sdk_calls_inline(monkeypatch)
+    blob = _make_gcs_blob()
+    bucket = _FakeGCSBucket(blob)
+    storage = _make_gcs_storage_with_buckets({"bucket": bucket})
+
+    result, content = await storage.read_resource_identity("gs://bucket/file.txt?generation=1700000000000000")
+
+    assert result == Result.OK
+    assert content == b"identity bytes"
+    assert bucket.blob_calls == [("file.txt", {"generation": 1700000000000000})]
+    assert blob.download_as_bytes.call_args.kwargs["if_generation_match"] == 1700000000000000
+
+
+@pytest.mark.asyncio
+async def test_gcs_read_resource_identity_mismatch_is_not_found_OMPE_58312(monkeypatch):
+    _run_gcs_sdk_calls_inline(monkeypatch)
+    blob = _make_gcs_blob()
+    blob.download_as_bytes = Mock(side_effect=PreconditionFailed("generation mismatch"))
+    bucket = _FakeGCSBucket(blob)
+    storage = _make_gcs_storage_with_buckets({"bucket": bucket})
+
+    result, content = await storage.read_resource_identity("gs://bucket/file.txt?generation=1700000000000000")
+
+    assert result == Result.ERROR_NOT_FOUND
+    assert content == b""
+
+
+@pytest.mark.asyncio
+async def test_gcs_stat_identity_constraint_does_not_fall_back_to_directory_OMPE_58312(monkeypatch):
+    _run_gcs_sdk_calls_inline(monkeypatch)
+    blob = _make_gcs_blob()
+    blob.reload = Mock(side_effect=PreconditionFailed("identity mismatch"))
+    bucket = _FakeGCSBucket(blob)
+    storage = _make_gcs_storage_with_buckets({"bucket": bucket})
+    client = storage.gcs_client().get_sync_client()
+    client.list_blobs = Mock(return_value=[])
+    monkeypatch.setattr(
+        "wrapp.utils.storage_impls.gcs_storage._gcs_identity_request_args",
+        lambda _url: (None, {"if_generation_match": 1700000000000000}),
+    )
+
+    result, item = await storage.stat("gs://bucket/file.txt")
+
+    assert result == Result.ERROR_NOT_FOUND
+    assert item is None
+    client.list_blobs.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_gcs_copy_resource_identity_honors_generation_OMPE_58312(monkeypatch):
+    _run_gcs_sdk_calls_inline(monkeypatch)
+    src_blob = _make_gcs_blob()
+    src_bucket = _FakeGCSBucket(src_blob)
+    dst_bucket = _FakeGCSBucket(_make_gcs_blob())
+    storage = _make_gcs_storage_with_buckets({"source": src_bucket, "destination": dst_bucket})
+
+    result = await storage.copy_resource_identity(
+        "gs://source/source.txt?generation=1700000000000000",
+        "gs://destination/destination.txt",
+        overwrite=True,
+    )
+
+    assert result == Result.OK
+    assert src_bucket.blob_calls == [("source.txt", {"generation": 1700000000000000})]
+    assert src_blob.reload.call_args.kwargs["if_generation_match"] == 1700000000000000
+    assert src_bucket.copy_blob.call_args.args == (src_blob, dst_bucket, "destination.txt")
+    assert src_bucket.copy_blob.call_args.kwargs["source_generation"] == 1700000000000000
+    assert src_bucket.copy_blob.call_args.kwargs["if_source_generation_match"] == 1700000000000000
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("identity_download", [False, True, "materialize"])
+async def test_gcs_download_file_identity_mismatch_is_not_found_OMPE_58312(monkeypatch, tmp_path, identity_download):
+    _run_gcs_sdk_calls_inline(monkeypatch)
+    blob = _make_gcs_blob()
+    blob.download_to_filename = Mock(side_effect=PreconditionFailed("generation mismatch"))
+    bucket = _FakeGCSBucket(blob)
+    storage = _make_gcs_storage_with_buckets({"bucket": bucket})
+    destination = tmp_path / "out.txt"
+
+    if identity_download == "materialize":
+        result, local_file = await storage.materialize(
+            "gs://bucket/current.txt",
+            str(destination),
+            resource_identity="gs://bucket/file.txt?generation=1700000000000000",
+            expected_hash="catalog hash",
+        )
+        assert local_file is None
+    else:
+        download = storage.download_resource_identity if identity_download else storage.download_file
+        result = await download(
+            "gs://bucket/file.txt?generation=1700000000000000",
+            path_to_file_url(str(destination)),
+            overwrite=True,
+            **({"expected_hash": "catalog hash"} if identity_download else {}),
+        )
+
+    assert result == Result.ERROR_NOT_FOUND
+    assert not destination.exists()
+    assert bucket.blob_calls == [("file.txt", {"generation": 1700000000000000})]
+    assert blob.download_to_filename.call_args.kwargs["if_generation_match"] == 1700000000000000
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure_point", ["reload", "copy_blob"])
+async def test_gcs_copy_resource_identity_mismatch_is_not_found_OMPE_58312(monkeypatch, failure_point):
+    _run_gcs_sdk_calls_inline(monkeypatch)
+    src_blob = _make_gcs_blob()
+    src_bucket = _FakeGCSBucket(src_blob)
+    dst_bucket = _FakeGCSBucket(_make_gcs_blob())
+    storage = _make_gcs_storage_with_buckets({"source": src_bucket, "destination": dst_bucket})
+    if failure_point == "reload":
+        src_blob.reload = Mock(side_effect=PreconditionFailed("generation mismatch"))
+    else:
+        src_bucket.copy_blob = Mock(side_effect=PreconditionFailed("generation mismatch"))
+
+    result = await storage.copy_resource_identity(
+        "gs://source/source.txt?generation=1700000000000000",
+        "gs://destination/destination.txt",
+        overwrite=True,
+    )
+
+    assert result == Result.ERROR_NOT_FOUND
+    assert src_bucket.blob_calls == [("source.txt", {"generation": 1700000000000000})]
+    assert src_blob.reload.call_args.kwargs["if_generation_match"] == 1700000000000000
+    if failure_point == "reload":
+        src_bucket.copy_blob.assert_not_called()
+    else:
+        assert src_bucket.copy_blob.call_args.args == (src_blob, dst_bucket, "destination.txt")
+        assert src_bucket.copy_blob.call_args.kwargs["source_generation"] == 1700000000000000
+        assert src_bucket.copy_blob.call_args.kwargs["if_source_generation_match"] == 1700000000000000
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("generation", ["not-an-integer", "", "-1"])
+async def test_gcs_malformed_resource_identity_is_not_found_OMPE_58312(generation, tmp_path, monkeypatch):
+    storage = GCSStorage("0.0.0-test", False, ThrottlingParameters())
+    sdk_client = Mock(side_effect=AssertionError("Malformed generations must be rejected before accessing GCS"))
+    monkeypatch.setattr(storage, "gcs_client", sdk_client)
+    identity = f"gs://bucket/file.txt?generation={generation}"
+    destination = tmp_path / "out.txt"
+    destination_url = path_to_file_url(str(destination))
+
+    stat_result, item = await storage.stat(identity)
+    read_result, content = await storage.read_resource_identity(identity)
+    download_result = await storage.download_file(identity, destination_url, overwrite=True)
+    identity_download_result = await storage.download_resource_identity(identity, destination_url, overwrite=True)
+    copy_result = await storage.copy_resource_identity(identity, "gs://destination/file.txt")
+
+    sdk_client.assert_not_called()
+    assert not destination.exists()
+    assert stat_result == Result.ERROR_NOT_FOUND
+    assert item is None
+    assert read_result == Result.ERROR_NOT_FOUND
+    assert content == b""
+    assert download_result == Result.ERROR_NOT_FOUND
+    assert identity_download_result == Result.ERROR_NOT_FOUND
+    assert copy_result == Result.ERROR_NOT_FOUND
 
 
 def test_get_storage():
@@ -165,7 +435,7 @@ async def test_upload_download_delete(test_bucket):
 
         # Upload the file to GCS
         blob_url = f"{test_bucket}/test_blob.txt"
-        result = await wrapp_copy(local_file_url, blob_url, overwrite=True)
+        result = await wrapp_copy_address(local_file_url, blob_url, overwrite=True)
         assert result == Result.OK
 
         # Check that the file exists
@@ -182,7 +452,7 @@ async def test_upload_download_delete(test_bucket):
             download_file_path = download_file.name
 
         download_file_url = path_to_file_url(download_file_path)
-        result = await wrapp_copy(blob_url, download_file_url, overwrite=True)
+        result = await wrapp_copy_address(blob_url, download_file_url, overwrite=True)
         assert result == Result.OK
 
         # Check that the downloaded file has the correct content
@@ -227,7 +497,7 @@ async def test_list_directory(test_bucket):
 
             # Upload the file to GCS
             blob_url = f"{test_bucket}/{file_name}"
-            result = await wrapp_copy(local_file_url, blob_url, overwrite=True)
+            result = await wrapp_copy_address(local_file_url, blob_url, overwrite=True)
             assert result == Result.OK
 
             # Clean up the temporary file

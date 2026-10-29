@@ -43,6 +43,7 @@ from wrapp.datastructures.package import (
 )
 from wrapp.options import (
     AuthOption,
+    CanonicalSourceOption,
     DebugLevelFlag,
     DestinationRepoOption,
     FileTransferJobsNumber,
@@ -55,6 +56,7 @@ from wrapp.options import (
     ResumeFlag,
     SourceRepoOption,
     StatsFlag,
+    StripSourceFlag,
     TaggingJobsNumber,
     TagsFlag,
     TemplateVersionOption,
@@ -70,8 +72,10 @@ from wrapp.utils.coro import (
 )
 from wrapp.utils.ensure_scheduler import ensure_scheduler
 from wrapp.utils.storage import (
+    normalize_repo_url_for_comparison,
     wrapp_normalize_url,
     wrapp_read_text_file,
+    wrapp_require_writable,
 )
 from wrapp.utils.utils import (
     FailedCommand,
@@ -170,6 +174,8 @@ async def mirror_command(
         "A higher number means the packages are transferred more optimal, particular if the mirrored packages are small, "
         "because more files can be transferred concurrently.",
     ),
+    strip_source: bool = StripSourceFlag,
+    canonical_source: Optional[str] = CanonicalSourceOption,
     auth: Optional[List[str]] = AuthOption,
     interactive_auth: bool = InteractiveAuthFlag,
     jobs: int = JobsNumber,
@@ -209,6 +215,8 @@ async def mirror_command(
                     template_version=template_version,
                     redirect_dependencies=redirect_dependencies,
                     resume=resume,
+                    strip_source=strip_source,
+                    canonical_source=canonical_source,
                     context=context,
                     scheduler=scheduler,
                 )
@@ -221,6 +229,8 @@ async def mirror_command(
                     tags=tags,
                     resume=resume,
                     max_concurrent_single_package_mirror_ops=max_concurrent_single_package_mirror_ops,
+                    strip_source=strip_source,
+                    canonical_source=canonical_source,
                     context=context,
                     scheduler=scheduler,
                 )
@@ -249,6 +259,8 @@ async def mirror_with_dependencies(
     resume: bool = False,
     max_concurrent_single_package_mirror_ops: int = 20,
     *,
+    strip_source: bool = False,
+    canonical_source: Optional[str] = None,
     context: CommandParameters = CommandParameters(),
     scheduler: Optional[SchedulerContext] = None,
 ) -> None:
@@ -268,6 +280,8 @@ async def mirror_with_dependencies(
         A lower number means more packages are completed if the operation is interrupted, and a follow-up "mirror --resume" is faster.
         A higher number means the packages are transferred more optimal, particular if the mirrored packages are small,
         because more files can be transferred concurrently.
+    :param strip_source: When True, clear the source and repository provenance fields in the mirrored .wrapp files so internal addresses are not published. Mutually exclusive with canonical_source.
+    :param canonical_source: When set, record this canonical base URL as the source/repository provenance instead of the internal address. Mutually exclusive with strip_source.
     :param context: Global configuration parameters
     :param scheduler: Optionally pre-constructed SchedulerContext. When calling many functions in a row make sure to pre-construct the scheduler.
 
@@ -276,6 +290,9 @@ async def mirror_with_dependencies(
     """
     if scheduler is None:
         raise RuntimeError("No scheduler present and ensure_scheduler malfunctioned, program error!")
+
+    if strip_source and canonical_source:
+        raise FailedCommand("Use either --strip-source or --canonical-source, not both.")
 
     # Task structure:
     #   Reading source packages (discover_packages_to_mirror)
@@ -288,6 +305,8 @@ async def mirror_with_dependencies(
         if isinstance(destination_repo, str):
             if not destination_repo:
                 raise FailedCommand("The destination_repo parameter cannot be empty")
+
+            wrapp_require_writable(destination_repo)
 
             async def default_package_to_repo_callback(_: UniquePackageLocation) -> str:
                 return destination_repo
@@ -306,6 +325,11 @@ async def mirror_with_dependencies(
                     raise FailedCommand(
                         f"User callback returned invalid destination repo location for package '{package.package_name}' version '{package.version}' from repository '{package.repo_url}': empty string"
                     )
+                # Returning the package's current repository URL means "do not mirror this
+                # package" (no write happens), so only reject read-only destinations that
+                # would actually be written to.
+                if normalize_repo_url_for_comparison(destination_repo_url) != normalize_repo_url_for_comparison(package.repo_url):
+                    wrapp_require_writable(destination_repo_url)
                 return destination_repo_url
 
             safe_package_to_repo_callback = _safe_package_to_repo
@@ -314,7 +338,9 @@ async def mirror_with_dependencies(
                 f"The destination_repo parameter must be either a str or a Callable[[UniquePackageLocation], Awaitable[str]], but it is a {type(destination_repo).__name__}"
             )
 
-        mirror_handler = _MirrorHandler(safe_package_to_repo_callback, tags, context, scheduler)
+        mirror_handler = _MirrorHandler(
+            safe_package_to_repo_callback, tags, context, scheduler, strip_source=strip_source, canonical_source=canonical_source
+        )
 
         # Phase 1: Discover all packages that need to be mirrored
         await mirror_handler.package_collection.discover_packages_to_mirror(
@@ -356,6 +382,8 @@ async def mirror(
     template_version: Optional[str] = None,
     *,
     redirect_dependencies: bool = False,
+    strip_source: bool = False,
+    canonical_source: Optional[str] = None,
     context: CommandParameters = CommandParameters(),
     scheduler: Optional[SchedulerContext] = None,
 ) -> None:
@@ -370,6 +398,8 @@ async def mirror(
     :param resume: Set this flag to make a differential copy by first cataloging the target repository package directory and then doing a differential copy
     :param template_version: Optionally specify a directory to copy into the place first. This can accelerate creation if the template is on the same server and can be reused.
     :param redirect_dependencies: Set this to rewrite dependencies in the package mirrored to point to the destination repository (no check for existance is done!)
+    :param strip_source: When True, clear the source and repository provenance fields in the mirrored .wrapp file so internal addresses are not published. Mutually exclusive with canonical_source.
+    :param canonical_source: When set, record this canonical base URL as the source/repository provenance instead of the internal address. Mutually exclusive with strip_source.
     :param context: Global configuration parameters
     :param scheduler: Optionally pre-constructed SchedulerContext. When calling many functions in a row make sure to pre-construct the scheduler.
 
@@ -382,6 +412,11 @@ async def mirror(
     if not destination_repo:
         raise FailedCommand("The destination_repo parameter cannot be empty")
 
+    wrapp_require_writable(destination_repo)
+
+    if strip_source and canonical_source:
+        raise FailedCommand("Use either --strip-source or --canonical-source, not both.")
+
     source_repo_obj = Repository(repo_url=source_repo)
 
     # Initialize mirror_context with the one package we want to mirror
@@ -392,7 +427,9 @@ async def mirror(
             else p.repo_url
         )
 
-    mirror_handler = _MirrorHandler(_safe_package_to_repo_callback, tags, context, scheduler)
+    mirror_handler = _MirrorHandler(
+        _safe_package_to_repo_callback, tags, context, scheduler, strip_source=strip_source, canonical_source=canonical_source
+    )
 
     unique_location = UniquePackageLocation(package_name=package_name, version=version, repo_url=source_repo_obj.base_url())
     package_to_mirror = await mirror_handler.package_collection.add_source_package(unique_location, "")

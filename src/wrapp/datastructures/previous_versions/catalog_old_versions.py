@@ -17,6 +17,10 @@ import os
 import sys
 import tempfile
 from bisect import bisect_left
+from datetime import (
+    datetime,
+    timezone,
+)
 from enum import Enum
 from tempfile import NamedTemporaryFile
 from typing import (
@@ -25,7 +29,11 @@ from typing import (
     Optional,
 )
 
-from pydantic import BaseModel
+from pydantic import (
+    BaseModel,
+    Field,
+    field_validator,
+)
 
 from wrapp.datastructures.previous_versions.serialized_data import SerializedData
 from wrapp.datastructures.wrapp_file_model import (
@@ -301,3 +309,29 @@ all_old_file_model_classes[("Catalog", WRAPPModelVersion(version_string="2.0"))]
 all_old_file_model_classes[("Catalog", WRAPPModelVersion(version_string="3.0"))] = Catalog_V3_0
 all_old_file_model_classes[("Catalog", WRAPPModelVersion(version_string="4.0"))] = Catalog_V4_0
 all_old_file_model_classes[("Catalog", WRAPPModelVersion(version_string="5.0"))] = Catalog_V5_0
+
+
+class CatalogItem_V6_0(CatalogItem_V3):
+    resource_identity_v2: Optional[str] = Field(default=None, min_length=1)
+    modified_time: Optional[datetime] = None
+
+    @field_validator("modified_time")
+    @classmethod
+    def _utc_modified_time(cls, value: Optional[datetime]) -> Optional[datetime]:
+        if value is None:
+            return None
+        return value.replace(tzinfo=timezone.utc) if value.tzinfo is None else value.astimezone(timezone.utc)
+
+
+class Catalog_V6_0(Catalog_V5_0):
+    format_version: WRAPPModelVersion = WRAPPModelVersion(version_string="6.0")
+    items: list[CatalogItem_V6_0]
+
+    @classmethod
+    def migrate_major_version(cls, read_data: Catalog_V5_0) -> "Catalog_V6_0":
+        data_dict = read_data.model_dump()
+        data_dict.pop("format_version")
+        return Catalog_V6_0(**data_dict)
+
+
+all_old_file_model_classes[("Catalog", WRAPPModelVersion(version_string="6.0"))] = Catalog_V6_0

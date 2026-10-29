@@ -1,0 +1,39 @@
+{
+  "format_version": {
+    "version_string": "6.0"
+  },
+  "root": "omniverse://localhost/Tests/omniverse/OM-92309/tests/20240905_122836_499155_vs/ayiazxls/source_package/",
+  "items": [
+    {
+      "source_path": "omniverse://localhost/Tests/omniverse/OM-92309/tests/20240905_122836_499155_vs/ayiazxls/source_package/subfolder/file_in_folder.txt?&1",
+      "relative_path": "subfolder/file_in_folder.txt",
+      "hash": "sha-256-flat;1048576;f3401f68d07827890dc7f6c3abcc2a675a76340c2eeaa26a33ac0d9f46054c9a",
+      "size": 8,
+      "tags": null,
+      "resource_identity": null,
+      "resource_identity_v2": null,
+      "modified_time": null
+    },
+    {
+      "source_path": "omniverse://localhost/Tests/omniverse/OM-92309/tests/20240905_122836_499155_vs/ayiazxls/source_package/testfile.txt?&1",
+      "relative_path": "testfile.txt",
+      "hash": "sha-256-flat;1048576;7304a2cafffa261695552d4271a47709ed8e7fe3d73e201ba8e5eae3ce20fe99",
+      "size": 8,
+      "tags": null,
+      "resource_identity": null,
+      "resource_identity_v2": null,
+      "modified_time": null
+    },
+    {
+      "source_path": "/tmp/.wrapp_preserve_empty_folder",
+      "relative_path": "subfolder/subsubfolder/.wrapp_preserve_empty_folder",
+      "hash": "sha-256-flat;1048576;e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "size": 0,
+      "tags": null,
+      "resource_identity": null,
+      "resource_identity_v2": null,
+      "modified_time": null
+    }
+  ],
+  "storage_map": null
+}

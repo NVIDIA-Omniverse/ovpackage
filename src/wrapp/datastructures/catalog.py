@@ -19,6 +19,10 @@ import tempfile
 import warnings
 from bisect import bisect_left
 from collections import defaultdict
+from datetime import (
+    datetime,
+    timezone,
+)
 from typing import (
     Any,
     ClassVar,
@@ -27,9 +31,13 @@ from typing import (
     Optional,
 )
 
-from pydantic import BaseModel
+from pydantic import (
+    BaseModel,
+    Field,
+    field_validator,
+)
 
-from wrapp.datastructures.previous_versions.catalog_old_versions import Catalog_V4_0
+from wrapp.datastructures.previous_versions.catalog_old_versions import Catalog_V5_0
 from wrapp.datastructures.wrapp_file_model import (
     WRAPPFileModel,
     WRAPPModelVersion,
@@ -37,7 +45,8 @@ from wrapp.datastructures.wrapp_file_model import (
 from wrapp.utils.api_marker import wrapp_public_api
 from wrapp.utils.utils import (
     StorageOperationError,
-    join_paths,
+    escape_legacy_storage_address,
+    join_url_path,
     make_relative_url,
 )
 
@@ -58,14 +67,24 @@ class CatalogItem(BaseModel):
     A single item in a catalog represents a file. folders are not part of the catalog.
     """
 
-    source_path: str  #: An absolute URL pointing to the content of the item at the time of catalog creation
+    source_path: str  #: The logical input address used when the item was catalogued
     relative_path: str  #: PRIMARY KEY in catalog, the location of the item relative to the root of the catalog
     hash: Optional[str] = None  #: content-based hash. For comparison, beware there are multiple algorithms around
     size: Optional[int] = None  #: size of the file
     tags: Optional[List[Tag]] = None  #: list of tags applied to the file (Nucleus only)
-    resource_identity: Optional[
-        str
-    ] = None  #: backend-specific handle that either returns the original bytes or fails; ``None`` when the storage does not expose one
+    resource_identity: Optional[str] = None  #: Deprecated: historical identity claims are not trusted for reads.
+    resource_identity_v2: Optional[str] = Field(default=None, min_length=1)
+    """Read token for the recorded bytes: returns those bytes or fails. Equal tokens
+    imply equal content; different tokens do not imply different content.
+    """
+    modified_time: Optional[datetime] = None  #: Modification time captured with the identity and size; absent in legacy catalogs.
+
+    @field_validator("modified_time")
+    @classmethod
+    def _utc_modified_time(cls, value: Optional[datetime]) -> Optional[datetime]:
+        if value is None:
+            return None
+        return value.replace(tzinfo=timezone.utc) if value.tzinfo is None else value.astimezone(timezone.utc)
 
 
 @wrapp_public_api
@@ -80,7 +99,7 @@ class StorageMap(BaseModel):
 class Catalog(WRAPPFileModel):
     """The Catalog contains a bill of materials (BOM) of files at a specific version identified by their relative path relative to the root URL recorded."""
 
-    format_version: WRAPPModelVersion = WRAPPModelVersion(version_string="5.0")
+    format_version: WRAPPModelVersion = WRAPPModelVersion(version_string="6.0")
     root: str  #: Root URL of catalog operation, all relative_path entries of the Item resolve to this
     items: list[CatalogItem]  #: Content of catalog
     storage_map: Optional[
@@ -121,27 +140,18 @@ class Catalog(WRAPPFileModel):
         return pos < len(sorted_paths) - 1 and sorted_paths[pos + 1].startswith(path)
 
     @classmethod
-    def migrate_major_version(cls, read_data: Catalog_V4_0) -> "Catalog":
-        # Version 4.0 -> 5.x:
-        # * Fixing wrongly named .wrapp_keep_empty_folder to .wrapp_preserve_empty_folder
+    def migrate_major_version(cls, read_data: Catalog_V5_0) -> "Catalog":
+        # Historical identity claims must never be promoted to v2. The v5
+        # snapshot preserves the old field and leaves the new fields absent.
         data_dict = read_data.model_dump()
-        data_dict.pop("format_version")  # we do not want to override format_version
-
-        # Update any items that use the wrong name to the correct naming
-        old_filename = ".wrapp_keep_empty_folder"
-        new_filename = cls.filename_to_keep_empty_folder()
-
+        data_dict.pop("format_version")
+        data_dict["root"] = escape_legacy_storage_address(data_dict["root"])
         for item in data_dict["items"]:
-            if item["relative_path"].endswith(f"/{old_filename}"):
-                item["relative_path"] = item["relative_path"].replace(f"/{old_filename}", f"/{new_filename}")
-                # Also update the source path filename (but keep only the directory, not any random suffix)
-                # Source path is like /tmp/.wrapp_keep_empty_folder or /tmp/.wrapp_keep_empty_folderXXXXX
-                source_basename = os.path.basename(item["source_path"])
-                if source_basename.startswith(old_filename):
-                    source_dir = os.path.dirname(item["source_path"])
-                    # Don't keep any random suffix - use canonical name
-                    item["source_path"] = os.path.join(source_dir, new_filename)
-
+            item["source_path"] = escape_legacy_storage_address(item["source_path"])
+        if data_dict.get("storage_map") is not None:
+            storage_map = data_dict["storage_map"]["storage_map"]
+            for key, address in storage_map.items():
+                storage_map[key] = escape_legacy_storage_address(address)
         return Catalog(**data_dict)
 
     @staticmethod
@@ -212,6 +222,9 @@ class Catalog(WRAPPFileModel):
                 # destination identity, including None when the destination
                 # storage doesn't expose one.
                 item.resource_identity = new_item.resource_identity
+                item.resource_identity_v2 = new_item.resource_identity_v2
+                item.modified_time = new_item.modified_time
+                item.size = new_item.size
             else:
                 items_not_updated.append(item)
         return items_not_updated
@@ -220,7 +233,7 @@ class Catalog(WRAPPFileModel):
         index = self._build_index()
         # Now merge the sub catalog into our catalog. We must recalculate the relative paths though!
         for item in additional_catalog.items:
-            abs_path = join_paths(catalog_base, item.relative_path)
+            abs_path = join_url_path(catalog_base, item.relative_path)
             new_relative_path = make_relative_url(base_path, abs_path)
             # Only add item if it is not already in the catalog, merging overlaps here
             if new_relative_path not in index:

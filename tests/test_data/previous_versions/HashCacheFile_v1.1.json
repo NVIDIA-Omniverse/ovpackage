@@ -1,0 +1,18 @@
+{
+  "format_version": {
+    "version_string": "1.1"
+  },
+  "entries": {
+    "/tmp/test_file_1.txt": {
+      "modification_time": "2024-01-02T03:04:05.123456",
+      "filesize": 123,
+      "hash": "hash_abc123"
+    },
+    "/tmp/test_file_2.txt": {
+      "modification_time": "2024-02-03T04:05:06.654321",
+      "filesize": 456,
+      "hash": "hash_def456"
+    }
+  },
+  "identity_entries": {}
+}

@@ -22,23 +22,24 @@ from nvidia.omniverse.storage.capabilities.v1beta import (
     capabilities_pb2 as nvidia_dot_omniverse_dot_storage_dot_capabilities_dot_v1beta_dot_capabilities__pb2,
 )
 
-GRPC_GENERATED_VERSION = '1.72.2'
+GRPC_GENERATED_VERSION = "1.73.1"
 GRPC_VERSION = grpc.__version__
 _version_not_supported = False
 
 try:
     from grpc._utilities import first_version_is_lower
+
     _version_not_supported = first_version_is_lower(GRPC_VERSION, GRPC_GENERATED_VERSION)
 except ImportError:
     _version_not_supported = True
 
 if _version_not_supported:
     raise RuntimeError(
-        f'The grpc package installed is at version {GRPC_VERSION},'
-        + f' but the generated code in nvidia/omniverse/storage/capabilities/v1beta/capabilities_pb2_grpc.py depends on'
-        + f' grpcio>={GRPC_GENERATED_VERSION}.'
-        + f' Please upgrade your grpc module to grpcio>={GRPC_GENERATED_VERSION}'
-        + f' or downgrade your generated code using grpcio-tools<={GRPC_VERSION}.'
+        f"The grpc package installed is at version {GRPC_VERSION},"
+        + f" but the generated code in nvidia/omniverse/storage/capabilities/v1beta/capabilities_pb2_grpc.py depends on"
+        + f" grpcio>={GRPC_GENERATED_VERSION}."
+        + f" Please upgrade your grpc module to grpcio>={GRPC_GENERATED_VERSION}"
+        + f" or downgrade your generated code using grpcio-tools<={GRPC_VERSION}."
     )
 
 
@@ -55,15 +56,17 @@ class CapabilitiesServiceStub(object):
             channel: A grpc.Channel.
         """
         self.ListServices = channel.unary_unary(
-                '/nvidia.omniverse.storage.capabilities.v1beta.CapabilitiesService/ListServices',
-                request_serializer=nvidia_dot_omniverse_dot_storage_dot_capabilities_dot_v1beta_dot_capabilities__pb2.ListServicesRequest.SerializeToString,
-                response_deserializer=nvidia_dot_omniverse_dot_storage_dot_capabilities_dot_v1beta_dot_capabilities__pb2.ListServicesResponse.FromString,
-                _registered_method=True)
+            "/nvidia.omniverse.storage.capabilities.v1beta.CapabilitiesService/ListServices",
+            request_serializer=nvidia_dot_omniverse_dot_storage_dot_capabilities_dot_v1beta_dot_capabilities__pb2.ListServicesRequest.SerializeToString,
+            response_deserializer=nvidia_dot_omniverse_dot_storage_dot_capabilities_dot_v1beta_dot_capabilities__pb2.ListServicesResponse.FromString,
+            _registered_method=True,
+        )
         self.ListTopLevelAddresses = channel.unary_unary(
-                '/nvidia.omniverse.storage.capabilities.v1beta.CapabilitiesService/ListTopLevelAddresses',
-                request_serializer=nvidia_dot_omniverse_dot_storage_dot_capabilities_dot_v1beta_dot_capabilities__pb2.ListTopLevelAddressesRequest.SerializeToString,
-                response_deserializer=nvidia_dot_omniverse_dot_storage_dot_capabilities_dot_v1beta_dot_capabilities__pb2.ListTopLevelAddressesResponse.FromString,
-                _registered_method=True)
+            "/nvidia.omniverse.storage.capabilities.v1beta.CapabilitiesService/ListTopLevelAddresses",
+            request_serializer=nvidia_dot_omniverse_dot_storage_dot_capabilities_dot_v1beta_dot_capabilities__pb2.ListTopLevelAddressesRequest.SerializeToString,
+            response_deserializer=nvidia_dot_omniverse_dot_storage_dot_capabilities_dot_v1beta_dot_capabilities__pb2.ListTopLevelAddressesResponse.FromString,
+            _registered_method=True,
+        )
 
 
 class CapabilitiesServiceServicer(object):
@@ -73,40 +76,39 @@ class CapabilitiesServiceServicer(object):
     """
 
     def ListServices(self, request, context):
-        """Return the list of service API implemented by this service
-        """
+        """Return the list of service API implemented by this service"""
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
-        context.set_details('Method not implemented!')
-        raise NotImplementedError('Method not implemented!')
+        context.set_details("Method not implemented!")
+        raise NotImplementedError("Method not implemented!")
 
     def ListTopLevelAddresses(self, request, context):
-        """Return a list of top level resource addresses that is suited for browsing this storage service by the user.
-        """
+        """Return a list of top level resource addresses that is suited for browsing this storage service by the user."""
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
-        context.set_details('Method not implemented!')
-        raise NotImplementedError('Method not implemented!')
+        context.set_details("Method not implemented!")
+        raise NotImplementedError("Method not implemented!")
 
 
 def add_CapabilitiesServiceServicer_to_server(servicer, server):
     rpc_method_handlers = {
-            'ListServices': grpc.unary_unary_rpc_method_handler(
-                    servicer.ListServices,
-                    request_deserializer=nvidia_dot_omniverse_dot_storage_dot_capabilities_dot_v1beta_dot_capabilities__pb2.ListServicesRequest.FromString,
-                    response_serializer=nvidia_dot_omniverse_dot_storage_dot_capabilities_dot_v1beta_dot_capabilities__pb2.ListServicesResponse.SerializeToString,
-            ),
-            'ListTopLevelAddresses': grpc.unary_unary_rpc_method_handler(
-                    servicer.ListTopLevelAddresses,
-                    request_deserializer=nvidia_dot_omniverse_dot_storage_dot_capabilities_dot_v1beta_dot_capabilities__pb2.ListTopLevelAddressesRequest.FromString,
-                    response_serializer=nvidia_dot_omniverse_dot_storage_dot_capabilities_dot_v1beta_dot_capabilities__pb2.ListTopLevelAddressesResponse.SerializeToString,
-            ),
+        "ListServices": grpc.unary_unary_rpc_method_handler(
+            servicer.ListServices,
+            request_deserializer=nvidia_dot_omniverse_dot_storage_dot_capabilities_dot_v1beta_dot_capabilities__pb2.ListServicesRequest.FromString,
+            response_serializer=nvidia_dot_omniverse_dot_storage_dot_capabilities_dot_v1beta_dot_capabilities__pb2.ListServicesResponse.SerializeToString,
+        ),
+        "ListTopLevelAddresses": grpc.unary_unary_rpc_method_handler(
+            servicer.ListTopLevelAddresses,
+            request_deserializer=nvidia_dot_omniverse_dot_storage_dot_capabilities_dot_v1beta_dot_capabilities__pb2.ListTopLevelAddressesRequest.FromString,
+            response_serializer=nvidia_dot_omniverse_dot_storage_dot_capabilities_dot_v1beta_dot_capabilities__pb2.ListTopLevelAddressesResponse.SerializeToString,
+        ),
     }
     generic_handler = grpc.method_handlers_generic_handler(
-            'nvidia.omniverse.storage.capabilities.v1beta.CapabilitiesService', rpc_method_handlers)
+        "nvidia.omniverse.storage.capabilities.v1beta.CapabilitiesService", rpc_method_handlers
+    )
     server.add_generic_rpc_handlers((generic_handler,))
-    server.add_registered_method_handlers('nvidia.omniverse.storage.capabilities.v1beta.CapabilitiesService', rpc_method_handlers)
+    server.add_registered_method_handlers("nvidia.omniverse.storage.capabilities.v1beta.CapabilitiesService", rpc_method_handlers)
 
 
- # This class is part of an EXPERIMENTAL API.
+# This class is part of an EXPERIMENTAL API.
 class CapabilitiesService(object):
     """The CapabilitiesService is used to reflect on which services are implemented by this server.
     Each service in turn exposes another service-specific capabilities query,
@@ -114,20 +116,22 @@ class CapabilitiesService(object):
     """
 
     @staticmethod
-    def ListServices(request,
-            target,
-            options=(),
-            channel_credentials=None,
-            call_credentials=None,
-            insecure=False,
-            compression=None,
-            wait_for_ready=None,
-            timeout=None,
-            metadata=None):
+    def ListServices(
+        request,
+        target,
+        options=(),
+        channel_credentials=None,
+        call_credentials=None,
+        insecure=False,
+        compression=None,
+        wait_for_ready=None,
+        timeout=None,
+        metadata=None,
+    ):
         return grpc.experimental.unary_unary(
             request,
             target,
-            '/nvidia.omniverse.storage.capabilities.v1beta.CapabilitiesService/ListServices',
+            "/nvidia.omniverse.storage.capabilities.v1beta.CapabilitiesService/ListServices",
             nvidia_dot_omniverse_dot_storage_dot_capabilities_dot_v1beta_dot_capabilities__pb2.ListServicesRequest.SerializeToString,
             nvidia_dot_omniverse_dot_storage_dot_capabilities_dot_v1beta_dot_capabilities__pb2.ListServicesResponse.FromString,
             options,
@@ -138,23 +142,26 @@ class CapabilitiesService(object):
             wait_for_ready,
             timeout,
             metadata,
-            _registered_method=True)
+            _registered_method=True,
+        )
 
     @staticmethod
-    def ListTopLevelAddresses(request,
-            target,
-            options=(),
-            channel_credentials=None,
-            call_credentials=None,
-            insecure=False,
-            compression=None,
-            wait_for_ready=None,
-            timeout=None,
-            metadata=None):
+    def ListTopLevelAddresses(
+        request,
+        target,
+        options=(),
+        channel_credentials=None,
+        call_credentials=None,
+        insecure=False,
+        compression=None,
+        wait_for_ready=None,
+        timeout=None,
+        metadata=None,
+    ):
         return grpc.experimental.unary_unary(
             request,
             target,
-            '/nvidia.omniverse.storage.capabilities.v1beta.CapabilitiesService/ListTopLevelAddresses',
+            "/nvidia.omniverse.storage.capabilities.v1beta.CapabilitiesService/ListTopLevelAddresses",
             nvidia_dot_omniverse_dot_storage_dot_capabilities_dot_v1beta_dot_capabilities__pb2.ListTopLevelAddressesRequest.SerializeToString,
             nvidia_dot_omniverse_dot_storage_dot_capabilities_dot_v1beta_dot_capabilities__pb2.ListTopLevelAddressesResponse.FromString,
             options,
@@ -165,4 +172,5 @@ class CapabilitiesService(object):
             wait_for_ready,
             timeout,
             metadata,
-            _registered_method=True)
+            _registered_method=True,
+        )

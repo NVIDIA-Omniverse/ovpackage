@@ -20,9 +20,6 @@ import shutil
 import tarfile
 from copy import deepcopy
 from typing import (
-    Any,
-    Callable,
-    Coroutine,
     List,
     Optional,
     Set,
@@ -49,6 +46,7 @@ from wrapp.datastructures.command_context import (
 )
 from wrapp.datastructures.package import (
     PackageInfo,
+    apply_source_policy,
     is_package_file_name,
     load_package_setup,
     wrapp_file_name,
@@ -61,6 +59,7 @@ from wrapp.datastructures.package_standard import (
 )
 from wrapp.options import (
     AuthOption,
+    CanonicalSourceOption,
     CatalogFileOption,
     DebugLevelFlag,
     DedupFlag,
@@ -73,6 +72,7 @@ from wrapp.options import (
     ProgressReportOption,
     RepoOption,
     StatsFlag,
+    StripSourceFlag,
     TimeFlag,
     VerboseFlag,
 )
@@ -85,24 +85,19 @@ from wrapp.utils.coro import (
     force_wrapp_thread,
 )
 from wrapp.utils.ensure_scheduler import ensure_scheduler
-from wrapp.utils.scheduler_task_node import SchedulerTaskGroupNode
 from wrapp.utils.stats import (
     Stats,
     StatType,
 )
-from wrapp.utils.storage import (
-    LocalReadOnlyFile,
-    Result,
-    wrapp_can_be_cached,
-    wrapp_copy_item_optimized,
-    wrapp_get_cached_file,
+from wrapp.utils.storage import wrapp_materialize
+from wrapp.utils.storage_interface import (
+    ResourceAddress,
+    SerializedResourceIdentity,
 )
-from wrapp.utils.temp_file_manager import TempFileManager
 from wrapp.utils.utils import (
     FailedCommand,
     StorageOperationError,
     format_size,
-    is_nucleus_url,
     join_paths,
     validate_non_empty_string,
 )
@@ -133,6 +128,8 @@ async def export_command(
     verbose: bool = VerboseFlag,
     progress_report: ProgressReportVerbosity = ProgressReportOption,
     dedup: bool = DedupFlag,
+    strip_source: bool = StripSourceFlag,
+    canonical_source: Optional[str] = CanonicalSourceOption,
     stats: bool = StatsFlag,
     debug: bool = DebugLevelFlag,
     log_file: str = LogFileOption,
@@ -154,6 +151,8 @@ async def export_command(
                 output=output,
                 overwrite=overwrite,
                 dedup=dedup,
+                strip_source=strip_source,
+                canonical_source=canonical_source,
                 context=context,
                 scheduler=scheduler,
             )
@@ -180,6 +179,8 @@ async def export_package(
     overwrite: bool = False,
     dedup=False,
     *,
+    strip_source: bool = False,
+    canonical_source: Optional[str] = None,
     context: CommandParameters = CommandParameters(),
     scheduler: Optional[SchedulerContext] = None,
 ) -> None:
@@ -193,6 +194,8 @@ async def export_package(
     :param output: Name of tar file to create
     :param overwrite: Flag to allow overwriting the tar file in case it already exists
     :param dedup: Specify this to deduplicate content on export, i.e. don't store files by their name in the tar but by their hash
+    :param strip_source: When True, clear the source and repository provenance fields in the exported .wrapp file so internal addresses are not published. Mutually exclusive with canonical_source.
+    :param canonical_source: When set, record this canonical base URL as the source/repository provenance instead of the internal address. Mutually exclusive with strip_source.
     :param context: Global configuration parameters
     :param scheduler: Optionally pre-constructed SchedulerContext. When calling many functions in a row make sure to pre-construct the scheduler.
 
@@ -205,6 +208,8 @@ async def export_package(
 
     if scheduler is None:
         raise RuntimeError("No scheduler present and ensure_scheduler malfunctioned, program error!")
+    if strip_source and canonical_source:
+        raise FailedCommand("Use either --strip-source or --canonical-source, not both.")
     if catalog and repo:
         raise FailedCommand(
             "Specify to export either from a repository with --repo or to create a package from a catalog with --catalog, but not both."
@@ -222,6 +227,8 @@ async def export_package(
             overwrite=overwrite,
             dedup=dedup,
             source_package_url=None,
+            strip_source=strip_source,
+            canonical_source=canonical_source,
             context=context,
             scheduler=scheduler,
         )
@@ -246,6 +253,8 @@ async def export_package(
                 overwrite=overwrite,
                 dedup=dedup,
                 source_package_url=source_package_url,
+                strip_source=strip_source,
+                canonical_source=canonical_source,
                 context=context,
                 scheduler=scheduler,
             )
@@ -260,6 +269,8 @@ async def _export_package_internal(
     dedup,
     source_package_url: Optional[str],
     *,
+    strip_source: bool = False,
+    canonical_source: Optional[str] = None,
     context: CommandParameters,
     scheduler: SchedulerContext,
 ):
@@ -291,6 +302,8 @@ async def _export_package_internal(
             if blob_store_package.catalog is None:
                 raise RuntimeError("deepcopy lost catalog - this should never happen")
             blob_store_package.catalog.storage_map = storage_map
+            # Keep internal source addresses out of the exported (published) package if requested
+            apply_source_policy(blob_store_package, strip_source=strip_source, canonical_source=canonical_source)
             tarfile_package_str = blob_store_package.model_dump_json(indent=4)
             _write_into_tarfile(tar, wrapp_file_name(blob_store_package.name), tarfile_package_str.encode("UTF-8"))
 
@@ -317,72 +330,31 @@ async def _export_package_internal(
                         if storage_path in paths_stored:
                             continue
                         paths_stored.add(storage_path)
-                    # source_path points to the actual file location (works for both normal and redirect packages)
-                    source_url = item.source_path
-                    scheduled_task_name: str = "Download file"
-                    hub_runs = wrapp_can_be_cached(source_url)
-                    if not hub_runs:
-                        download_func: Callable[..., Coroutine[Any, Any, Any]] = _download_item_to_tar
-                        # TODO we should think about how to extract the SchedulingParameters from a Scheduling object again
-                        download_args = [context, scheduler.get_parameters().progress_report, tar, item, storage_path]
-                        scheduled_task_name += " without hub cache"
-                    else:
-                        download_func = _download_cached_item_to_tar
-                        download_args = [task_node, tar, source_url, storage_path]
-
-                    # The if currently makes no difference - but it seems a good idea to keep it anyway for now.
-                    if is_nucleus_url(source_url) and (item.size if item.size is not None else 0) >= 256 * 1024:
-                        # Large file transfer, rate limit is done by connection library
-                        task_node.create_task(download_func(*download_args), name=scheduled_task_name)
-                    else:
-                        # Small file, needs to be rate limited as it does not hit LFT
-                        task_node.create_task(download_func(*download_args), name=scheduled_task_name)
+                    task_node.create_task(
+                        _materialize_item_to_tar(scheduler.get_parameters().progress_report, tar, item, storage_path),
+                        name="Materialize file and add to tar",
+                    )
         logger.info(f"Done writing {output}")
 
 
-async def _download_cached_item_to_tar(task_node: SchedulerTaskGroupNode, tar: tarfile.TarFile, url: str, real_filename: str):
-    result, cache_file = await wrapp_get_cached_file(url)
-    if result != Result.OK or cache_file is None:
-        raise StorageOperationError(f"Failed to download file {url}: {result}")
-    task_node.create_task(_add_file_to_tar(tar, real_filename, cache_file), name="Add file to tar")
-
-
-async def _add_file_to_tar(tar: tarfile.TarFile, real_filename: str, cache_file: LocalReadOnlyFile):
-    # This next block of code takes a while, but there is unfortunately not an async version of tar.add.
-    # So we will block the scheduler for a bit. This is actually okish (it is not that long).
-    # Beware though that if too many of those kind of functions are called in the same frame
-    # in the async loop we block the Python thread for as long as that takes (which can be quite long),
-    # not being able to give the user visual feedback (the async loop in Python 3.10 executes all
-    # functions "ready" in the current frame - see https://github.com/python/cpython/blob/e9d1360c9a1072aa23950b321491dc542c3a19b8/Lib/asyncio/base_events.py#L1983).
-    # So asyncio.wait(..., return_when=asyncio.FIRST_COMPLETED) actually executes all "ready" tasks
-    # which in this case could be all the add_file_to_tar functions at once.
-    try:
-        size_downloaded = os.path.getsize(cache_file.local_path())
-        Stats.get().increment(StatType.BYTES_COPIED, size_downloaded)
-        tar.add(cache_file.local_path(), arcname=real_filename)
-        return Result.OK
-    finally:
-        cache_file.close()
-
-
-async def _download_item_to_tar(
-    context: CommandParameters,
+async def _materialize_item_to_tar(
     progress_report_verbosity: ProgressReportVerbosity,
     tar: tarfile.TarFile,
     item: CatalogItem,
     storage_path: str,
 ):
-    # TODO: once the storage backends support a stream-based download API (read_stream),
-    # we can stream directly into the tar archive instead of materializing to a temp file first.
-    async with TempFileManager.me().create_temp_file() as tmp:
-        result = await wrapp_copy_item_optimized(context, item.source_path, tmp.url, item.hash, overwrite=True, force_upload=False)
-        if result != Result.OK:
-            raise StorageOperationError(f"Failed to download '{item.source_path}', error {result}. Aborting export.")
+    async with wrapp_materialize(
+        ResourceAddress(item.source_path),
+        resource_identity=SerializedResourceIdentity(item.resource_identity_v2) if item.resource_identity_v2 is not None else None,
+        expected_hash=item.hash,
+    ) as local_file:
         if progress_report_verbosity == ProgressReportVerbosity.off:
-            logger.info(f"Downloaded {format_size(item.size)} for {item.source_path}")
-        tmp.write_completed()
-        Stats.get().increment(StatType.BYTES_COPIED, os.path.getsize(tmp.path))
-        tar.add(tmp.path, arcname=storage_path)
+            logger.info(f"Materialized {format_size(item.size)} for {item.source_path}")
+        # tar.add is synchronous. Keep the read lease open until it finishes;
+        # context exit also closes/releases it if archive writing fails.
+        path = os.path.realpath(local_file.local_path())
+        Stats.get().increment(StatType.BYTES_COPIED, os.path.getsize(path))
+        tar.add(path, arcname=storage_path)
 
 
 def _write_into_tarfile(tar: tarfile.TarFile, name: str, content: bytes):

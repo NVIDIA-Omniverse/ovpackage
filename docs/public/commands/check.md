@@ -2,11 +2,21 @@
 
 ## Description
 
-Given a package file address, check that the content referenced by the package is available and correct.
+The check command checks repository package catalogs. Entries without
+`resource_identity_v2` are verified by comparing file hashes (SHA-256) and
+sizes at their source addresses against the recorded catalog values. The
+deprecated `resource_identity` field does not bypass this content check.
 
-The check command verifies if the catalog of a repository package matches its actual data content.
-This is useful for validating package integrity. Verification is performed by comparing file hashes
-(SHA-256) and sizes against the values recorded in the package catalog.
+For identity-backed entries, the recorded version is authoritative; changes at
+the mutable source address do not invalidate that version.
+
+**Current limitation:** `check` trusts recorded v2 identities and checks
+catalog structure without testing whether those identities remain available.
+A successful check is therefore not an availability audit. Applications must
+not rely on malformed or unavailable identities passing `check`; this
+limitation is not a guarantee that identity validation will always be skipped.
+Actual reads using v2 fail if the token cannot be resolved; they never fall
+back to the address.
 
 Use `--hash-cache-file` (`--hcf`) to speed up repeated content checks by caching
 file hashes between runs. See generic parameters for details.

@@ -29,6 +29,7 @@ from wrapp.datastructures.previous_versions.catalog_old_versions import (
     Catalog_V3_0,
     Catalog_V4_0,
     Catalog_V5_0,
+    Catalog_V6_0,
 )
 from wrapp.datastructures.previous_versions.dependency_old_versions import (
     Dependency_V2,
@@ -177,3 +178,17 @@ all_old_file_model_classes[("PackageInfo", WRAPPModelVersion(version_string="4.0
 all_old_file_model_classes[("PackageInfo", WRAPPModelVersion(version_string="5.0"))] = PackageInfo_V5_0
 all_old_file_model_classes[("PackageInfo", WRAPPModelVersion(version_string="5.1"))] = PackageInfo_V5_1
 all_old_file_model_classes[("PackageInfo", WRAPPModelVersion(version_string="5.2"))] = PackageInfo_V5_2
+
+
+class PackageInfo_V6_0(PackageInfo_V5_2):
+    format_version: WRAPPModelVersion = WRAPPModelVersion(version_string="6.0")
+    catalog: Optional[Catalog_V6_0] = None
+
+    @classmethod
+    def migrate_major_version(cls, read_data: PackageInfo_V5_2) -> "PackageInfo_V6_0":
+        data_dict = read_data.model_dump()
+        data_dict.pop("format_version")
+        return PackageInfo_V6_0(**data_dict)
+
+
+all_old_file_model_classes[("PackageInfo", WRAPPModelVersion(version_string="6.0"))] = PackageInfo_V6_0

@@ -15,7 +15,6 @@
 
 import importlib
 
-import ovpackage
 import pytest
 
 import wrapp
@@ -28,30 +27,35 @@ from wrapp.datastructures.package import (
 )
 
 
-def test_ovpackage_reexports_wrapp_public_api():
-    assert ovpackage.__version__ == wrapp.__version__
-    assert ovpackage.PackageInfo is wrapp.PackageInfo
-    assert ovpackage.ContextManager is wrapp.ContextManager
+@pytest.fixture
+def ovpackage_module():
+    return pytest.importorskip("ovpackage")
 
 
-def test_common_ovpackage_submodules_alias_wrapp_modules():
+def test_ovpackage_reexports_wrapp_public_api(ovpackage_module):
+    assert ovpackage_module.__version__ == wrapp.__version__
+    assert ovpackage_module.PackageInfo is wrapp.PackageInfo
+    assert ovpackage_module.ContextManager is wrapp.ContextManager
+
+
+def test_common_ovpackage_submodules_alias_wrapp_modules(ovpackage_module):
     assert importlib.import_module("ovpackage.commands") is importlib.import_module("wrapp.commands")
     assert importlib.import_module("ovpackage.datastructures") is importlib.import_module("wrapp.datastructures")
     assert importlib.import_module("ovpackage.utils") is importlib.import_module("wrapp.utils")
 
 
-def test_nested_ovpackage_submodules_alias_wrapp_modules():
+def test_nested_ovpackage_submodules_alias_wrapp_modules(ovpackage_module):
     # Without aliasing every level, `import ovpackage.X.Y` would load a fresh
     # copy of wrapp/X/Y.py and produce a duplicate class object — breaking
     # identity checks and re-running typer command decorators.
     assert importlib.import_module("ovpackage.datastructures.package") is importlib.import_module("wrapp.datastructures.package")
     assert importlib.import_module("ovpackage.commands.version") is importlib.import_module("wrapp.commands.version")
-    pkg_via_top = ovpackage.PackageInfo
+    pkg_via_top = ovpackage_module.PackageInfo
     pkg_via_nested = importlib.import_module("ovpackage.datastructures.package").PackageInfo
     assert pkg_via_top is pkg_via_nested
 
 
-def test_ovpackage_does_not_eagerly_import_native_backends():
+def test_ovpackage_does_not_eagerly_import_native_backends(ovpackage_module):
     # The alias is lazy: optional/native backends (clientlib pulls in
     # omni.client, s3storage pulls in aioboto3, etc.) must not be imported
     # just because someone did `import ovpackage` — they should only load
@@ -63,6 +67,7 @@ def test_ovpackage_does_not_eagerly_import_native_backends():
         "wrapp.utils.storage_impls.s3storage",
         "wrapp.utils.storage_impls.azure_blob_storage",
         "wrapp.utils.storage_impls.gcs_storage",
+        "wrapp.utils.storage_impls.huggingface_storage",
     ):
         # We can't fully assert "never imported" because earlier tests in
         # the same session may have pulled them in. But at least confirm
@@ -83,6 +88,7 @@ def test_ovpackage_does_not_eagerly_import_native_backends():
         "wrapp.utils.storage_impls.s3storage",
         "wrapp.utils.storage_impls.azure_blob_storage",
         "wrapp.utils.storage_impls.gcs_storage",
+        "wrapp.utils.storage_impls.huggingface_storage",
     }
     leaked = loaded & forbidden
     assert not leaked, f"`import ovpackage` eagerly loaded native backends: {leaked}"

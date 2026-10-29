@@ -3,39 +3,39 @@
     {
       "operation_type": "delete",
       "explanation": "Delete aamtngho/source_package/testfile.txt from A, as it was removed from B",
-      "url": "omniverse://localhost/users/cruch/use1/aamtngho/source_package/testfile.txt"
+      "url": "omniverse://localhost/users/test-user/use1/aamtngho/source_package/testfile.txt"
     },
     {
       "operation_type": "delete",
       "explanation": "Delete aamtngho/source_package from A, as it was removed from B",
-      "url": "omniverse://localhost/users/cruch/use1/aamtngho/source_package"
+      "url": "omniverse://localhost/users/test-user/use1/aamtngho/source_package"
     },
     {
       "operation_type": "delete",
       "explanation": "Delete aamtngho from A, as it was removed from B",
-      "url": "omniverse://localhost/users/cruch/use1/aamtngho"
+      "url": "omniverse://localhost/users/test-user/use1/aamtngho"
     },
     {
       "operation_type": "create_folder",
       "explanation": "Creating aamtngho12 to A as in B",
-      "url": "omniverse://localhost/users/cruch/use1/aamtngho12"
+      "url": "omniverse://localhost/users/test-user/use1/aamtngho12"
     },
     {
       "operation_type": "create_folder",
       "explanation": "Creating aamtngho12/source_package to A as in B",
-      "url": "omniverse://localhost/users/cruch/use1/aamtngho12/source_package"
+      "url": "omniverse://localhost/users/test-user/use1/aamtngho12/source_package"
     },
     {
       "operation_type": "add_tag",
       "explanation": "Conflict: Tag {\"id\": 0, \"relative_path\": \"auvjcvpr/source_package/testfile.txt\", \"type\": \"tag\", \"name\": \"Cat is dead\", \"ns\": \"appearance\", \"value\": \"conflict_value\"} modified in both A and B with different values. Default: Override changes in A with B",
-      "url": "omniverse://localhost/users/cruch/use1/auvjcvpr/source_package/testfile.txt",
+      "url": "omniverse://localhost/users/test-user/use1/auvjcvpr/source_package/testfile.txt",
       "tag": "{\"id\": 0, \"relative_path\": \"auvjcvpr/source_package/testfile.txt\", \"type\": \"tag\", \"name\": \"Cat is dead\", \"ns\": \"appearance\", \"value\": \"new_value\"}"
     },
     {
       "operation_type": "copy",
       "explanation": "Adding aamtngho12/source_package/testfile.txt to A from B",
       "src": "omniverse://localhost/.packages/test_package/1.0.1/aamtngho12/source_package/testfile.txt?&1",
-      "dst": "omniverse://localhost/users/cruch/use1/aamtngho12/source_package/testfile.txt",
+      "dst": "omniverse://localhost/users/test-user/use1/aamtngho12/source_package/testfile.txt",
       "hash": "sha-256-flat;1048576;5a27e26e252d9445fd2ccce11576ba4d612fb0905ed85ca2f816581e922f43dd",
       "item_type": "file"
     },
@@ -43,7 +43,7 @@
       "operation_type": "copy",
       "explanation": "Update test_package.toml in A from B",
       "src": "omniverse://localhost/.packages/test_package/1.0.1/test_package.toml?&1",
-      "dst": "omniverse://localhost/users/cruch/use1/test_package.toml",
+      "dst": "omniverse://localhost/users/test-user/use1/test_package.toml",
       "hash": "sha-256-flat;1048576;6a49f648bf29ee6ea05f99d181574231b586cf1db612d5ebd938dbf09ca947f1",
       "item_type": "file"
     }

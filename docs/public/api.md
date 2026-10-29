@@ -70,6 +70,35 @@ If no AuthManager is used, default client library behavior is enabled which is f
 falling back to an interactive login flow when the server supports it. This might open a
 browser window, so don't run this in non-interactive shells.
 
+**Storage API authentication via the Python API**
+
+For Storage API backends, create a `StorageAuthInfo` with one of the
+Storage API factory methods and pass it to the `ContextManager` or
+`AuthManager`:
+
+```python
+
+import ovpackage
+
+# Bearer token
+auth = ovpackage.StorageAuthInfo.storage_api_bearer(
+    "https://my-discovery.example.com", "<TOKEN>"
+)
+
+# Or client credentials (machine-to-machine)
+auth = ovpackage.StorageAuthInfo.storage_api_client_credentials(
+    "https://my-discovery.example.com", "<CLIENT_ID>", "<CLIENT_SECRET>"
+)
+
+async with ovpackage.ContextManager([auth]) as ctx:
+    await ovpackage.list_repo("file-storage-id://repo", scheduler=ctx)
+
+```
+Set `OVPACKAGE_STORAGE_API_DISCOVERY_URL` (or `OVPACKAGE_STORAGE_API_GRPC_ADDRESS`)
+before initializing ovpackage — the backend is enabled by default but stays inert
+until one of those is configured. See storage api authentication for the
+full authentication reference.
+
 ## Working with package files
 
 For more advanced use cases, ovpackage allows to read and write the content of the ovpackage files themselves, exposed
@@ -92,6 +121,17 @@ See the `ovpackage.write_package_info` function docstring for the full Python AP
 
 A storage-core manifest for an ovpackage file can be built with the following function, which
 returns a `Manifest` describing the files of the package.
+
+Manifest generation for local file content is currently **not supported**.
+The only current manifest consumer is the storage service, which serves S3,
+Azure and GCS through Storage API; it does not consume manifests for local
+files. This is a limitation of the current use case, not an inability to
+write a manifest JSON file. The CLI output may be a local file, and the API
+returns an in-memory manifest model.
+
+Neither `recalculate_identities=True` nor CLI `--recalculate-identities`
+enables local manifests. Use content served by the storage service when
+building a manifest for that service.
 
 See the `ovpackage.build_manifest` function docstring for the full Python API reference (signature, parameters, and error handling).
 ## Ignore Rules
@@ -156,8 +196,32 @@ See the `ovpackage.datastructures.catalog.Tag` class docstring for the full Pyth
 See the `ovpackage.InstalledPackage` class docstring for the full Python API reference.
 See the `ovpackage.datastructures.workspace_analysis.PackageStatusItemType` class docstring for the full Python API reference.
 See the `ovpackage.datastructures.workspace_analysis.PackageStatusItem` class docstring for the full Python API reference.
-The following data objects describe the manifest produced by the build-manifest command,
-which lists the files of a package together with their backend resource metadata.
+The following data objects describe the storage-core manifest produced by
+`build_manifest`. Its wire format remains **1.0**, compatible with existing
+storage-core readers. Every file requires a durable Storage API identity, in
+both full and minimal manifests. New exports project only the catalog's trusted
+`resource_identity_v2` into the external field named `resource_identity`;
+neither deprecated catalog identity claims nor mutable addresses are exported.
+
+`build_manifest(..., recalculate_identities=True)` is the default. For legacy
+repository catalogs, including dependencies, it reconstructs missing identities
+by observing the recorded address, reading through the newly captured identity,
+and validating those bytes against the catalog's recorded hash and size (when
+present). This can require downloading all legacy files. Changed or unavailable
+content, or missing recorded hashes, causes failure. The published package and
+catalog are not modified. Use `recalculate_identities=False` (CLI
+`--no-recalculate-identities`) to require identities already recorded in the
+catalog. Workspace inputs are cataloged from their current file tree.
+
+Existing v2 identities and their recorded metadata are always preserved, without
+querying the mutable content address to reconstruct that observation. A full manifest
+can therefore be built after that address changes or disappears. Full entries
+require recorded size and modification time; `minimal_format=True` omits
+those metadata fields, but still requires an identity. Backends without durable
+identities cannot produce storage-core manifests.
+
+Existing V1 manifest files retain their original wire data when loaded and
+saved; this does not upgrade or validate legacy catalog identity claims.
 
 See the `ovpackage.Manifest` class docstring for the full Python API reference.
 See the `ovpackage.ManifestFileEntry` class docstring for the full Python API reference.

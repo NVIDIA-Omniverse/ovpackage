@@ -20,6 +20,7 @@ These tests verify correct handling of file:// URLs on both Linux and Windows pl
 including the Windows-specific fix for URLs like file:///C:/path that need the leading
 slash stripped after URL parsing.
 """
+
 import os
 import platform
 import sys
@@ -28,7 +29,10 @@ from unittest import mock
 import pytest
 
 from wrapp.datastructures.command_context import ThrottlingParameters
-from wrapp.utils.storage_impls.local_file_storage import LocalFileStorage
+from wrapp.utils.storage_impls.local_file_storage import (
+    LocalFileListEntry,
+    LocalFileStorage,
+)
 from wrapp.utils.storage_interface import Result
 from wrapp.utils.utils import StorageMissingDependenciesError
 
@@ -54,6 +58,28 @@ def local_storage():
         return LocalFileStorage("test_version", False, params)
     except StorageMissingDependenciesError:
         pytest.skip(reason="Missing dependencies for LocalFileStorage initialization")
+
+
+def test_list_entry_normalizes_windows_relative_paths_to_url_separators_OMPE100308(monkeypatch):
+    monkeypatch.setattr(os, "sep", "\\")
+    entry = LocalFileListEntry(
+        path="C:/repo/source/subdir/sub.txt",
+        relative_path=r"subdir\sub.txt",
+        is_folder=False,
+    )
+
+    assert entry.relative_path == "subdir/sub.txt"
+
+
+@pytest.mark.skipif(os.sep != "/", reason="POSIX-specific literal backslash behavior")
+def test_list_entry_preserves_literal_posix_backslashes_OMPE100308():
+    entry = LocalFileListEntry(
+        path="/repo/source/a\\b.txt",
+        relative_path=r"a\b.txt",
+        is_folder=False,
+    )
+
+    assert entry.relative_path == r"a\b.txt"
 
 
 class TestUrlToPath:
@@ -171,7 +197,7 @@ class TestUrlToPathWindowsRegression:
         OSError: [WinError 123] The filename, directory name, or volume label syntax is incorrect: '\\C:'
         """
         # This is the exact URL pattern from the failing test
-        url = "file:///C:/Users/horde/AppData/Local/Temp/tmptjf8hvqw/tests/20260112_104102_729702_pg/ljmpcchu/sr1_repo/.packages/package_c/v1/csource_package/csubfolder/cfile_in_folder.txt"
+        url = "file:///C:/Users/test-user/AppData/Local/Temp/tmptjf8hvqw/tests/20260112_104102_729702_pg/ljmpcchu/sr1_repo/.packages/package_c/v1/csource_package/csubfolder/cfile_in_folder.txt"
         result = local_storage._url_to_path(url)
 
         # The bug caused the path to start with \C: on Windows
@@ -227,8 +253,10 @@ class TestWindowsBehaviorMocked:
         def mock_normpath(p):
             return p.replace("/", "\\")
 
-        with mock.patch("platform.system", return_value="Windows"), mock.patch("os.path.normpath", side_effect=mock_normpath), mock.patch(
-            "os.path.abspath", side_effect=lambda p: p
+        with (
+            mock.patch("platform.system", return_value="Windows"),
+            mock.patch("os.path.normpath", side_effect=mock_normpath),
+            mock.patch("os.path.abspath", side_effect=lambda p: p),
         ):
             # Test the key fix: file:///C:/path should produce C:\path after strip
             result = local_storage._url_to_path("file:///C:/Users/test/file.txt")

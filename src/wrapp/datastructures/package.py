@@ -36,7 +36,7 @@ from wrapp.datastructures.catalog import (
 from wrapp.datastructures.command_context import CommandParameters
 from wrapp.datastructures.previous_versions.dependency_old_versions import Dependency_V2
 from wrapp.datastructures.previous_versions.package_info_old_versions import (
-    PackageInfo_V5_1,
+    PackageInfo_V5_2,
 )
 from wrapp.datastructures.wrapp_file_model import (
     WRAPPFileModel,
@@ -53,6 +53,7 @@ from wrapp.utils.storage import (
 from wrapp.utils.utils import (
     FailedCommand,
     StorageOperationError,
+    escape_legacy_storage_address,
     get_base_directory_from_url,
     get_filename_from_url,
     is_file_url,
@@ -60,8 +61,10 @@ from wrapp.utils.utils import (
     is_relative_path,
     is_valid_file_or_directory_name,
     join_paths,
+    join_url_path,
     make_file_url_absolute,
     normalize_path,
+    normalize_url,
     paths_are_equal,
 )
 
@@ -105,7 +108,7 @@ class PackageInfo(WRAPPFileModel):
     To load and save wrapp files, use the load() and save() member functions of the PackageInfo class.
     """
 
-    format_version: WRAPPModelVersion = WRAPPModelVersion(version_string="5.2")
+    format_version: WRAPPModelVersion = WRAPPModelVersion(version_string="6.0")
     name: str = ""  #: Name of the package
     version: str = ""  #: "Version referenced
     catalog: Optional[Catalog] = None  #: Detailed content information
@@ -114,10 +117,15 @@ class PackageInfo(WRAPPFileModel):
     dependencies: Optional[list[Dependency]] = None  #: Optional list of dependency entries
 
     @classmethod
-    def migrate_major_version(cls, read_data: PackageInfo_V5_1) -> "PackageInfo":
-        # v5.2: Uses Catalog_V5_0 instead of Catalog_V4_0
+    def migrate_major_version(cls, read_data: PackageInfo_V5_2) -> "PackageInfo":
+        # v6: Catalog identities and observation metadata have a new contract.
         data_dict = read_data.model_dump()
         data_dict.pop("format_version")  # we do not want to override format_version
+        for key in ("source", "repository"):
+            if data_dict.get(key) is not None:
+                data_dict[key] = escape_legacy_storage_address(data_dict[key])
+        for dependency in data_dict.get("dependencies") or []:
+            dependency["repository"] = escape_legacy_storage_address(dependency["repository"])
         return PackageInfo(**data_dict)
 
     @field_validator("name")
@@ -287,6 +295,42 @@ def validate_package_and_version(package_name: str, version: str) -> None:
         raise FailedCommand(
             f"{version} is not a valid version string. Characters that are not allowed in directory names and spaces cannot be used."
         )
+
+
+def apply_source_policy(
+    package: PackageInfo,
+    *,
+    strip_source: bool = False,
+    canonical_source: Optional[str] = None,
+    include_repository: bool = True,
+) -> None:
+    """Rewrite the top-level ``source``/``repository`` provenance of a package just before persisting.
+
+    Used by the publish flows (create/mirror/export/import/publish-redirect) to keep internal
+    source addresses out of published ``.wrapp`` files. The two policies are mutually exclusive
+    and both default to off, so an unconfigured call is a no-op.
+
+    :param package: PackageInfo to mutate in place.
+    :param strip_source: When True, clear ``source`` (and ``repository`` unless ``include_repository``
+        is False). Clearing ``repository`` is safe because it is re-derived from the file's own path
+        on load (see ``repository_from_wrapp_file_path``).
+    :param canonical_source: When set, record this normalized URL as ``source`` (and ``repository``
+        unless ``include_repository`` is False) instead of the internal address.
+    :param include_repository: Set to False to leave ``repository`` untouched (used by publish-redirect,
+        where ``repository`` points at the redirect repo and is load-bearing).
+    :raises FailedCommand: When both ``strip_source`` and ``canonical_source`` are provided.
+    """
+    if strip_source and canonical_source:
+        raise FailedCommand("Use either --strip-source or --canonical-source, not both.")
+    if canonical_source:
+        value = normalize_url(canonical_source)
+        package.source = value
+        if include_repository:
+            package.repository = value
+    elif strip_source:
+        package.source = None
+        if include_repository:
+            package.repository = None
 
 
 @force_wrapp_thread
@@ -528,12 +572,12 @@ async def collect_wrapp_files_in_directory(directory: str) -> Tuple[List[str], L
         to_inspect: List[str] = []
         async for item in wrapp_list_directory(directory):
             if is_folder(item):
-                to_inspect.append(join_paths(directory, item.relative_path))
+                to_inspect.append(join_url_path(directory, item.relative_path))
             else:
                 file_extension = os.path.splitext(item.relative_path)
                 if len(file_extension) > 1:
                     if file_extension[1].lower() == PACKAGE_FILE_EXTENSION:
-                        wrapp_files.append(join_paths(directory, item.relative_path))
+                        wrapp_files.append(join_url_path(directory, item.relative_path))
         return wrapp_files, to_inspect
     except StorageOperationError as e:
         raise StorageOperationError(f"Failed to list folder {directory} with exception {e}", e.result)

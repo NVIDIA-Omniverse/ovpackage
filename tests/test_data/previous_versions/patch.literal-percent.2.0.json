@@ -1,0 +1,16 @@
+{
+  "format_version": {"version_string": "2.0"},
+  "operations": [
+    {
+      "operation_type": "copy",
+      "src": "s3://bucket/asset%3F.txt",
+      "dst": "s3://bucket/installed%20root/asset%3F.txt",
+      "item_type": "file",
+      "hash": null
+    },
+    {
+      "operation_type": "delete",
+      "url": "s3://bucket/removed%20root/asset%3F.txt"
+    }
+  ]
+}

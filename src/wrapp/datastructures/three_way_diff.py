@@ -37,7 +37,7 @@ from wrapp.datastructures.patch import (
 from wrapp.datastructures.two_way_diff import Diff
 from wrapp.utils.utils import (
     drop_parameters_from_url,
-    join_paths,
+    join_url_path,
 )
 
 
@@ -68,16 +68,22 @@ class ThreeWayDiffCase(Enum):
 
     @property
     def is_same_in_a_and_b(self) -> bool:
-        return self in [
-            self.UNCHANGED,
-            self.DELETED_IN_BOTH,
-            self.ADDED_IN_BOTH_EQUAL,
-            self.MODIFIED_IN_BOTH_EQUAL
-        ]
+        return self in [self.UNCHANGED, self.DELETED_IN_BOTH, self.ADDED_IN_BOTH_EQUAL, self.MODIFIED_IN_BOTH_EQUAL]
 
 
 class ThreeWayDiffContext:
-    def __init__(self, a: Dict[str, Dict], b: Dict[str, Dict], baseline: Dict[str, Dict], a_root: str, tags: bool = False, *, name_a: str|None = None, name_b: str|None = None, name_base: str|None = None):
+    def __init__(
+        self,
+        a: Dict[str, Dict],
+        b: Dict[str, Dict],
+        baseline: Dict[str, Dict],
+        a_root: str,
+        tags: bool = False,
+        *,
+        name_a: str | None = None,
+        name_b: str | None = None,
+        name_base: str | None = None,
+    ):
         self.a = a
         self.b = b
         self.baseline = baseline
@@ -102,10 +108,8 @@ class ThreeWayDiffContext:
                 fields.extend(filtered_attributes)
         # Remove duplicates and make order deterministic
         return sorted(list(set(fields) - set(fields_to_ignore)))
-    
-    def determine_diff_case(
-        self, key: str
-    ) -> tuple[ThreeWayDiffCase, Optional[Dict], Optional[Dict], Optional[Dict]]:
+
+    def determine_diff_case(self, key: str) -> tuple[ThreeWayDiffCase, Optional[Dict], Optional[Dict], Optional[Dict]]:
         base_item, a_item, b_item = self.items_to_compare(key)
 
         a_modified = not Diff.compare_catalog_entries(base_item, a_item, self.compare_fields)
@@ -157,7 +161,7 @@ class ThreeWayDiffContext:
 
     def items_to_compare(self, key: str) -> Tuple[Optional[Dict], Optional[Dict], Optional[Dict]]:
         return self.baseline.get(key), self.a.get(key), self.b.get(key)
-    
+
     def all_keys(self) -> List[str]:
         return sorted(list(set(self.baseline.keys()).union(self.a.keys()).union(self.b.keys())))
 
@@ -176,17 +180,20 @@ class ThreeWayDiff:
 
     @staticmethod
     def diff_with_context(
-        context: ThreeWayDiffContext
+        context: ThreeWayDiffContext,
     ) -> Tuple[List[Tuple[str, PatchOpBase]], List[Tuple[str, PatchOpBase]], List[Tuple[str, PatchOpBase]]]:
         def item_type(item: Optional[Dict]) -> str:
             if item is None:
                 raise RuntimeError("Program error, item_type should not be called with None argument")
             return item["type"]
+
         # Fix mypy issues without having to add an assert all over the place below
         def item_is_folder(item: Optional[Dict]) -> TypeGuard[Dict]:
             return item_type(item) == "folder"
+
         def item_is_file(item: Optional[Dict]) -> TypeGuard[Dict]:
             return item_type(item) == "file"
+
         def item_is_tag(item: Optional[Dict]) -> TypeGuard[Dict]:
             return item_type(item) == "tag"
 
@@ -259,7 +266,7 @@ class ThreeWayDiff:
                 continue
             elif case == ThreeWayDiffCase.ADDED_IN_B:
                 assert b_item is not None
-                target_filename = join_paths(a_root, b_item["relative_path"])
+                target_filename = join_url_path(a_root, b_item["relative_path"])
                 if item_is_folder(b_item):
                     patch_list.append((key, PatchOpCreateFolder(url=target_filename, explanation=f"Creating {key} to {context.name_a} as in {context.name_b}")))  # type: ignore
                 elif item_is_file(b_item):
@@ -272,6 +279,7 @@ class ThreeWayDiff:
                                 explanation=f"Adding {key} to {context.name_a} from {context.name_b}",
                                 item_type=ItemType.file,
                                 hash=b_item["hash"],
+                                resource_identity_v2=b_item.get("resource_identity_v2"),
                             ),  # type: ignore
                         )
                     )
@@ -301,7 +309,7 @@ class ThreeWayDiff:
                         (
                             key,
                             PatchOpDeleteTag(
-                                url=join_paths(a_root, a_item["relative_path"]),
+                                url=join_url_path(a_root, a_item["relative_path"]),
                                 tag=json.dumps(a_item),
                                 explanation=f"Conflict: tag {a_item['name']} added to {context.name_a} but not {context.name_b}. Force: Delete tag from {context.name_a}",
                             ),  # type: ignore
@@ -321,6 +329,7 @@ class ThreeWayDiff:
                                     explanation=f"Conflict: {key} added to both {context.name_a} and {context.name_b} but not identical. Force: take {context.name_b} version",
                                     item_type=ItemType[item_type(a_item)],
                                     hash=b_item["hash"],
+                                    resource_identity_v2=b_item.get("resource_identity_v2"),
                                 ),  # type: ignore
                             )
                         )
@@ -338,7 +347,7 @@ class ThreeWayDiff:
                             (
                                 key,
                                 PatchOpAddTag(
-                                    url=join_paths(a_root, a_item["relative_path"]),
+                                    url=join_url_path(a_root, a_item["relative_path"]),
                                     tag=json.dumps(b_item),
                                     explanation=f"Conflict: tag {json.dumps(a_item)} added to {context.name_a} and {json.dumps(b_item)} to {context.name_b}. Force: take {context.name_b} version",
                                 ),  # type: ignore
@@ -364,7 +373,7 @@ class ThreeWayDiff:
                         (
                             key,
                             PatchOpDeleteTag(
-                                url=join_paths(a_root, a_item["relative_path"]),
+                                url=join_url_path(a_root, a_item["relative_path"]),
                                 tag=json.dumps(a_item),
                                 explanation=f"Conflict: tag {json.dumps(a_item)} deleted in {context.name_b} but modified in {context.name_a}. Force: Delete from {context.name_a}",
                             ),  # type: ignore
@@ -388,7 +397,7 @@ class ThreeWayDiff:
                         (
                             key,
                             PatchOpDeleteTag(
-                                url=join_paths(a_root, a_item["relative_path"]),
+                                url=join_url_path(a_root, a_item["relative_path"]),
                                 tag=json.dumps(a_item),
                                 explanation=f"Delete tag {json.dumps(a_item)} from {context.name_a}, as it was removed from {context.name_b}",
                             ),  # type: ignore
@@ -403,10 +412,11 @@ class ThreeWayDiff:
                             key,
                             PatchOpCopy(
                                 src=b_item["source_path"],
-                                dst=join_paths(a_root, b_item["relative_path"]),
+                                dst=join_url_path(a_root, b_item["relative_path"]),
                                 explanation=f"Conflict: {key} deleted in {context.name_a} but modified in {context.name_b}. Force: Recreate with modified {context.name_b}",
                                 item_type=ItemType[item_type(b_item)],
                                 hash=b_item["hash"],
+                                resource_identity_v2=b_item.get("resource_identity_v2"),
                             ),  # type: ignore
                         )
                     )
@@ -420,7 +430,7 @@ class ThreeWayDiff:
                         (
                             key,
                             PatchOpAddTag(
-                                url=join_paths(a_root, b_item["relative_path"]),
+                                url=join_url_path(a_root, b_item["relative_path"]),
                                 tag=json.dumps(b_item),
                                 explanation=f"Conflict: Tag {json.dumps(b_item)} deleted in {context.name_a}. Force: Recreate with modified {context.name_b}",
                             ),  # type: ignore
@@ -435,10 +445,11 @@ class ThreeWayDiff:
                             key,
                             PatchOpCopy(
                                 src=b_item["source_path"],
-                                dst=join_paths(a_root, b_item["relative_path"]),
+                                dst=join_url_path(a_root, b_item["relative_path"]),
                                 explanation=f"Conflict: {key} deleted in {context.name_a}. Force: Recreate from {context.name_b}.",
                                 item_type=ItemType[item_type(b_item)],
                                 hash=b_item["hash"],
+                                resource_identity_v2=b_item.get("resource_identity_v2"),
                             ),  # type: ignore
                         )
                     )
@@ -452,7 +463,7 @@ class ThreeWayDiff:
                         (
                             key,
                             PatchOpAddTag(
-                                url=join_paths(a_root, b_item["relative_path"]),
+                                url=join_url_path(a_root, b_item["relative_path"]),
                                 tag=json.dumps(b_item),
                                 explanation=f"Conflict: Tag {json.dumps(b_item)} deleted in {context.name_a}. Force: Recreate from {context.name_b}",
                             ),  # type: ignore
@@ -473,6 +484,7 @@ class ThreeWayDiff:
                                     explanation=f"Update {key} in {context.name_a} from {context.name_b}",
                                     item_type=ItemType[item_type(b_item)],
                                     hash=b_item["hash"],
+                                    resource_identity_v2=b_item.get("resource_identity_v2"),
                                 ),  # type: ignore
                             )
                         )
@@ -487,7 +499,7 @@ class ThreeWayDiff:
                         (
                             key,
                             PatchOpAddTag(
-                                url=join_paths(a_root, a_item["relative_path"]),
+                                url=join_url_path(a_root, a_item["relative_path"]),
                                 tag=json.dumps(b_item),
                                 explanation=f"Update tag {json.dumps(a_item)} in {context.name_a} from {context.name_b}",
                             ),  # type: ignore
@@ -508,6 +520,7 @@ class ThreeWayDiff:
                                     explanation=f"Conflict: {key} modified in {context.name_a} but not {context.name_b}. Force: Revert to {context.name_b}",
                                     item_type=ItemType[item_type(b_item)],
                                     hash=b_item["hash"],
+                                    resource_identity_v2=b_item.get("resource_identity_v2"),
                                 ),  # type: ignore
                             )
                         )
@@ -522,7 +535,7 @@ class ThreeWayDiff:
                         (
                             key,
                             PatchOpAddTag(
-                                url=join_paths(a_root, a_item["relative_path"]),
+                                url=join_url_path(a_root, a_item["relative_path"]),
                                 tag=json.dumps(b_item),
                                 explanation=f"Conflict: Tag {json.dumps(a_item)} modified in {context.name_a} but not {context.name_b}. Force: Revert to {context.name_b}",
                             ),  # type: ignore
@@ -531,7 +544,9 @@ class ThreeWayDiff:
                 else:
                     unknown_type_exception(b_item)
             elif case == ThreeWayDiffCase.MODIFIED_IN_BOTH_CONFLICT:
-                assert a_item is not None and b_item is not None, "This is case ThreeWayDiffCase.DELETED_IN_A_MODIFIED_IN_B or DELETED_IN_B_MODIFIED_IN_A"
+                assert (
+                    a_item is not None and b_item is not None
+                ), "This is case ThreeWayDiffCase.DELETED_IN_A_MODIFIED_IN_B or DELETED_IN_B_MODIFIED_IN_A"
                 if item_is_file(b_item) or item_is_folder(b_item):
                     if not Diff.compare_catalog_entries(a_item, b_item, fields_without_tags):
                         conflict_list.append(
@@ -543,6 +558,7 @@ class ThreeWayDiff:
                                     explanation=f"Conflict: {key} modified in both {context.name_a} and {context.name_b} with different values. Force: Override changes in {context.name_a} with {context.name_b}",
                                     item_type=ItemType[item_type(b_item)],
                                     hash=b_item["hash"],
+                                    resource_identity_v2=b_item.get("resource_identity_v2"),
                                 ),  # type: ignore
                             )
                         )
@@ -556,7 +572,7 @@ class ThreeWayDiff:
                         (
                             key,
                             PatchOpAddTag(
-                                url=join_paths(a_root, a_item["relative_path"]),
+                                url=join_url_path(a_root, a_item["relative_path"]),
                                 tag=json.dumps(b_item),
                                 explanation=f"Conflict: Tag {json.dumps(a_item)} modified in both {context.name_a} and {context.name_b} with different values. Force: Override changes in {context.name_a} with {context.name_b}",
                             ),  # type: ignore
@@ -571,7 +587,15 @@ class ThreeWayDiff:
 
     @staticmethod
     def diff(
-        a: Dict[str, Dict], b: Dict[str, Dict], baseline: Dict[str, Dict], a_root: str, tags: bool = False, *, name_a: str|None = None, name_b: str|None = None, name_base: str|None = None
+        a: Dict[str, Dict],
+        b: Dict[str, Dict],
+        baseline: Dict[str, Dict],
+        a_root: str,
+        tags: bool = False,
+        *,
+        name_a: str | None = None,
+        name_b: str | None = None,
+        name_base: str | None = None,
     ) -> Tuple[List[Tuple[str, PatchOpBase]], List[Tuple[str, PatchOpBase]], List[Tuple[str, PatchOpBase]]]:
         """
         Given three Dicts, calculate the list of update operations required to turn a into b using baseline as a common ancestor. Returns the list of

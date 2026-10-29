@@ -27,7 +27,7 @@ from typing import (
     Optional,
     Tuple,
 )
-from urllib.parse import unquote
+from urllib.parse import quote
 
 from wrapp.datastructures.command_context import ThrottlingParameters
 from wrapp.utils.coro import assert_is_wrapp_thread
@@ -50,7 +50,7 @@ from wrapp.utils.task_throttler import (
 from wrapp.utils.utils import (
     StorageMissingDependenciesError,
     StorageOperationError,
-    get_path_from_url,
+    file_url_to_path,
     is_file_url,
     is_windows_path,
 )
@@ -95,7 +95,7 @@ class LocalFileListEntry(ListEntry):
             modified_time: Last modification time
         """
         self._path = path
-        self._relative_path = relative_path
+        self._relative_path = relative_path.replace(os.sep, "/") if os.sep != "/" else relative_path
         self._is_folder = is_folder
         self._size = size
         self._modified_time = modified_time
@@ -353,21 +353,7 @@ class LocalFileStorage(StorageInterface):
         Returns:
             Normalized absolute path as a file:// URL
         """
-        # Handle Windows paths and file:// URLs
-        if is_file_url(url):
-            if is_windows_path(url):
-                path = url
-            else:
-                # Parse file:// URL
-                path = get_path_from_url(url)
-                # Decode URL-encoded characters
-                path = unquote(path)
-                # On Windows, file:///C:/path produces /C:/path from urlparse.
-                # We need to strip the leading slash to get a valid Windows path.
-                if len(path) >= 3 and path[0] == "/" and path[2] == ":":
-                    path = path[1:]
-        else:
-            path = url
+        path = file_url_to_path(url)
 
         # Convert to absolute path
         abs_path = os.path.abspath(os.path.expanduser(path))
@@ -378,24 +364,13 @@ class LocalFileStorage(StorageInterface):
         # Convert back to file:// URL
         if is_windows_path(abs_path):
             # Windows paths need special handling
-            return f"file:///{abs_path.replace(os.sep, '/')}"
+            return "file:///" + quote(abs_path.replace(os.sep, "/"), safe="/:")
         else:
-            return f"file://{abs_path}"
+            return "file://" + quote(abs_path, safe="/:")
 
     def _url_to_path(self, url: str) -> str:
         """Convert a URL to a local file system path, with Windows long path support."""
-        if is_windows_path(url):
-            path = os.path.normpath(url)
-        else:
-            path = get_path_from_url(url)
-            path = unquote(path)
-
-            # On Windows, file:///C:/path produces /C:/path from urlparse.
-            # We need to strip the leading slash to get a valid Windows path.
-            if len(path) >= 3 and path[0] == "/" and path[2] == ":":
-                path = path[1:]
-
-            path = os.path.normpath(path)
+        path = os.path.normpath(file_url_to_path(url))
 
         # Apply Windows extended-length path prefix if needed
         return self._to_extended_path(path)
@@ -675,7 +650,13 @@ class LocalFileStorage(StorageInterface):
 
         return await self._throttler_write.run(_write())
 
-    async def copy(self, src_url: str, dst_url: str, overwrite: bool = False, message: str = "") -> Result:
+    async def copy_address(
+        self,
+        src_url: str,
+        dst_url: str,
+        overwrite: bool = False,
+        message: str = "",
+    ) -> Result:
         """
         Copy a file.
 

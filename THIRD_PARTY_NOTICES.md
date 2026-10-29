@@ -27,7 +27,7 @@ PyPI at install time and are not vendored.
 
 | Package | Required version | License |
 |---|---|---|
-| `setuptools` | >=71 | MIT |
+| `setuptools` | >=77 | MIT |
 | `wheel` | (unpinned) | MIT |
 
 ### 1b. Runtime / optional dependencies (declared)
@@ -41,12 +41,13 @@ PyPI at install time and are not vendored.
 | `deepdiff` | >=8.0.0 | MIT | optional:test |
 | `gitignore-parser` | >=0.1.11 | MIT | runtime |
 | `google-cloud-storage` | >=3.9.0 | Apache-2.0 | optional:all, optional:gcs |
-| `grpcio` | >=1.71.0, <1.73.0dev0 | Apache-2.0 | optional:all, optional:storage-api |
-| `grpcio-tools` | >=1.71.0, <1.73.0dev0 | Apache-2.0 | optional:all, optional:storage-api |
+| `grpcio` | >=1.73.1 | Apache-2.0 | optional:all, optional:storage-api |
+| `huggingface_hub` | >=1.16.1 | Apache-2.0 | optional:all, optional:huggingface |
 | `jsonschema` | >=4.23.0 | MIT | optional:test |
 | `keyring` | >=25.0.0 | MIT | optional:all, optional:storage-api |
 | `networkx` | >=3.3 | BSD-3-Clause | runtime |
 | `prompt-toolkit` | >=3.0.47 | BSD-3-Clause | runtime |
+| `protobuf` | >=6.31.0 | BSD-3-Clause | optional:all, optional:storage-api |
 | `pydantic` | >=2.9 | MIT | runtime |
 | `pytest` | >=8.3.1 | MIT | optional:test |
 | `pytest-asyncio` | >=0.23.8 | Apache-2.0 | optional:test |

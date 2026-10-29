@@ -22,23 +22,24 @@ from nvidia.omniverse.storage.fileobject.v1beta import (
     fileobject_service_pb2 as nvidia_dot_omniverse_dot_storage_dot_fileobject_dot_v1beta_dot_fileobject__service__pb2,
 )
 
-GRPC_GENERATED_VERSION = '1.72.2'
+GRPC_GENERATED_VERSION = "1.73.1"
 GRPC_VERSION = grpc.__version__
 _version_not_supported = False
 
 try:
     from grpc._utilities import first_version_is_lower
+
     _version_not_supported = first_version_is_lower(GRPC_VERSION, GRPC_GENERATED_VERSION)
 except ImportError:
     _version_not_supported = True
 
 if _version_not_supported:
     raise RuntimeError(
-        f'The grpc package installed is at version {GRPC_VERSION},'
-        + f' but the generated code in nvidia/omniverse/storage/fileobject/v1beta/fileobject_service_pb2_grpc.py depends on'
-        + f' grpcio>={GRPC_GENERATED_VERSION}.'
-        + f' Please upgrade your grpc module to grpcio>={GRPC_GENERATED_VERSION}'
-        + f' or downgrade your generated code using grpcio-tools<={GRPC_VERSION}.'
+        f"The grpc package installed is at version {GRPC_VERSION},"
+        + f" but the generated code in nvidia/omniverse/storage/fileobject/v1beta/fileobject_service_pb2_grpc.py depends on"
+        + f" grpcio>={GRPC_GENERATED_VERSION}."
+        + f" Please upgrade your grpc module to grpcio>={GRPC_GENERATED_VERSION}"
+        + f" or downgrade your generated code using grpcio-tools<={GRPC_VERSION}."
     )
 
 
@@ -54,60 +55,71 @@ class FileObjectServiceStub(object):
             channel: A grpc.Channel.
         """
         self.Enumerate = channel.unary_stream(
-                '/nvidia.omniverse.storage.fileobject.v1beta.FileObjectService/Enumerate',
-                request_serializer=nvidia_dot_omniverse_dot_storage_dot_fileobject_dot_v1beta_dot_fileobject__service__pb2.EnumerateRequest.SerializeToString,
-                response_deserializer=nvidia_dot_omniverse_dot_storage_dot_fileobject_dot_v1beta_dot_fileobject__service__pb2.EnumerateResponse.FromString,
-                _registered_method=True)
+            "/nvidia.omniverse.storage.fileobject.v1beta.FileObjectService/Enumerate",
+            request_serializer=nvidia_dot_omniverse_dot_storage_dot_fileobject_dot_v1beta_dot_fileobject__service__pb2.EnumerateRequest.SerializeToString,
+            response_deserializer=nvidia_dot_omniverse_dot_storage_dot_fileobject_dot_v1beta_dot_fileobject__service__pb2.EnumerateResponse.FromString,
+            _registered_method=True,
+        )
         self.Stat = channel.unary_unary(
-                '/nvidia.omniverse.storage.fileobject.v1beta.FileObjectService/Stat',
-                request_serializer=nvidia_dot_omniverse_dot_storage_dot_fileobject_dot_v1beta_dot_fileobject__service__pb2.StatRequest.SerializeToString,
-                response_deserializer=nvidia_dot_omniverse_dot_storage_dot_fileobject_dot_v1beta_dot_fileobject__service__pb2.StatResponse.FromString,
-                _registered_method=True)
+            "/nvidia.omniverse.storage.fileobject.v1beta.FileObjectService/Stat",
+            request_serializer=nvidia_dot_omniverse_dot_storage_dot_fileobject_dot_v1beta_dot_fileobject__service__pb2.StatRequest.SerializeToString,
+            response_deserializer=nvidia_dot_omniverse_dot_storage_dot_fileobject_dot_v1beta_dot_fileobject__service__pb2.StatResponse.FromString,
+            _registered_method=True,
+        )
         self.Read = channel.unary_stream(
-                '/nvidia.omniverse.storage.fileobject.v1beta.FileObjectService/Read',
-                request_serializer=nvidia_dot_omniverse_dot_storage_dot_fileobject_dot_v1beta_dot_fileobject__service__pb2.ReadRequest.SerializeToString,
-                response_deserializer=nvidia_dot_omniverse_dot_storage_dot_fileobject_dot_v1beta_dot_fileobject__service__pb2.ReadResponse.FromString,
-                _registered_method=True)
+            "/nvidia.omniverse.storage.fileobject.v1beta.FileObjectService/Read",
+            request_serializer=nvidia_dot_omniverse_dot_storage_dot_fileobject_dot_v1beta_dot_fileobject__service__pb2.ReadRequest.SerializeToString,
+            response_deserializer=nvidia_dot_omniverse_dot_storage_dot_fileobject_dot_v1beta_dot_fileobject__service__pb2.ReadResponse.FromString,
+            _registered_method=True,
+        )
         self.ReadFromAddress = channel.unary_stream(
-                '/nvidia.omniverse.storage.fileobject.v1beta.FileObjectService/ReadFromAddress',
-                request_serializer=nvidia_dot_omniverse_dot_storage_dot_fileobject_dot_v1beta_dot_fileobject__service__pb2.ReadFromAddressRequest.SerializeToString,
-                response_deserializer=nvidia_dot_omniverse_dot_storage_dot_fileobject_dot_v1beta_dot_fileobject__service__pb2.ReadFromAddressResponse.FromString,
-                _registered_method=True)
+            "/nvidia.omniverse.storage.fileobject.v1beta.FileObjectService/ReadFromAddress",
+            request_serializer=nvidia_dot_omniverse_dot_storage_dot_fileobject_dot_v1beta_dot_fileobject__service__pb2.ReadFromAddressRequest.SerializeToString,
+            response_deserializer=nvidia_dot_omniverse_dot_storage_dot_fileobject_dot_v1beta_dot_fileobject__service__pb2.ReadFromAddressResponse.FromString,
+            _registered_method=True,
+        )
         self.FetchWriteTypeInfo = channel.unary_unary(
-                '/nvidia.omniverse.storage.fileobject.v1beta.FileObjectService/FetchWriteTypeInfo',
-                request_serializer=nvidia_dot_omniverse_dot_storage_dot_fileobject_dot_v1beta_dot_fileobject__service__pb2.FetchWriteTypeInfoRequest.SerializeToString,
-                response_deserializer=nvidia_dot_omniverse_dot_storage_dot_fileobject_dot_v1beta_dot_fileobject__service__pb2.FetchWriteTypeInfoResponse.FromString,
-                _registered_method=True)
+            "/nvidia.omniverse.storage.fileobject.v1beta.FileObjectService/FetchWriteTypeInfo",
+            request_serializer=nvidia_dot_omniverse_dot_storage_dot_fileobject_dot_v1beta_dot_fileobject__service__pb2.FetchWriteTypeInfoRequest.SerializeToString,
+            response_deserializer=nvidia_dot_omniverse_dot_storage_dot_fileobject_dot_v1beta_dot_fileobject__service__pb2.FetchWriteTypeInfoResponse.FromString,
+            _registered_method=True,
+        )
         self.Write = channel.stream_stream(
-                '/nvidia.omniverse.storage.fileobject.v1beta.FileObjectService/Write',
-                request_serializer=nvidia_dot_omniverse_dot_storage_dot_fileobject_dot_v1beta_dot_fileobject__service__pb2.WriteRequest.SerializeToString,
-                response_deserializer=nvidia_dot_omniverse_dot_storage_dot_fileobject_dot_v1beta_dot_fileobject__service__pb2.WriteResponse.FromString,
-                _registered_method=True)
+            "/nvidia.omniverse.storage.fileobject.v1beta.FileObjectService/Write",
+            request_serializer=nvidia_dot_omniverse_dot_storage_dot_fileobject_dot_v1beta_dot_fileobject__service__pb2.WriteRequest.SerializeToString,
+            response_deserializer=nvidia_dot_omniverse_dot_storage_dot_fileobject_dot_v1beta_dot_fileobject__service__pb2.WriteResponse.FromString,
+            _registered_method=True,
+        )
         self.CompleteRedirectUpload = channel.unary_unary(
-                '/nvidia.omniverse.storage.fileobject.v1beta.FileObjectService/CompleteRedirectUpload',
-                request_serializer=nvidia_dot_omniverse_dot_storage_dot_fileobject_dot_v1beta_dot_fileobject__service__pb2.CompleteRedirectUploadRequest.SerializeToString,
-                response_deserializer=nvidia_dot_omniverse_dot_storage_dot_fileobject_dot_v1beta_dot_fileobject__service__pb2.CompleteRedirectUploadResponse.FromString,
-                _registered_method=True)
+            "/nvidia.omniverse.storage.fileobject.v1beta.FileObjectService/CompleteRedirectUpload",
+            request_serializer=nvidia_dot_omniverse_dot_storage_dot_fileobject_dot_v1beta_dot_fileobject__service__pb2.CompleteRedirectUploadRequest.SerializeToString,
+            response_deserializer=nvidia_dot_omniverse_dot_storage_dot_fileobject_dot_v1beta_dot_fileobject__service__pb2.CompleteRedirectUploadResponse.FromString,
+            _registered_method=True,
+        )
         self.UploadPart = channel.unary_unary(
-                '/nvidia.omniverse.storage.fileobject.v1beta.FileObjectService/UploadPart',
-                request_serializer=nvidia_dot_omniverse_dot_storage_dot_fileobject_dot_v1beta_dot_fileobject__service__pb2.UploadPartRequest.SerializeToString,
-                response_deserializer=nvidia_dot_omniverse_dot_storage_dot_fileobject_dot_v1beta_dot_fileobject__service__pb2.UploadPartResponse.FromString,
-                _registered_method=True)
+            "/nvidia.omniverse.storage.fileobject.v1beta.FileObjectService/UploadPart",
+            request_serializer=nvidia_dot_omniverse_dot_storage_dot_fileobject_dot_v1beta_dot_fileobject__service__pb2.UploadPartRequest.SerializeToString,
+            response_deserializer=nvidia_dot_omniverse_dot_storage_dot_fileobject_dot_v1beta_dot_fileobject__service__pb2.UploadPartResponse.FromString,
+            _registered_method=True,
+        )
         self.CompleteMultipartUpload = channel.unary_unary(
-                '/nvidia.omniverse.storage.fileobject.v1beta.FileObjectService/CompleteMultipartUpload',
-                request_serializer=nvidia_dot_omniverse_dot_storage_dot_fileobject_dot_v1beta_dot_fileobject__service__pb2.CompleteMultipartUploadRequest.SerializeToString,
-                response_deserializer=nvidia_dot_omniverse_dot_storage_dot_fileobject_dot_v1beta_dot_fileobject__service__pb2.CompleteMultipartUploadResponse.FromString,
-                _registered_method=True)
+            "/nvidia.omniverse.storage.fileobject.v1beta.FileObjectService/CompleteMultipartUpload",
+            request_serializer=nvidia_dot_omniverse_dot_storage_dot_fileobject_dot_v1beta_dot_fileobject__service__pb2.CompleteMultipartUploadRequest.SerializeToString,
+            response_deserializer=nvidia_dot_omniverse_dot_storage_dot_fileobject_dot_v1beta_dot_fileobject__service__pb2.CompleteMultipartUploadResponse.FromString,
+            _registered_method=True,
+        )
         self.AbortMultipartUpload = channel.unary_unary(
-                '/nvidia.omniverse.storage.fileobject.v1beta.FileObjectService/AbortMultipartUpload',
-                request_serializer=nvidia_dot_omniverse_dot_storage_dot_fileobject_dot_v1beta_dot_fileobject__service__pb2.AbortMultipartUploadRequest.SerializeToString,
-                response_deserializer=nvidia_dot_omniverse_dot_storage_dot_fileobject_dot_v1beta_dot_fileobject__service__pb2.AbortMultipartUploadResponse.FromString,
-                _registered_method=True)
+            "/nvidia.omniverse.storage.fileobject.v1beta.FileObjectService/AbortMultipartUpload",
+            request_serializer=nvidia_dot_omniverse_dot_storage_dot_fileobject_dot_v1beta_dot_fileobject__service__pb2.AbortMultipartUploadRequest.SerializeToString,
+            response_deserializer=nvidia_dot_omniverse_dot_storage_dot_fileobject_dot_v1beta_dot_fileobject__service__pb2.AbortMultipartUploadResponse.FromString,
+            _registered_method=True,
+        )
         self.Delete = channel.unary_unary(
-                '/nvidia.omniverse.storage.fileobject.v1beta.FileObjectService/Delete',
-                request_serializer=nvidia_dot_omniverse_dot_storage_dot_fileobject_dot_v1beta_dot_fileobject__service__pb2.DeleteRequest.SerializeToString,
-                response_deserializer=nvidia_dot_omniverse_dot_storage_dot_fileobject_dot_v1beta_dot_fileobject__service__pb2.DeleteResponse.FromString,
-                _registered_method=True)
+            "/nvidia.omniverse.storage.fileobject.v1beta.FileObjectService/Delete",
+            request_serializer=nvidia_dot_omniverse_dot_storage_dot_fileobject_dot_v1beta_dot_fileobject__service__pb2.DeleteRequest.SerializeToString,
+            response_deserializer=nvidia_dot_omniverse_dot_storage_dot_fileobject_dot_v1beta_dot_fileobject__service__pb2.DeleteResponse.FromString,
+            _registered_method=True,
+        )
 
 
 class FileObjectServiceServicer(object):
@@ -116,13 +128,14 @@ class FileObjectServiceServicer(object):
     """
 
     def Enumerate(self, request, context):
-        """Enumerate the content of the storage at the given resource address
+        """Recursively enumerate all data objects below the given resource address,
+        including direct children and descendants at any depth.
         (-- api-linter: core::0136::verb-noun=disabled
         aip.dev/not-precedent: A better name would have been EnumerateFileObjects --)
         """
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
-        context.set_details('Method not implemented!')
-        raise NotImplementedError('Method not implemented!')
+        context.set_details("Method not implemented!")
+        raise NotImplementedError("Method not implemented!")
 
     def Stat(self, request, context):
         """Stat a single ResourceAddress, check if it exists and return the ResourceIdentity
@@ -130,8 +143,8 @@ class FileObjectServiceServicer(object):
         aip.dev/not-precedent: A better name would have been StatFileObject --)
         """
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
-        context.set_details('Method not implemented!')
-        raise NotImplementedError('Method not implemented!')
+        context.set_details("Method not implemented!")
+        raise NotImplementedError("Method not implemented!")
 
     def Read(self, request, context):
         """Read the binary data of a specific data object instance, providing the ResourceIdentity
@@ -141,8 +154,8 @@ class FileObjectServiceServicer(object):
         aip.dev/not-precedent: A better name would have been GetFileObject --)
         """
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
-        context.set_details('Method not implemented!')
-        raise NotImplementedError('Method not implemented!')
+        context.set_details("Method not implemented!")
+        raise NotImplementedError("Method not implemented!")
 
     def ReadFromAddress(self, request, context):
         """Read the binary data of a data object currently stored at a specific location, providing a ResourceAddress
@@ -154,8 +167,8 @@ class FileObjectServiceServicer(object):
         aip.dev/not-precedent: With prepositions disallowed, what should be a name for this function? --)
         """
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
-        context.set_details('Method not implemented!')
-        raise NotImplementedError('Method not implemented!')
+        context.set_details("Method not implemented!")
+        raise NotImplementedError("Method not implemented!")
 
     def FetchWriteTypeInfo(self, request, context):
         """Call this before trying to Write something to determine which size intervals of files are supposed to be
@@ -165,8 +178,8 @@ class FileObjectServiceServicer(object):
         aip.dev/not-precedent: We use Fetch to not call it Get. The "name" resource thing doesn't resonate here. --)
         """
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
-        context.set_details('Method not implemented!')
-        raise NotImplementedError('Method not implemented!')
+        context.set_details("Method not implemented!")
+        raise NotImplementedError("Method not implemented!")
 
     def Write(self, request_iterator, context):
         """Write a file object into the storage, sending first a URL to write to and then one or more data chunks
@@ -174,29 +187,26 @@ class FileObjectServiceServicer(object):
         aip.dev/not-precedent: A better name would be CreateFileObject --)
         """
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
-        context.set_details('Method not implemented!')
-        raise NotImplementedError('Method not implemented!')
+        context.set_details("Method not implemented!")
+        raise NotImplementedError("Method not implemented!")
 
     def CompleteRedirectUpload(self, request, context):
-        """Optionally, call CompleteRedirectUpload to retrieve the ResourceInfo for the data object uploaded to the HTTP server
-        """
+        """Optionally, call CompleteRedirectUpload to retrieve the ResourceInfo for the data object uploaded to the HTTP server"""
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
-        context.set_details('Method not implemented!')
-        raise NotImplementedError('Method not implemented!')
+        context.set_details("Method not implemented!")
+        raise NotImplementedError("Method not implemented!")
 
     def UploadPart(self, request, context):
-        """Get the presigned URL that allows one to upload a single part of the multipart upload.
-        """
+        """Get the presigned URL that allows one to upload a single part of the multipart upload."""
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
-        context.set_details('Method not implemented!')
-        raise NotImplementedError('Method not implemented!')
+        context.set_details("Method not implemented!")
+        raise NotImplementedError("Method not implemented!")
 
     def CompleteMultipartUpload(self, request, context):
-        """Completes a multipart upload by assembling previously uploaded parts.
-        """
+        """Completes a multipart upload by assembling previously uploaded parts."""
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
-        context.set_details('Method not implemented!')
-        raise NotImplementedError('Method not implemented!')
+        context.set_details("Method not implemented!")
+        raise NotImplementedError("Method not implemented!")
 
     def AbortMultipartUpload(self, request, context):
         """Aborts a multipart upload. The storage consumed by any previously uploaded parts will be eventually
@@ -206,8 +216,8 @@ class FileObjectServiceServicer(object):
         which pertain to these abandoned parts which are outside the scope of this API.
         """
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
-        context.set_details('Method not implemented!')
-        raise NotImplementedError('Method not implemented!')
+        context.set_details("Method not implemented!")
+        raise NotImplementedError("Method not implemented!")
 
     def Delete(self, request, context):
         """Delete a file object on storage. Semantics are dependent on the lifecycle configured on the backend storage.
@@ -215,95 +225,98 @@ class FileObjectServiceServicer(object):
         aip.dev/not-precedent: A better name would be DeleteFileObject --)
         """
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
-        context.set_details('Method not implemented!')
-        raise NotImplementedError('Method not implemented!')
+        context.set_details("Method not implemented!")
+        raise NotImplementedError("Method not implemented!")
 
 
 def add_FileObjectServiceServicer_to_server(servicer, server):
     rpc_method_handlers = {
-            'Enumerate': grpc.unary_stream_rpc_method_handler(
-                    servicer.Enumerate,
-                    request_deserializer=nvidia_dot_omniverse_dot_storage_dot_fileobject_dot_v1beta_dot_fileobject__service__pb2.EnumerateRequest.FromString,
-                    response_serializer=nvidia_dot_omniverse_dot_storage_dot_fileobject_dot_v1beta_dot_fileobject__service__pb2.EnumerateResponse.SerializeToString,
-            ),
-            'Stat': grpc.unary_unary_rpc_method_handler(
-                    servicer.Stat,
-                    request_deserializer=nvidia_dot_omniverse_dot_storage_dot_fileobject_dot_v1beta_dot_fileobject__service__pb2.StatRequest.FromString,
-                    response_serializer=nvidia_dot_omniverse_dot_storage_dot_fileobject_dot_v1beta_dot_fileobject__service__pb2.StatResponse.SerializeToString,
-            ),
-            'Read': grpc.unary_stream_rpc_method_handler(
-                    servicer.Read,
-                    request_deserializer=nvidia_dot_omniverse_dot_storage_dot_fileobject_dot_v1beta_dot_fileobject__service__pb2.ReadRequest.FromString,
-                    response_serializer=nvidia_dot_omniverse_dot_storage_dot_fileobject_dot_v1beta_dot_fileobject__service__pb2.ReadResponse.SerializeToString,
-            ),
-            'ReadFromAddress': grpc.unary_stream_rpc_method_handler(
-                    servicer.ReadFromAddress,
-                    request_deserializer=nvidia_dot_omniverse_dot_storage_dot_fileobject_dot_v1beta_dot_fileobject__service__pb2.ReadFromAddressRequest.FromString,
-                    response_serializer=nvidia_dot_omniverse_dot_storage_dot_fileobject_dot_v1beta_dot_fileobject__service__pb2.ReadFromAddressResponse.SerializeToString,
-            ),
-            'FetchWriteTypeInfo': grpc.unary_unary_rpc_method_handler(
-                    servicer.FetchWriteTypeInfo,
-                    request_deserializer=nvidia_dot_omniverse_dot_storage_dot_fileobject_dot_v1beta_dot_fileobject__service__pb2.FetchWriteTypeInfoRequest.FromString,
-                    response_serializer=nvidia_dot_omniverse_dot_storage_dot_fileobject_dot_v1beta_dot_fileobject__service__pb2.FetchWriteTypeInfoResponse.SerializeToString,
-            ),
-            'Write': grpc.stream_stream_rpc_method_handler(
-                    servicer.Write,
-                    request_deserializer=nvidia_dot_omniverse_dot_storage_dot_fileobject_dot_v1beta_dot_fileobject__service__pb2.WriteRequest.FromString,
-                    response_serializer=nvidia_dot_omniverse_dot_storage_dot_fileobject_dot_v1beta_dot_fileobject__service__pb2.WriteResponse.SerializeToString,
-            ),
-            'CompleteRedirectUpload': grpc.unary_unary_rpc_method_handler(
-                    servicer.CompleteRedirectUpload,
-                    request_deserializer=nvidia_dot_omniverse_dot_storage_dot_fileobject_dot_v1beta_dot_fileobject__service__pb2.CompleteRedirectUploadRequest.FromString,
-                    response_serializer=nvidia_dot_omniverse_dot_storage_dot_fileobject_dot_v1beta_dot_fileobject__service__pb2.CompleteRedirectUploadResponse.SerializeToString,
-            ),
-            'UploadPart': grpc.unary_unary_rpc_method_handler(
-                    servicer.UploadPart,
-                    request_deserializer=nvidia_dot_omniverse_dot_storage_dot_fileobject_dot_v1beta_dot_fileobject__service__pb2.UploadPartRequest.FromString,
-                    response_serializer=nvidia_dot_omniverse_dot_storage_dot_fileobject_dot_v1beta_dot_fileobject__service__pb2.UploadPartResponse.SerializeToString,
-            ),
-            'CompleteMultipartUpload': grpc.unary_unary_rpc_method_handler(
-                    servicer.CompleteMultipartUpload,
-                    request_deserializer=nvidia_dot_omniverse_dot_storage_dot_fileobject_dot_v1beta_dot_fileobject__service__pb2.CompleteMultipartUploadRequest.FromString,
-                    response_serializer=nvidia_dot_omniverse_dot_storage_dot_fileobject_dot_v1beta_dot_fileobject__service__pb2.CompleteMultipartUploadResponse.SerializeToString,
-            ),
-            'AbortMultipartUpload': grpc.unary_unary_rpc_method_handler(
-                    servicer.AbortMultipartUpload,
-                    request_deserializer=nvidia_dot_omniverse_dot_storage_dot_fileobject_dot_v1beta_dot_fileobject__service__pb2.AbortMultipartUploadRequest.FromString,
-                    response_serializer=nvidia_dot_omniverse_dot_storage_dot_fileobject_dot_v1beta_dot_fileobject__service__pb2.AbortMultipartUploadResponse.SerializeToString,
-            ),
-            'Delete': grpc.unary_unary_rpc_method_handler(
-                    servicer.Delete,
-                    request_deserializer=nvidia_dot_omniverse_dot_storage_dot_fileobject_dot_v1beta_dot_fileobject__service__pb2.DeleteRequest.FromString,
-                    response_serializer=nvidia_dot_omniverse_dot_storage_dot_fileobject_dot_v1beta_dot_fileobject__service__pb2.DeleteResponse.SerializeToString,
-            ),
+        "Enumerate": grpc.unary_stream_rpc_method_handler(
+            servicer.Enumerate,
+            request_deserializer=nvidia_dot_omniverse_dot_storage_dot_fileobject_dot_v1beta_dot_fileobject__service__pb2.EnumerateRequest.FromString,
+            response_serializer=nvidia_dot_omniverse_dot_storage_dot_fileobject_dot_v1beta_dot_fileobject__service__pb2.EnumerateResponse.SerializeToString,
+        ),
+        "Stat": grpc.unary_unary_rpc_method_handler(
+            servicer.Stat,
+            request_deserializer=nvidia_dot_omniverse_dot_storage_dot_fileobject_dot_v1beta_dot_fileobject__service__pb2.StatRequest.FromString,
+            response_serializer=nvidia_dot_omniverse_dot_storage_dot_fileobject_dot_v1beta_dot_fileobject__service__pb2.StatResponse.SerializeToString,
+        ),
+        "Read": grpc.unary_stream_rpc_method_handler(
+            servicer.Read,
+            request_deserializer=nvidia_dot_omniverse_dot_storage_dot_fileobject_dot_v1beta_dot_fileobject__service__pb2.ReadRequest.FromString,
+            response_serializer=nvidia_dot_omniverse_dot_storage_dot_fileobject_dot_v1beta_dot_fileobject__service__pb2.ReadResponse.SerializeToString,
+        ),
+        "ReadFromAddress": grpc.unary_stream_rpc_method_handler(
+            servicer.ReadFromAddress,
+            request_deserializer=nvidia_dot_omniverse_dot_storage_dot_fileobject_dot_v1beta_dot_fileobject__service__pb2.ReadFromAddressRequest.FromString,
+            response_serializer=nvidia_dot_omniverse_dot_storage_dot_fileobject_dot_v1beta_dot_fileobject__service__pb2.ReadFromAddressResponse.SerializeToString,
+        ),
+        "FetchWriteTypeInfo": grpc.unary_unary_rpc_method_handler(
+            servicer.FetchWriteTypeInfo,
+            request_deserializer=nvidia_dot_omniverse_dot_storage_dot_fileobject_dot_v1beta_dot_fileobject__service__pb2.FetchWriteTypeInfoRequest.FromString,
+            response_serializer=nvidia_dot_omniverse_dot_storage_dot_fileobject_dot_v1beta_dot_fileobject__service__pb2.FetchWriteTypeInfoResponse.SerializeToString,
+        ),
+        "Write": grpc.stream_stream_rpc_method_handler(
+            servicer.Write,
+            request_deserializer=nvidia_dot_omniverse_dot_storage_dot_fileobject_dot_v1beta_dot_fileobject__service__pb2.WriteRequest.FromString,
+            response_serializer=nvidia_dot_omniverse_dot_storage_dot_fileobject_dot_v1beta_dot_fileobject__service__pb2.WriteResponse.SerializeToString,
+        ),
+        "CompleteRedirectUpload": grpc.unary_unary_rpc_method_handler(
+            servicer.CompleteRedirectUpload,
+            request_deserializer=nvidia_dot_omniverse_dot_storage_dot_fileobject_dot_v1beta_dot_fileobject__service__pb2.CompleteRedirectUploadRequest.FromString,
+            response_serializer=nvidia_dot_omniverse_dot_storage_dot_fileobject_dot_v1beta_dot_fileobject__service__pb2.CompleteRedirectUploadResponse.SerializeToString,
+        ),
+        "UploadPart": grpc.unary_unary_rpc_method_handler(
+            servicer.UploadPart,
+            request_deserializer=nvidia_dot_omniverse_dot_storage_dot_fileobject_dot_v1beta_dot_fileobject__service__pb2.UploadPartRequest.FromString,
+            response_serializer=nvidia_dot_omniverse_dot_storage_dot_fileobject_dot_v1beta_dot_fileobject__service__pb2.UploadPartResponse.SerializeToString,
+        ),
+        "CompleteMultipartUpload": grpc.unary_unary_rpc_method_handler(
+            servicer.CompleteMultipartUpload,
+            request_deserializer=nvidia_dot_omniverse_dot_storage_dot_fileobject_dot_v1beta_dot_fileobject__service__pb2.CompleteMultipartUploadRequest.FromString,
+            response_serializer=nvidia_dot_omniverse_dot_storage_dot_fileobject_dot_v1beta_dot_fileobject__service__pb2.CompleteMultipartUploadResponse.SerializeToString,
+        ),
+        "AbortMultipartUpload": grpc.unary_unary_rpc_method_handler(
+            servicer.AbortMultipartUpload,
+            request_deserializer=nvidia_dot_omniverse_dot_storage_dot_fileobject_dot_v1beta_dot_fileobject__service__pb2.AbortMultipartUploadRequest.FromString,
+            response_serializer=nvidia_dot_omniverse_dot_storage_dot_fileobject_dot_v1beta_dot_fileobject__service__pb2.AbortMultipartUploadResponse.SerializeToString,
+        ),
+        "Delete": grpc.unary_unary_rpc_method_handler(
+            servicer.Delete,
+            request_deserializer=nvidia_dot_omniverse_dot_storage_dot_fileobject_dot_v1beta_dot_fileobject__service__pb2.DeleteRequest.FromString,
+            response_serializer=nvidia_dot_omniverse_dot_storage_dot_fileobject_dot_v1beta_dot_fileobject__service__pb2.DeleteResponse.SerializeToString,
+        ),
     }
     generic_handler = grpc.method_handlers_generic_handler(
-            'nvidia.omniverse.storage.fileobject.v1beta.FileObjectService', rpc_method_handlers)
+        "nvidia.omniverse.storage.fileobject.v1beta.FileObjectService", rpc_method_handlers
+    )
     server.add_generic_rpc_handlers((generic_handler,))
-    server.add_registered_method_handlers('nvidia.omniverse.storage.fileobject.v1beta.FileObjectService', rpc_method_handlers)
+    server.add_registered_method_handlers("nvidia.omniverse.storage.fileobject.v1beta.FileObjectService", rpc_method_handlers)
 
 
- # This class is part of an EXPERIMENTAL API.
+# This class is part of an EXPERIMENTAL API.
 class FileObjectService(object):
     """The FileObjectService is the public API which consuming applications use
     to read data from remote storage.
     """
 
     @staticmethod
-    def Enumerate(request,
-            target,
-            options=(),
-            channel_credentials=None,
-            call_credentials=None,
-            insecure=False,
-            compression=None,
-            wait_for_ready=None,
-            timeout=None,
-            metadata=None):
+    def Enumerate(
+        request,
+        target,
+        options=(),
+        channel_credentials=None,
+        call_credentials=None,
+        insecure=False,
+        compression=None,
+        wait_for_ready=None,
+        timeout=None,
+        metadata=None,
+    ):
         return grpc.experimental.unary_stream(
             request,
             target,
-            '/nvidia.omniverse.storage.fileobject.v1beta.FileObjectService/Enumerate',
+            "/nvidia.omniverse.storage.fileobject.v1beta.FileObjectService/Enumerate",
             nvidia_dot_omniverse_dot_storage_dot_fileobject_dot_v1beta_dot_fileobject__service__pb2.EnumerateRequest.SerializeToString,
             nvidia_dot_omniverse_dot_storage_dot_fileobject_dot_v1beta_dot_fileobject__service__pb2.EnumerateResponse.FromString,
             options,
@@ -314,23 +327,26 @@ class FileObjectService(object):
             wait_for_ready,
             timeout,
             metadata,
-            _registered_method=True)
+            _registered_method=True,
+        )
 
     @staticmethod
-    def Stat(request,
-            target,
-            options=(),
-            channel_credentials=None,
-            call_credentials=None,
-            insecure=False,
-            compression=None,
-            wait_for_ready=None,
-            timeout=None,
-            metadata=None):
+    def Stat(
+        request,
+        target,
+        options=(),
+        channel_credentials=None,
+        call_credentials=None,
+        insecure=False,
+        compression=None,
+        wait_for_ready=None,
+        timeout=None,
+        metadata=None,
+    ):
         return grpc.experimental.unary_unary(
             request,
             target,
-            '/nvidia.omniverse.storage.fileobject.v1beta.FileObjectService/Stat',
+            "/nvidia.omniverse.storage.fileobject.v1beta.FileObjectService/Stat",
             nvidia_dot_omniverse_dot_storage_dot_fileobject_dot_v1beta_dot_fileobject__service__pb2.StatRequest.SerializeToString,
             nvidia_dot_omniverse_dot_storage_dot_fileobject_dot_v1beta_dot_fileobject__service__pb2.StatResponse.FromString,
             options,
@@ -341,23 +357,26 @@ class FileObjectService(object):
             wait_for_ready,
             timeout,
             metadata,
-            _registered_method=True)
+            _registered_method=True,
+        )
 
     @staticmethod
-    def Read(request,
-            target,
-            options=(),
-            channel_credentials=None,
-            call_credentials=None,
-            insecure=False,
-            compression=None,
-            wait_for_ready=None,
-            timeout=None,
-            metadata=None):
+    def Read(
+        request,
+        target,
+        options=(),
+        channel_credentials=None,
+        call_credentials=None,
+        insecure=False,
+        compression=None,
+        wait_for_ready=None,
+        timeout=None,
+        metadata=None,
+    ):
         return grpc.experimental.unary_stream(
             request,
             target,
-            '/nvidia.omniverse.storage.fileobject.v1beta.FileObjectService/Read',
+            "/nvidia.omniverse.storage.fileobject.v1beta.FileObjectService/Read",
             nvidia_dot_omniverse_dot_storage_dot_fileobject_dot_v1beta_dot_fileobject__service__pb2.ReadRequest.SerializeToString,
             nvidia_dot_omniverse_dot_storage_dot_fileobject_dot_v1beta_dot_fileobject__service__pb2.ReadResponse.FromString,
             options,
@@ -368,23 +387,26 @@ class FileObjectService(object):
             wait_for_ready,
             timeout,
             metadata,
-            _registered_method=True)
+            _registered_method=True,
+        )
 
     @staticmethod
-    def ReadFromAddress(request,
-            target,
-            options=(),
-            channel_credentials=None,
-            call_credentials=None,
-            insecure=False,
-            compression=None,
-            wait_for_ready=None,
-            timeout=None,
-            metadata=None):
+    def ReadFromAddress(
+        request,
+        target,
+        options=(),
+        channel_credentials=None,
+        call_credentials=None,
+        insecure=False,
+        compression=None,
+        wait_for_ready=None,
+        timeout=None,
+        metadata=None,
+    ):
         return grpc.experimental.unary_stream(
             request,
             target,
-            '/nvidia.omniverse.storage.fileobject.v1beta.FileObjectService/ReadFromAddress',
+            "/nvidia.omniverse.storage.fileobject.v1beta.FileObjectService/ReadFromAddress",
             nvidia_dot_omniverse_dot_storage_dot_fileobject_dot_v1beta_dot_fileobject__service__pb2.ReadFromAddressRequest.SerializeToString,
             nvidia_dot_omniverse_dot_storage_dot_fileobject_dot_v1beta_dot_fileobject__service__pb2.ReadFromAddressResponse.FromString,
             options,
@@ -395,23 +417,26 @@ class FileObjectService(object):
             wait_for_ready,
             timeout,
             metadata,
-            _registered_method=True)
+            _registered_method=True,
+        )
 
     @staticmethod
-    def FetchWriteTypeInfo(request,
-            target,
-            options=(),
-            channel_credentials=None,
-            call_credentials=None,
-            insecure=False,
-            compression=None,
-            wait_for_ready=None,
-            timeout=None,
-            metadata=None):
+    def FetchWriteTypeInfo(
+        request,
+        target,
+        options=(),
+        channel_credentials=None,
+        call_credentials=None,
+        insecure=False,
+        compression=None,
+        wait_for_ready=None,
+        timeout=None,
+        metadata=None,
+    ):
         return grpc.experimental.unary_unary(
             request,
             target,
-            '/nvidia.omniverse.storage.fileobject.v1beta.FileObjectService/FetchWriteTypeInfo',
+            "/nvidia.omniverse.storage.fileobject.v1beta.FileObjectService/FetchWriteTypeInfo",
             nvidia_dot_omniverse_dot_storage_dot_fileobject_dot_v1beta_dot_fileobject__service__pb2.FetchWriteTypeInfoRequest.SerializeToString,
             nvidia_dot_omniverse_dot_storage_dot_fileobject_dot_v1beta_dot_fileobject__service__pb2.FetchWriteTypeInfoResponse.FromString,
             options,
@@ -422,23 +447,26 @@ class FileObjectService(object):
             wait_for_ready,
             timeout,
             metadata,
-            _registered_method=True)
+            _registered_method=True,
+        )
 
     @staticmethod
-    def Write(request_iterator,
-            target,
-            options=(),
-            channel_credentials=None,
-            call_credentials=None,
-            insecure=False,
-            compression=None,
-            wait_for_ready=None,
-            timeout=None,
-            metadata=None):
+    def Write(
+        request_iterator,
+        target,
+        options=(),
+        channel_credentials=None,
+        call_credentials=None,
+        insecure=False,
+        compression=None,
+        wait_for_ready=None,
+        timeout=None,
+        metadata=None,
+    ):
         return grpc.experimental.stream_stream(
             request_iterator,
             target,
-            '/nvidia.omniverse.storage.fileobject.v1beta.FileObjectService/Write',
+            "/nvidia.omniverse.storage.fileobject.v1beta.FileObjectService/Write",
             nvidia_dot_omniverse_dot_storage_dot_fileobject_dot_v1beta_dot_fileobject__service__pb2.WriteRequest.SerializeToString,
             nvidia_dot_omniverse_dot_storage_dot_fileobject_dot_v1beta_dot_fileobject__service__pb2.WriteResponse.FromString,
             options,
@@ -449,23 +477,26 @@ class FileObjectService(object):
             wait_for_ready,
             timeout,
             metadata,
-            _registered_method=True)
+            _registered_method=True,
+        )
 
     @staticmethod
-    def CompleteRedirectUpload(request,
-            target,
-            options=(),
-            channel_credentials=None,
-            call_credentials=None,
-            insecure=False,
-            compression=None,
-            wait_for_ready=None,
-            timeout=None,
-            metadata=None):
+    def CompleteRedirectUpload(
+        request,
+        target,
+        options=(),
+        channel_credentials=None,
+        call_credentials=None,
+        insecure=False,
+        compression=None,
+        wait_for_ready=None,
+        timeout=None,
+        metadata=None,
+    ):
         return grpc.experimental.unary_unary(
             request,
             target,
-            '/nvidia.omniverse.storage.fileobject.v1beta.FileObjectService/CompleteRedirectUpload',
+            "/nvidia.omniverse.storage.fileobject.v1beta.FileObjectService/CompleteRedirectUpload",
             nvidia_dot_omniverse_dot_storage_dot_fileobject_dot_v1beta_dot_fileobject__service__pb2.CompleteRedirectUploadRequest.SerializeToString,
             nvidia_dot_omniverse_dot_storage_dot_fileobject_dot_v1beta_dot_fileobject__service__pb2.CompleteRedirectUploadResponse.FromString,
             options,
@@ -476,23 +507,26 @@ class FileObjectService(object):
             wait_for_ready,
             timeout,
             metadata,
-            _registered_method=True)
+            _registered_method=True,
+        )
 
     @staticmethod
-    def UploadPart(request,
-            target,
-            options=(),
-            channel_credentials=None,
-            call_credentials=None,
-            insecure=False,
-            compression=None,
-            wait_for_ready=None,
-            timeout=None,
-            metadata=None):
+    def UploadPart(
+        request,
+        target,
+        options=(),
+        channel_credentials=None,
+        call_credentials=None,
+        insecure=False,
+        compression=None,
+        wait_for_ready=None,
+        timeout=None,
+        metadata=None,
+    ):
         return grpc.experimental.unary_unary(
             request,
             target,
-            '/nvidia.omniverse.storage.fileobject.v1beta.FileObjectService/UploadPart',
+            "/nvidia.omniverse.storage.fileobject.v1beta.FileObjectService/UploadPart",
             nvidia_dot_omniverse_dot_storage_dot_fileobject_dot_v1beta_dot_fileobject__service__pb2.UploadPartRequest.SerializeToString,
             nvidia_dot_omniverse_dot_storage_dot_fileobject_dot_v1beta_dot_fileobject__service__pb2.UploadPartResponse.FromString,
             options,
@@ -503,23 +537,26 @@ class FileObjectService(object):
             wait_for_ready,
             timeout,
             metadata,
-            _registered_method=True)
+            _registered_method=True,
+        )
 
     @staticmethod
-    def CompleteMultipartUpload(request,
-            target,
-            options=(),
-            channel_credentials=None,
-            call_credentials=None,
-            insecure=False,
-            compression=None,
-            wait_for_ready=None,
-            timeout=None,
-            metadata=None):
+    def CompleteMultipartUpload(
+        request,
+        target,
+        options=(),
+        channel_credentials=None,
+        call_credentials=None,
+        insecure=False,
+        compression=None,
+        wait_for_ready=None,
+        timeout=None,
+        metadata=None,
+    ):
         return grpc.experimental.unary_unary(
             request,
             target,
-            '/nvidia.omniverse.storage.fileobject.v1beta.FileObjectService/CompleteMultipartUpload',
+            "/nvidia.omniverse.storage.fileobject.v1beta.FileObjectService/CompleteMultipartUpload",
             nvidia_dot_omniverse_dot_storage_dot_fileobject_dot_v1beta_dot_fileobject__service__pb2.CompleteMultipartUploadRequest.SerializeToString,
             nvidia_dot_omniverse_dot_storage_dot_fileobject_dot_v1beta_dot_fileobject__service__pb2.CompleteMultipartUploadResponse.FromString,
             options,
@@ -530,23 +567,26 @@ class FileObjectService(object):
             wait_for_ready,
             timeout,
             metadata,
-            _registered_method=True)
+            _registered_method=True,
+        )
 
     @staticmethod
-    def AbortMultipartUpload(request,
-            target,
-            options=(),
-            channel_credentials=None,
-            call_credentials=None,
-            insecure=False,
-            compression=None,
-            wait_for_ready=None,
-            timeout=None,
-            metadata=None):
+    def AbortMultipartUpload(
+        request,
+        target,
+        options=(),
+        channel_credentials=None,
+        call_credentials=None,
+        insecure=False,
+        compression=None,
+        wait_for_ready=None,
+        timeout=None,
+        metadata=None,
+    ):
         return grpc.experimental.unary_unary(
             request,
             target,
-            '/nvidia.omniverse.storage.fileobject.v1beta.FileObjectService/AbortMultipartUpload',
+            "/nvidia.omniverse.storage.fileobject.v1beta.FileObjectService/AbortMultipartUpload",
             nvidia_dot_omniverse_dot_storage_dot_fileobject_dot_v1beta_dot_fileobject__service__pb2.AbortMultipartUploadRequest.SerializeToString,
             nvidia_dot_omniverse_dot_storage_dot_fileobject_dot_v1beta_dot_fileobject__service__pb2.AbortMultipartUploadResponse.FromString,
             options,
@@ -557,23 +597,26 @@ class FileObjectService(object):
             wait_for_ready,
             timeout,
             metadata,
-            _registered_method=True)
+            _registered_method=True,
+        )
 
     @staticmethod
-    def Delete(request,
-            target,
-            options=(),
-            channel_credentials=None,
-            call_credentials=None,
-            insecure=False,
-            compression=None,
-            wait_for_ready=None,
-            timeout=None,
-            metadata=None):
+    def Delete(
+        request,
+        target,
+        options=(),
+        channel_credentials=None,
+        call_credentials=None,
+        insecure=False,
+        compression=None,
+        wait_for_ready=None,
+        timeout=None,
+        metadata=None,
+    ):
         return grpc.experimental.unary_unary(
             request,
             target,
-            '/nvidia.omniverse.storage.fileobject.v1beta.FileObjectService/Delete',
+            "/nvidia.omniverse.storage.fileobject.v1beta.FileObjectService/Delete",
             nvidia_dot_omniverse_dot_storage_dot_fileobject_dot_v1beta_dot_fileobject__service__pb2.DeleteRequest.SerializeToString,
             nvidia_dot_omniverse_dot_storage_dot_fileobject_dot_v1beta_dot_fileobject__service__pb2.DeleteResponse.FromString,
             options,
@@ -584,4 +627,5 @@ class FileObjectService(object):
             wait_for_ready,
             timeout,
             metadata,
-            _registered_method=True)
+            _registered_method=True,
+        )

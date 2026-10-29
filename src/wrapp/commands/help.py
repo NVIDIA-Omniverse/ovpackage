@@ -14,10 +14,11 @@
 # limitations under the License.
 
 from wrapp.app import app
+from wrapp.options import LogFileOption
 
 
 @app.command(name="help")
-def help_command():
+def help_command(log_file: str = LogFileOption):
     """
     Prints this help message
     """

@@ -33,6 +33,7 @@ class VersionsOrder(int, metaclass=_enum_type_wrapper.EnumTypeWrapper):
     VERSIONS_ORDER_NEWEST_FIRST: _ClassVar[VersionsOrder]
     VERSIONS_ORDER_OLDEST_FIRST: _ClassVar[VersionsOrder]
     VERSIONS_ORDER_BY_KEY: _ClassVar[VersionsOrder]
+
 VERSIONS_ORDER_UNSPECIFIED: VersionsOrder
 VERSIONS_ORDER_NEWEST_FIRST: VersionsOrder
 VERSIONS_ORDER_OLDEST_FIRST: VersionsOrder
@@ -50,7 +51,9 @@ class EnumerateVersionsResponse(_message.Message):
     VERSIONS_ORDER_FIELD_NUMBER: _ClassVar[int]
     items: _containers.RepeatedCompositeFieldContainer[VersionInfo]
     versions_order: VersionsOrder
-    def __init__(self, items: _Optional[_Iterable[_Union[VersionInfo, _Mapping]]] = ..., versions_order: _Optional[_Union[VersionsOrder, str]] = ...) -> None: ...
+    def __init__(
+        self, items: _Optional[_Iterable[_Union[VersionInfo, _Mapping]]] = ..., versions_order: _Optional[_Union[VersionsOrder, str]] = ...
+    ) -> None: ...
 
 class VersionInfo(_message.Message):
     __slots__ = ("resource_info", "sorting_key")
@@ -58,4 +61,6 @@ class VersionInfo(_message.Message):
     SORTING_KEY_FIELD_NUMBER: _ClassVar[int]
     resource_info: _fileobject_pb2.ResourceInfo
     sorting_key: str
-    def __init__(self, resource_info: _Optional[_Union[_fileobject_pb2.ResourceInfo, _Mapping]] = ..., sorting_key: _Optional[str] = ...) -> None: ...
+    def __init__(
+        self, resource_info: _Optional[_Union[_fileobject_pb2.ResourceInfo, _Mapping]] = ..., sorting_key: _Optional[str] = ...
+    ) -> None: ...

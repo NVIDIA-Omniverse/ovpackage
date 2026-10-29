@@ -52,6 +52,7 @@ from wrapp.utils.storage_interface import (
     ServerInfo,
     StorageAuthInfo,
     StorageInterface,
+    URLResourceIdentity,
 )
 from wrapp.utils.task_throttler import (
     TaskThrottler,
@@ -60,9 +61,10 @@ from wrapp.utils.task_throttler import (
 from wrapp.utils.utils import (
     StorageMissingDependenciesError,
     StorageOperationError,
-    get_path_from_url,
+    file_url_to_path,
     parse_env_float,
     parse_env_int,
+    urlunsplit,
 )
 
 logger = logging.getLogger("omni.wrapp")
@@ -89,7 +91,11 @@ try:
 except ImportError as e:
     # The list of dependencies should be the same as in pyproject.toml
     missing = getattr(e, "name", str(e))
-    error_msg = f"failed to import {missing}. Required dependencies: aioboto3, aiohttp>=3.9.2; recommended: botocore[crt]. Install with 'pip install ovpackage[s3]'. Exception: {e}"
+    error_msg = (
+        f"failed to import {missing}. Required dependencies: aioboto3, aiohttp>=3.9.2; "
+        "recommended: botocore[crt]. Install with 'pip install \"ovpackage[s3]\"'. "
+        f"Exception: {e}"
+    )
     raise StorageMissingDependenciesError(error_msg) from e
 
 
@@ -117,6 +123,7 @@ S3_CONFIG_EXCEPTIONS = (
 )
 # S3 ClientError codes that mean "the object/bucket does not exist".
 S3_NOT_FOUND_CODES = frozenset({"404", "NoSuchKey", "NoSuchBucket"})
+S3_IDENTITY_MISMATCH_CODES = frozenset({"412", "PreconditionFailed"})
 # S3 ClientError codes that mean "access/permission denied". Any HTTP 403 is also treated
 # as access-denied (see _classify_read_exception), so this set mainly helps when the response
 # metadata carries no HTTP status.
@@ -146,6 +153,70 @@ def is_s3_url(url: str) -> bool:
         return False
 
 
+_S3_IDENTITY_QUERY_KEYS = frozenset({"versionId", "etag"})
+
+
+class _InvalidS3IdentityError(ValueError):
+    """An S3 identity contains a selector that cannot identify an object version."""
+
+
+def _s3_identity_request_args(url: str) -> Dict[str, str]:
+    """Decode WRAPP's URL-shaped S3 identity into exact-read arguments.
+
+    ``versionId`` is S3's native version selector, but ``etag`` is a WRAPP
+    qualifier rather than part of S3 URL grammar. Native tools may therefore
+    ignore ``etag``; in particular, pasting an etag-only identity from an
+    unversioned bucket into such a tool can return the current bytes. WRAPP
+    provides the exactness guarantee by translating it to ``IfMatch``.
+    """
+    query = urllib.parse.parse_qs(urllib.parse.urlsplit(url).query, keep_blank_values=True)
+    for key in _S3_IDENTITY_QUERY_KEYS:
+        if key in query and any(value == "" for value in query[key]):
+            raise _InvalidS3IdentityError(f"Invalid S3 identity parameter {key!r}: value must not be empty")
+    # WRAPP minting replaces these keys and emits each once. Preserve the
+    # existing, deliberate last-value precedence for externally edited URLs.
+    args: Dict[str, str] = {}
+    version_id = query.get("versionId", [None])[-1]
+    if version_id:
+        args["VersionId"] = version_id
+    etag = query.get("etag", [None])[-1]
+    if etag:
+        # The issuer records VersionId and ETag from one HEAD result. IfMatch
+        # validates that pair; without a durable version (including S3's
+        # mutable "null" version), it is the only fail-closed exactness guard.
+        args["IfMatch"] = etag
+    return args
+
+
+def _s3_copy_source_identity_args(url: str) -> Tuple[Dict[str, str], Dict[str, str]]:
+    identity_args = _s3_identity_request_args(url)
+    copy_source_args: Dict[str, str] = {}
+    copy_args: Dict[str, str] = {}
+    if version_id := identity_args.get("VersionId"):
+        copy_source_args["VersionId"] = version_id
+    if etag := identity_args.get("IfMatch"):
+        copy_args["CopySourceIfMatch"] = etag
+    return copy_source_args, copy_args
+
+
+def _s3_resource_identity_url(url: str, entry: "S3ListEntry") -> str:
+    """Mint a WRAPP-owned S3 identity from one coherent stat result.
+
+    The result is URL-shaped for storage and routing, but its ``etag`` query
+    key has meaning only when WRAPP decodes it; it is not a native S3 URL.
+    """
+    split_url = urllib.parse.urlsplit(url)
+    query = [(key, value) for key, value in urllib.parse.parse_qsl(split_url.query) if key not in _S3_IDENTITY_QUERY_KEYS]
+    if entry.s3_version_id:
+        query.append(("versionId", entry.s3_version_id))
+    if entry.etag:
+        # S3 emits only strong ETags. Do not add W/ handling: it would change
+        # the byte-stable serialization of backend-issued identities.
+        quoted_etag = entry.etag if entry.etag.startswith('"') else f'"{entry.etag}"'
+        query.append(("etag", quoted_etag))
+    return urllib.parse.urlunsplit(split_url._replace(query=urllib.parse.urlencode(query)))
+
+
 class S3ListEntry(ListEntry):
     @classmethod
     def file_from_head_object(cls, key: str, data: Dict[str, Any]) -> "S3ListEntry":
@@ -164,7 +235,15 @@ class S3ListEntry(ListEntry):
         else:
             checksum = None
         return S3ListEntry(
-            key, etag=etag, is_folder=False, size=size, last_modified=last_modified, nucleus_hash=nucleus_hash, s3_hash=checksum
+            key,
+            etag=etag,
+            is_folder=False,
+            size=size,
+            last_modified=last_modified,
+            nucleus_hash=nucleus_hash,
+            s3_hash=checksum,
+            version_id=data.get("VersionId"),
+            head_metadata_loaded=True,
         )
 
     @classmethod
@@ -193,6 +272,8 @@ class S3ListEntry(ListEntry):
         last_modified: Optional[datetime] = None,
         nucleus_hash: Optional[str] = None,
         s3_hash: Optional[str] = None,
+        version_id: Optional[str] = None,
+        head_metadata_loaded: bool = False,
     ) -> None:
         if parent_path is None:
             parent_path = ""
@@ -204,6 +285,7 @@ class S3ListEntry(ListEntry):
         assert last_modified is None or isinstance(last_modified, datetime)
         assert nucleus_hash is None or (isinstance(nucleus_hash, str) and (nucleus_hash != ""))
         assert s3_hash is None or (isinstance(s3_hash, str) and (s3_hash != ""))
+        assert version_id is None or (isinstance(version_id, str) and version_id != "")
 
         self._etag: str = etag
         self._is_folder = is_folder
@@ -212,6 +294,10 @@ class S3ListEntry(ListEntry):
         self._last_modified: Optional[datetime] = last_modified  # attribute.get('LastModified', None)
         self._nucleus_hash: Optional[str] = nucleus_hash
         self._s3_hash: Optional[str] = s3_hash
+        self._version_id = version_id
+        # VersionId can legitimately be absent on an unversioned HEAD result;
+        # distinguish that complete observation from metadata omitted by LIST.
+        self._head_metadata_loaded = head_metadata_loaded
 
     @property
     def is_folder(self) -> bool:
@@ -223,11 +309,19 @@ class S3ListEntry(ListEntry):
 
     @property
     def has_checkpoint(self) -> bool:
-        return False
+        return self.is_regular_file
 
     @property
     def version(self) -> str:
-        return "1"
+        return self._version_id or "1"
+
+    @property
+    def s3_version_id(self) -> Optional[str]:
+        return self._version_id
+
+    @property
+    def head_metadata_loaded(self) -> bool:
+        return self._head_metadata_loaded
 
     @property
     def relative_path(self) -> str:
@@ -614,11 +708,12 @@ class S3Storage(StorageInterface):
     async def normalize(self, url: str) -> str:
         bucket_name, key, region = parse_s3_bucket_key(url)
         scheme, netloc, path, query, fragment = urllib.parse.urlsplit(url)
-        return str(urllib.parse.urlunsplit(("s3", bucket_name, path, query, fragment)))
+        return str(urlunsplit(("s3", bucket_name, path, query, fragment)))
 
     async def stat(self, url: str) -> Tuple[Result, Optional[ListEntry]]:
         try:
             bucket_name, key, region = parse_s3_bucket_key(url)
+            identity_args = _s3_identity_request_args(url)
             client = await self.s3_client().get_instance()
 
             if key.endswith("/") or key == "":
@@ -630,7 +725,7 @@ class S3Storage(StorageInterface):
                 file_path = key
                 folder_path = key + "/"
                 ops = [
-                    self._throttler_roundtrip.run(client.head_object(Bucket=bucket_name, Key=key)),
+                    self._throttler_roundtrip.run(client.head_object(Bucket=bucket_name, Key=key, **identity_args)),
                     self._throttler_roundtrip.run(client.list_objects_v2(Bucket=bucket_name, Prefix=folder_path, MaxKeys=1)),
                 ]
                 result_list: List[Dict[str, Any] | BaseException] = list(await asyncio.gather(*ops, return_exceptions=True))
@@ -640,6 +735,8 @@ class S3Storage(StorageInterface):
             if file_result is not None and not isinstance(file_result, BaseException):
                 assert file_path is not None
                 return Result.OK, S3ListEntry.file_from_head_object(key=file_path, data=file_result)
+            if isinstance(file_result, BaseException) and identity_args:
+                raise file_result
             if folder_result and not isinstance(folder_result, BaseException):
                 if "Contents" in folder_result and len(folder_result["Contents"]) > 0:
                     return Result.OK, S3ListEntry.folder(key=folder_path)
@@ -652,17 +749,33 @@ class S3Storage(StorageInterface):
             else:
                 # Can happen if a folder is not found - then list_objects returns nothing
                 return Result.ERROR_NOT_FOUND, None
+        except _InvalidS3IdentityError:
+            return Result.ERROR_NOT_FOUND, None
         except NoCredentialsError as e:
             logger.error(f"S3 stat {url} failed because the S3 credentials could not be found: {e}")
             return Result.ERROR_ACCESS_DENIED, None
         except (BotoCoreError, ClientError) as e:
-            if isinstance(e, ClientError) and e.response["Error"]["Code"] == "404":
+            if isinstance(e, ClientError) and e.response["Error"]["Code"] in S3_NOT_FOUND_CODES | S3_IDENTITY_MISMATCH_CODES:
                 return Result.ERROR_NOT_FOUND, None
-            logger.error(f"boto3 error during stat {url}: {e}")
+            logger.error(f"boto3 error during stat {url}: {e}{self._version_read_permission_hint(url, e)}")
             return Result.ERROR, None
 
     async def make_resource_identity(self, file_url, item: ListEntry, relative_url) -> Tuple[str, str, ResourceIdentity]:
-        raise NotImplementedError("Resource identities not supported for S3 yet")
+        if not isinstance(item, S3ListEntry) or not item.is_regular_file:
+            raise TypeError("Can only generate resource identities for S3 files")
+        if item.head_metadata_loaded:
+            return file_url, relative_url, URLResourceIdentity(_s3_resource_identity_url(file_url, item))
+        result, stat_item = await self._head_object_entry(file_url)
+        if result != Result.OK or not isinstance(stat_item, S3ListEntry):
+            raise StorageOperationError(f"Cannot generate S3 resource identity for {file_url}: stat returned {result}", result)
+        if item.size is not None and stat_item.size != item.size:
+            raise StorageOperationError(f"S3 object changed size while cataloging {file_url}", Result.ERROR_BAD_VERSION)
+        if item.etag and stat_item.etag and stat_item.etag != item.etag:
+            raise StorageOperationError(f"S3 object changed ETag while cataloging {file_url}", Result.ERROR_BAD_VERSION)
+        if stat_item.nucleus_hash and not item.nucleus_hash:
+            item.nucleus_hash = stat_item.nucleus_hash
+        identity_url = _s3_resource_identity_url(file_url, stat_item)
+        return file_url, relative_url, URLResourceIdentity(identity_url)
 
     async def is_folder(self, url: str) -> Tuple[Result, bool]:
         result, item = await self.stat(url)
@@ -746,13 +859,43 @@ class S3Storage(StorageInterface):
     async def list_checkpoints(self, url: str) -> Tuple[Result, List[ListEntry]]:
         return Result.ERROR_NOT_SUPPORTED, []
 
-    async def copy(self, src_url: str, dst_url: str, overwrite: bool = False, message: str = "") -> Result:
+    async def copy_address(
+        self,
+        src_url: str,
+        dst_url: str,
+        overwrite: bool = False,
+        message: str = "",
+    ) -> Result:
         if not is_s3_url(src_url):
             raise ValueError(f"'{src_url} is not supported by the S3 backend.")
         if not is_s3_url(dst_url):
             raise ValueError(f"'{dst_url} is not supported by the S3 backend.")
 
         return await self._copy_file_s3_s3(src_url, dst_url, overwrite)
+
+    async def copy_resource_identity(
+        self,
+        resource_identity: str,
+        dst_url: str,
+        overwrite: bool = False,
+        message: str = "",
+    ) -> Result:
+        return await self.copy_address(resource_identity, dst_url, overwrite, message)
+
+    async def read_resource_identity(self, resource_identity: str, *, expected_hash: Optional[str] = None) -> Tuple[Result, bytes]:
+        """Read an S3 identity through its version and ETag-qualified URL."""
+        return await URLResourceIdentity(resource_identity).read_data(self)
+
+    async def download_resource_identity(
+        self,
+        resource_identity: str,
+        dst_url: str,
+        overwrite: bool,
+        *,
+        expected_hash: Optional[str] = None,
+    ) -> Result:
+        """Stream the version-qualified object with its backend preconditions."""
+        return await self.download_file(resource_identity, dst_url, overwrite)
 
     def supports_create_with_hash(self, target_url: str, hash: str) -> bool:
         return False
@@ -799,6 +942,11 @@ class S3Storage(StorageInterface):
         # get_object(Range=None) fails parameter validation instead of omitting the header,
         # so the optional parameters have to be collected in a dict.
         get_object_kwargs: Dict[str, Any] = {"Bucket": bucket_name, "Key": key}
+        try:
+            identity_request_args = _s3_identity_request_args(file_url)
+        except _InvalidS3IdentityError:
+            return Result.ERROR_NOT_FOUND, bytes()
+        get_object_kwargs.update(identity_request_args)
         if byte_range is not None:
             get_object_kwargs["Range"] = f"bytes={byte_range[0]}-{byte_range[1]}"
         if expected_etag is not None:
@@ -831,9 +979,14 @@ class S3Storage(StorageInterface):
                 return Result.OK, file_content
             except (BotoCoreError, ClientError, aiohttp.ClientError) as e:
                 retryable, terminal_result, _ = self._classify_read_exception(e)
+                if identity_request_args and isinstance(e, ClientError):
+                    code = str(e.response.get("Error", {}).get("Code", ""))
+                    http_status = str(e.response.get("ResponseMetadata", {}).get("HTTPStatusCode", ""))
+                    if code in S3_IDENTITY_MISMATCH_CODES or http_status == "412":
+                        retryable, terminal_result = False, Result.ERROR_NOT_FOUND
                 if not retryable:
                     if terminal_result != Result.ERROR_NOT_FOUND:
-                        logger.error(f"aioboto3 error during read {file_url}: {e}")
+                        logger.error(f"aioboto3 error during read {file_url}: {e}{self._version_read_permission_hint(file_url, e)}")
                     return terminal_result, bytes()
                 if attempt == max_attempts:
                     logger.error(f"[{file_url}] read failed on attempt {attempt}/{max_attempts}: {e}. No more retries left.")
@@ -846,6 +999,19 @@ class S3Storage(StorageInterface):
                 await self._sleep(total_sleep)
         # The loop always returns inside its body; this satisfies the type checker.
         return Result.ERROR, bytes()
+
+    def _version_read_permission_hint(self, url: str, e: Exception) -> str:
+        """Name the version-read requirement without assuming the cause of a 403."""
+        if (
+            isinstance(e, ClientError)
+            and _s3_identity_request_args(url).get("VersionId")
+            and self._classify_read_exception(e)[1] == Result.ERROR_ACCESS_DENIED
+        ):
+            return (
+                " Version-qualified source reads require s3:GetObjectVersion on the source object; "
+                "check the consumer role and bucket policy. s3:GetObject alone is insufficient."
+            )
+        return ""
 
     def _classify_read_exception(self, e: Exception) -> Tuple[bool, Result, Optional[ConnectionStatus]]:
         """Classify a boto3 failure as (is_retryable, terminal_result, connection_status).
@@ -1052,6 +1218,9 @@ class S3Storage(StorageInterface):
         try:
             src_bucket_name, src_key, src_region = parse_s3_bucket_key(src_url)
             dst_bucket_name, dst_key, dst_region = parse_s3_bucket_key(dst_url)
+            copy_source_identity_args, copy_args = _s3_copy_source_identity_args(src_url)
+        except _InvalidS3IdentityError:
+            return Result.ERROR_NOT_FOUND
         except ValueError:
             raise NotImplementedError(f"Can only copy from S3 to S3. {src_url=} {dst_url=}")
         try:
@@ -1063,7 +1232,7 @@ class S3Storage(StorageInterface):
                 return stat_result
             if stat_result == Result.OK and not overwrite:
                 return Result.ERROR_ALREADY_EXISTS
-            copy_source = {"Bucket": src_bucket_name, "Key": src_key}
+            copy_source = {"Bucket": src_bucket_name, "Key": src_key, **copy_source_identity_args}
 
             client = await self.s3_client().get_instance()
             try:
@@ -1071,24 +1240,41 @@ class S3Storage(StorageInterface):
                 # a head_object first to determine if the file is greater than 5GB and a multi-part upload
                 # is required, or if the normal copy_object can be used. Obviously we would like to avoid
                 # an additional head_object for any small object copy.
-                await self._throttler_serverdata.run(client.copy_object(CopySource=copy_source, Bucket=dst_bucket_name, Key=dst_key))
+                await self._throttler_serverdata.run(
+                    client.copy_object(CopySource=copy_source, Bucket=dst_bucket_name, Key=dst_key, **copy_args)
+                )
             except ClientError as e:
                 if e.response["Error"]["Code"] != "InvalidRequest":
                     raise
                 # This might be a failure because the file is greater than 5GB
-                r, e = await self.stat(src_url)
+                source_stat_result, source_item = await self.stat(src_url)
+                if source_stat_result == Result.ERROR_NOT_FOUND:
+                    return Result.ERROR_NOT_FOUND
 
                 five_gb_in_bytes = 5368709120
-                if r != Result.OK or e.size <= five_gb_in_bytes:
+                if (
+                    source_stat_result != Result.OK
+                    or source_item is None
+                    or source_item.size is None
+                    or source_item.size <= five_gb_in_bytes
+                ):
                     raise
                 # Try again with s3transfer's copy
-                await self._throttler_serverdata.run(client.copy(CopySource=copy_source, Bucket=dst_bucket_name, Key=dst_key))
+                if copy_args:
+                    await self._throttler_serverdata.run(
+                        client.copy(CopySource=copy_source, Bucket=dst_bucket_name, Key=dst_key, ExtraArgs=copy_args)
+                    )
+                else:
+                    await self._throttler_serverdata.run(client.copy(CopySource=copy_source, Bucket=dst_bucket_name, Key=dst_key))
             return Result.OK
         except (BotoCoreError, ClientError) as e:
-            logger.error(f"aioboto3 error during copy {src_url} {dst_url}: {e}")
+            if isinstance(e, ClientError) and e.response["Error"]["Code"] in S3_NOT_FOUND_CODES | S3_IDENTITY_MISMATCH_CODES:
+                return Result.ERROR_NOT_FOUND
+            logger.error(f"aioboto3 error during copy {src_url} {dst_url}: {e}{self._version_read_permission_hint(src_url, e)}")
             return Result.ERROR
 
     async def download_file(self, src_url: str, dst_url: str, overwrite: bool) -> Result:
+        """Download an address to a native path or an escaped file URL."""
         src_bucket_name, src_key, src_region = parse_s3_bucket_key(src_url)
         if src_key.endswith("/"):
             return Result.ERROR_WRONG_TYPE
@@ -1096,6 +1282,7 @@ class S3Storage(StorageInterface):
         should_remove_partial = False
 
         def _remove_partial_download() -> None:
+            """Remove incomplete output without hiding the original transfer failure."""
             # Best-effort cleanup of a partial download. Only called after the destination file
             # has been closed (deleting an open file fails on Windows). This must never raise:
             # it runs on the failure and cancellation paths, and a propagating OSError -- e.g. a
@@ -1112,11 +1299,12 @@ class S3Storage(StorageInterface):
                     logger.warning(f"Could not remove partial download {dst_path}: {e}")
 
         try:
-            dst_path = get_path_from_url(dst_url)
+            dst_path = file_url_to_path(dst_url)
             # make sure any parent directories exist
             os.makedirs(os.path.dirname(dst_path), exist_ok=True)
 
             async def _throttled_download() -> Result:
+                """Download to the native destination while holding a transfer slot."""
                 nonlocal should_remove_partial
                 # Acquire exactly ONE NetworkDataTransfer slot for the whole file (mirrors
                 # _upload's single-slot-per-file pattern) and open the destination FD inside it,
@@ -1154,10 +1342,10 @@ class S3Storage(StorageInterface):
             return Result.ERROR
 
     async def _head_object_entry(self, url: str) -> Tuple[Result, Optional[S3ListEntry]]:
-        """Fetch object metadata for the download path with a SINGLE head_object.
+        """Fetch metadata for a known file with a SINGLE head_object.
 
         Unlike the general-purpose stat(), this issues NO list_objects_v2 folder-prefix probe:
-        the download path only needs the object's size/etag, and that extra LIST per file is
+        identity creation and downloads only need object metadata, and that extra LIST per file is
         costly on large syncs (~12.5x a GET, plus one extra roundtrip slot per file). A
         non-slash folder-prefix key with no underlying object surfaces as a head_object 404 ->
         ERROR_NOT_FOUND.
@@ -1168,13 +1356,21 @@ class S3Storage(StorageInterface):
         """
         bucket_name, key, _region = parse_s3_bucket_key(url)
         try:
+            identity_args = _s3_identity_request_args(url)
             client = await self.s3_client().get_instance()
-            data = await self._throttler_roundtrip.run(client.head_object(Bucket=bucket_name, Key=key))
+            data = await self._throttler_roundtrip.run(client.head_object(Bucket=bucket_name, Key=key, **identity_args))
             return Result.OK, S3ListEntry.file_from_head_object(key=key, data=data)
+        except _InvalidS3IdentityError:
+            return Result.ERROR_NOT_FOUND, None
         except (BotoCoreError, ClientError, aiohttp.ClientError) as e:
             _, terminal_result, _ = self._classify_read_exception(e)
+            if identity_args and isinstance(e, ClientError):
+                code = str(e.response.get("Error", {}).get("Code", ""))
+                http_status = str(e.response.get("ResponseMetadata", {}).get("HTTPStatusCode", ""))
+                if code in S3_IDENTITY_MISMATCH_CODES or http_status == "412":
+                    terminal_result = Result.ERROR_NOT_FOUND
             if terminal_result != Result.ERROR_NOT_FOUND:
-                logger.error(f"boto3 error during head_object {url}: {e}")
+                logger.error(f"boto3 error during head_object {url}: {e}{self._version_read_permission_hint(url, e)}")
             return terminal_result, None
 
     async def _download_file_content(self, src_url: str, f_dst: BinaryIO) -> Result:
@@ -1272,9 +1468,10 @@ class S3Storage(StorageInterface):
         return chunk_result
 
     async def upload_file(self, src_url: str, dst_url: str, overwrite: bool, message: Optional[str] = None) -> Result:
+        """Upload a native local path or an escaped file URL to this backend."""
         try:
             # TODO: We really should have a hash cache for all local files. See OMPE-14844
-            src_path = get_path_from_url(src_url)
+            src_path = file_url_to_path(src_url)
             with open(src_path, "rb") as f_src:
                 nucleus_hash, _ = calc_nucleus_hash_from_stream(f_src)
             upload_size = os.path.getsize(src_path)

@@ -26,7 +26,12 @@ from wrapp.datastructures.catalog import (
     Catalog,
     CatalogItem,
 )
-from wrapp.datastructures.package import PackageInfo
+from wrapp.datastructures.package import (
+    PackageInfo,
+    load_package_setup,
+    wrapp_file_in_repo,
+)
+from wrapp.repo.repository import Repository
 from wrapp.utils.storage import (
     Result,
     wrapp_url_exists,
@@ -35,6 +40,7 @@ from wrapp.utils.utils import (
     FailedCommand,
     StorageOperationError,
     make_relative_url,
+    normalize_url,
 )
 
 from .common import *
@@ -72,6 +78,25 @@ async def test_import(cli_runner, test_folder_url, authenticator, local_tmp_fold
     os.remove(export_file_name)
     os.remove(import_result_name)
     os.remove(import_source_name)
+
+
+@pytest.mark.asyncio
+async def test_import_canonical_source(cli_runner, test_folder_url, authenticator, local_tmp_folder, storage_backend):
+    """--canonical-source records a public base URL as the provenance of the imported .wrapp file (OMPE-51673)."""
+    source_package = await storage_backend.create_source_package(join_paths(test_folder_url, "package_source"))
+    repo_folder = join_paths(test_folder_url, ".package_cache")
+    export_file_name = os.path.join(local_tmp_folder, "import_canonical.1.tar")
+    run_wrapp(cli_runner, ["create", "import_test", "1", source_package, "--repo", repo_folder])
+    run_wrapp(cli_runner, ["export", "import_test", "1", "--repo", repo_folder, "--overwrite", "--output", export_file_name])
+
+    import_repo = join_paths(test_folder_url, ".second_package")
+    canonical = "https://simready.nvidia.com"
+    run_wrapp(cli_runner, ["import", export_file_name, "--repo", import_repo, "--canonical-source", canonical])
+
+    imported = await load_package_setup(wrapp_file_in_repo(Repository(repo_url=import_repo), "import_test", "1"))
+    assert imported.source == normalize_url(canonical)
+    assert imported.repository == normalize_url(canonical)
+    os.remove(export_file_name)
 
 
 async def create_exported_package(storage_backend, test_folder, local_tmp_folder) -> str:

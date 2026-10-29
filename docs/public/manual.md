@@ -31,10 +31,10 @@ ovpackage supports the following storage systems:
 
 - **S3** — Amazon S3 and compatible object storage (via boto3)
 - **Azure Blob Storage** — Microsoft Azure containers and blobs
+- **Google Cloud Storage** — GCS buckets
+- **Hugging Face** — Dataset repositories (`hf://datasets/...` URLs, read-only)
 - **Local file system** — Local directories and files
-
-```{eval-rst}
-```
+- **Storage API** — Any storage service implementing the [Storage API](the Storage API specification) specification
 
 For URL formats, configuration options, and authentication details, see [Supported Storage Systems](storage.md).
 
@@ -179,6 +179,13 @@ package moves between repositories. `import` in particular trusts the archive
 the same way it trusts the archived `.wrapp` catalog and content hashes:
 whatever sidecars the archive carries are written as-is, with no license,
 dependency, or schema gating.
+
+For sources that cannot list directories, such as HTTP, ovpackage copies the
+definition and the metadata files referenced by its `metadata` entries, including
+the BOM. Standard packages produce a warning because additional, unregistered
+files in `.metadata/` cannot be discovered or copied. Plain ovpackage packages
+without a package-standard definition do not produce this warning. Sources that
+support directory listing continue to preserve the entire `.metadata/` folder.
 
 ## Getting Started
 

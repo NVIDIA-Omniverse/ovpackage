@@ -24,6 +24,7 @@ from typing import (
 
 from pydantic import (
     BaseModel,
+    Field,
     ValidationError,
 )
 
@@ -39,6 +40,7 @@ from wrapp.utils.stats import (
     Stats,
     StatType,
 )
+from wrapp.utils.storage_interface import SerializedResourceIdentity
 from wrapp.utils.utils import (
     FailedCommand,
     is_file_url,
@@ -46,7 +48,7 @@ from wrapp.utils.utils import (
 
 logger = logging.getLogger("omni.wrapp")
 
-HASH_CACHE_VERSION = WRAPPModelVersion(version_string="1.0")
+HASH_CACHE_VERSION = WRAPPModelVersion(version_string="1.1")
 
 
 class HashCacheEntry(BaseModel):
@@ -55,27 +57,36 @@ class HashCacheEntry(BaseModel):
     hash: str
 
 
+class IdentityHashCacheEntry(BaseModel):
+    filesize: int
+    hash: str
+
+
 class HashCacheFile(WRAPPFileModel):
     format_version: WRAPPModelVersion = HASH_CACHE_VERSION
     entries: Dict[str, HashCacheEntry]
+    identity_entries: Dict[str, IdentityHashCacheEntry] = Field(default_factory=dict)
 
 
 class HashCache:
+    """Separate address hashes (get/set) from opaque identity hashes (get_identity/set_identity)."""
+
     def __init__(self, filename: str, verbose: bool = False):
         assert_is_wrapp_thread()
         self.filename = filename
         self.verbose = verbose
-        self.cache: Dict[str, HashCacheEntry]
         if os.path.exists(self.filename):
             logger.info(f"Found existing hash cache, loading file {filename}")
-            self.cache = self._load_cache_file()
+            cache_file = self._load_cache_file()
         else:
-            self.cache = {}
+            cache_file = HashCacheFile(entries={})
+        self.cache: Dict[str, HashCacheEntry] = cache_file.entries
+        self.identity_cache: Dict[str, IdentityHashCacheEntry] = cache_file.identity_entries
 
     def save(self) -> None:
         assert_is_wrapp_thread()
         logger.info(f"Saving hash cache to {self.filename}")
-        cache_file = HashCacheFile(entries=self.cache)
+        cache_file = HashCacheFile(entries=self.cache, identity_entries=self.identity_cache)
         try:
             with open(self.filename, "wt", encoding="utf-8") as hash_file:
                 hash_file.write(cache_file.model_dump_json(indent=2))
@@ -83,7 +94,7 @@ class HashCache:
         except OSError as e:
             raise FailedCommand(f"Failed to write hash cache file '{self.filename}': {e}") from e
 
-    def _load_cache_file(self) -> Dict[str, HashCacheEntry]:
+    def _load_cache_file(self) -> HashCacheFile:
         try:
             with open(self.filename, "rb") as hash_file:
                 raw_data = hash_file.read()
@@ -91,7 +102,7 @@ class HashCache:
             raise FailedCommand(f"Failed to read hash cache file '{self.filename}': {e}") from e
 
         if not raw_data:
-            return {}
+            return HashCacheFile(entries={})
 
         if self._looks_like_pickle(raw_data):
             raise FailedCommand(
@@ -107,7 +118,7 @@ class HashCache:
                 f"Hash cache file '{self.filename}' is invalid. Expected WRAPP hash cache JSON format " "with a compatible format_version."
             ) from e
 
-        return cache_file.entries
+        return cache_file
 
     @staticmethod
     def _looks_like_pickle(raw_data: bytes) -> bool:
@@ -140,4 +151,22 @@ class HashCache:
         key = self._make_key(filename)
         logger.debug(f"Storing hash in hash cache key {key}: {hash}")
         self.cache[key] = HashCacheEntry(modification_time=mod_time, filesize=filesize, hash=hash)
+        Stats.get().increment(StatType.HASH_CACHE_INSERT)
+
+    def get_identity(self, identity: SerializedResourceIdentity, filesize: int) -> Optional[str]:
+        """Look up an exact opaque identity, never an address or a normalized URL."""
+        assert_is_wrapp_thread()
+        entry = self.identity_cache.get(identity)
+        if entry is not None and entry.filesize == filesize:
+            logger.debug(f"Identity hash cache hit for {identity}")
+            Stats.get().increment(StatType.HASH_CACHE_HIT)
+            return entry.hash
+        logger.debug(f"Identity hash cache miss for {identity}")
+        Stats.get().increment(StatType.HASH_CACHE_MISS)
+        return None
+
+    def set_identity(self, identity: SerializedResourceIdentity, filesize: int, hash: str) -> None:
+        """Store an identity-derived hash separately, even if the token looks like an address."""
+        assert_is_wrapp_thread()
+        self.identity_cache[identity] = IdentityHashCacheEntry(filesize=filesize, hash=hash)
         Stats.get().increment(StatType.HASH_CACHE_INSERT)

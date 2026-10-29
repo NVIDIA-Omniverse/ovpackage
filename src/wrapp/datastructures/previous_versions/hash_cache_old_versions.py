@@ -15,7 +15,10 @@
 
 import datetime
 
-from pydantic import BaseModel
+from pydantic import (
+    BaseModel,
+    Field,
+)
 
 from wrapp.datastructures.wrapp_file_model import (
     WRAPPFileModel,
@@ -35,7 +38,19 @@ class HashCacheFile_v1_0(WRAPPFileModel):
     entries: dict[str, HashCacheEntry_v1_0]
 
 
+class IdentityHashCacheEntry_v1_1(BaseModel):
+    filesize: int
+    hash: str
+
+
+class HashCacheFile_v1_1(WRAPPFileModel):
+    format_version: WRAPPModelVersion = WRAPPModelVersion(version_string="1.1")
+    entries: dict[str, HashCacheEntry_v1_0]
+    identity_entries: dict[str, IdentityHashCacheEntry_v1_1] = Field(default_factory=dict)
+
+
 # Versioned classes above are compatibility snapshots. Do not edit an
 # existing class body after it has shipped; add a new class and registry entry
 # for a new file format version instead.
 all_old_file_model_classes[("HashCacheFile", WRAPPModelVersion(version_string="1.0"))] = HashCacheFile_v1_0
+all_old_file_model_classes[("HashCacheFile", WRAPPModelVersion(version_string="1.1"))] = HashCacheFile_v1_1

@@ -73,7 +73,7 @@ from wrapp.utils.utils import (
     get_base_directory_from_url,
     is_folder,
     is_regular_file,
-    join_paths,
+    join_url_path,
     make_relative_url,
     validate_non_empty_string,
 )
@@ -304,7 +304,7 @@ class Lister:
         current_folder = url
         try:
             async for item in items_generator:
-                full_path = join_paths(current_folder, item.relative_path)
+                full_path = join_url_path(current_folder, item.relative_path)
                 if is_folder(item) and self.recursive and manual_recursive:
                     # schedule folder recursion
                     task_node.create_task(self._list_internal(task_node, full_path), name="List directory")

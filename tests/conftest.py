@@ -15,6 +15,8 @@
 
 import pytest
 
+from tests import pytest_bdd_compat
+
 pytest_plugins = ["tests.wrapp_test_fixtures"]
 
 
@@ -28,6 +30,7 @@ def pytest_addoption(parser):
 
 
 def pytest_configure(config):
+    pytest_bdd_compat.pytest_configure(config)
     config.addinivalue_line(
         "markers",
         "xdist_incompatible: test mutates global singletons (Router, WrappEventLoopThread) "

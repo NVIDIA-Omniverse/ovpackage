@@ -48,6 +48,7 @@ from wrapp.datastructures.package import (
     PackageInfo,
     UniquePackageLocation,
     _write_package_info,
+    apply_source_policy,
     load_package_setup,
     wrapp_file_in_repo,
     wrapp_file_name,
@@ -61,6 +62,8 @@ from wrapp.options import (
     JsonLoggingFlag,
     LogFileOption,
     ProgressReportOption,
+    PublishRedirectCanonicalSourceOption,
+    PublishRedirectStripSourceFlag,
     StatsFlag,
     TimeFlag,
     VerboseFlag,
@@ -80,6 +83,7 @@ from wrapp.utils.utils import (
     StorageOperationError,
     get_filename_from_url,
     join_paths,
+    make_file_url_absolute,
     normalize_url,
     validate_non_empty_string,
 )
@@ -112,6 +116,8 @@ async def publish_redirect_command(
         "--eu",
         help="External base URL for catalog source_path entries (e.g., https://cdn.example.com). If not specified, source_path is preserved.",
     ),
+    strip_source: bool = PublishRedirectStripSourceFlag,
+    canonical_source: Optional[str] = PublishRedirectCanonicalSourceOption,
     auth: Optional[List[str]] = AuthOption,
     interactive_auth: bool = InteractiveAuthFlag,
     jobs: int = JobsNumber,
@@ -141,6 +147,8 @@ async def publish_redirect_command(
                 source_repos=source_repos,
                 redirect_repo=redirect_repo,
                 external_url=external_url,
+                strip_source=strip_source,
+                canonical_source=canonical_source,
                 context=context,
                 scheduler=scheduler,
             )
@@ -163,6 +171,8 @@ async def publish_redirect(
     redirect_repo: str,
     external_url: Optional[str] = None,
     *,
+    strip_source: bool = False,
+    canonical_source: Optional[str] = None,
     context: Optional[CommandParameters] = None,
     scheduler: Optional[SchedulerContext] = None,
 ) -> List[str]:
@@ -181,6 +191,8 @@ async def publish_redirect(
     :param redirect_repo: URL of the redirect repository where redirect packages will be created
     :param external_url: External base URL for source_path entries (e.g., https://cdn.example.com).
                         If specified, source_path URLs will use this base instead of the source repo URL.
+    :param strip_source: When True, clear the source provenance field in the redirect .wrapp files so internal addresses are not published. The repository field is left as the redirect repo. Mutually exclusive with canonical_source.
+    :param canonical_source: When set, record this canonical base URL as the source provenance instead of the internal address. The repository field is left as the redirect repo. Mutually exclusive with strip_source.
     :param context: Global configuration parameters
     :param scheduler: Optionally pre-constructed SchedulerContext
 
@@ -191,6 +203,9 @@ async def publish_redirect(
     """
     if context is None:
         context = CommandParameters()
+
+    if strip_source and canonical_source:
+        raise FailedCommand("Use either --strip-source or --canonical-source, not both.")
 
     # Normalize source_repos to a list
     if isinstance(source_repos, str):
@@ -371,6 +386,8 @@ async def publish_redirect(
                     context,
                     created_files,
                     all_source_repos=source_repos_list,
+                    strip_source=strip_source,
+                    canonical_source=canonical_source,
                 ),
                 name=f"Redirect {package_name}@{version}",
             )
@@ -388,6 +405,8 @@ async def _create_redirect_for_package(
     context: CommandParameters,
     created_files: List[str],
     all_source_repos: Optional[List[str]] = None,
+    strip_source: bool = False,
+    canonical_source: Optional[str] = None,
 ) -> None:
     """Create a redirect package for a single package version."""
     source_wrapp_url = join_paths(source_repo.package_url(package_name, version), wrapp_file_name(package_name))
@@ -412,6 +431,10 @@ async def _create_redirect_for_package(
         all_source_repos=all_source_repos,
     )
 
+    # Keep internal source addresses out of the redirect (published) package if requested.
+    # The repository field points at the redirect repo and is load-bearing, so only source is touched here.
+    apply_source_policy(redirect_package, strip_source=strip_source, canonical_source=canonical_source, include_repository=False)
+
     # Write the redirect package to the redirect repo location, carrying any
     # package-standard sidecars from the source package verbatim (like mirror/install).
     await _write_package_info(
@@ -434,7 +457,10 @@ def create_redirect_package(
     all_source_repos: Optional[List[str]] = None,
 ) -> PackageInfo:
     """
-    Create a redirect package from a source package.
+    Construct a redirect package structurally, without accessing target storage.
+
+    Rewritten content has both identities cleared and is read by address with
+    its recorded hash, when available. Unchanged addresses retain their identities.
 
     The redirect package has:
     - Updated catalog.root to point to the target location (external_url or source location)
@@ -463,15 +489,25 @@ def create_redirect_package(
     # Update catalog source_path and root to use external URL if specified
     if redirect_package.catalog is not None:
         # Normalize the source base URL to ensure consistent path separators (important for Windows)
-        source_base = normalize_url(source_repo.base_url())
+        source_base = make_file_url_absolute(normalize_url(source_repo.base_url())).rstrip("/")
 
         if external_base:
             # Update catalog.root to use external URL
-            redirect_package.catalog.root = normalize_url(redirect_package.catalog.root).replace(source_base, external_base)
+            def rewrite_content_url(url: str) -> str:
+                normalized = make_file_url_absolute(normalize_url(url))
+                if normalized == source_base or normalized.startswith(source_base + "/"):
+                    return external_base + normalized[len(source_base) :]
+                return url
+
+            redirect_package.catalog.root = rewrite_content_url(redirect_package.catalog.root)
 
             # Update each item's source_path to use external URL
             for item in redirect_package.catalog.items:
-                item.source_path = normalize_url(item.source_path).replace(source_base, external_base)
+                target_path = rewrite_content_url(item.source_path)
+                if target_path != item.source_path:
+                    item.resource_identity = None
+                    item.resource_identity_v2 = None
+                    item.source_path = target_path
         # If no external_url, source_path values are preserved as-is (they already point to the right location)
 
     # Rewrite dependencies to use redirect repo (or external URL if specified)

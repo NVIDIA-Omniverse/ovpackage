@@ -20,6 +20,7 @@ import io
 import json
 import logging
 import os
+import random
 import re
 import secrets
 import tempfile
@@ -70,7 +71,9 @@ from wrapp.utils.storage_interface import (
     DirectorySemantics,
     ListEntry,
     LocalReadOnlyFile,
+    ResourceAddress,
     Result,
+    SerializedResourceIdentity,
     ServerInfo,
     StorageAPIBearerAuthInfo,
     StorageAPIClientCredentialsAuthInfo,
@@ -86,8 +89,10 @@ from wrapp.utils.utils import (
     StorageInitializationError,
     StorageMissingDependenciesError,
     StorageOperationError,
+    file_url_to_path,
     get_path_from_url,
     is_file_url,
+    urlunsplit,
 )
 
 _CallableReturnType = TypeVar("_CallableReturnType")
@@ -154,8 +159,13 @@ try:
     import requests  # isort: skip
 except ImportError as e:
     missing = getattr(e, "name", str(e))
-    error_msg = f"failed to import {missing}. Required dependencies: aiohttp>=3.11.18; yarl>=1.17.0; grpcio>=1.71.0; grpcio-tools>=1.71.0; requests>=2.32.3; keyring>=25.0.0. Install with 'pip install ovpackage[storage-api]'. Exception: {e}"
+    error_msg = f"failed to import {missing}. Required dependencies: aiohttp>=3.11.18; yarl>=1.17.0; grpcio>=1.73.1; protobuf>=6.31.0; requests>=2.32.3; keyring>=25.0.0. Install with 'pip install ovpackage[storage-api]'. Exception: {e}"
     raise StorageMissingDependenciesError(error_msg) from e
+
+from wrapp.utils.storage_impls._http_transfer import (
+    encoded_http_url,
+    stream_http_response_to_file,
+)
 
 # Per-service version lookup tables for protocol negotiation.
 # Keyed by version string ("v1beta" or "v1alpha"), each dict maps to the
@@ -228,37 +238,35 @@ _RETRYABLE_GRPC_STATUS_CODES = {
     grpc.StatusCode.RESOURCE_EXHAUSTED,
     grpc.StatusCode.UNAVAILABLE,
 }
+_RETRY_DELAY_CAP_SECONDS = 60.0
 
 
-def _presigned_url(url: str) -> "yarl.URL":
-    """Wrap a presigned/redirect URL so aiohttp uses it byte-exact.
+def _retry_delay(attempt: int, *, base_delay: float = 1.0, cap_seconds: float = _RETRY_DELAY_CAP_SECONDS) -> float:
+    max_delay = min(cap_seconds, base_delay)
+    for _ in range(max(0, attempt - 1)):
+        if max_delay >= cap_seconds:
+            break
+        max_delay = min(cap_seconds, max_delay * 2)
+    return random.uniform(0.0, max_delay)
 
-    yarl re-normalizes percent-encoding by default (e.g. %2F -> / inside the
-    X-Amz-Credential query value of S3/CloudFront presigned URLs), which
-    breaks the signature and yields 403 AccessDenied. encoded=True disables
-    the re-encoding.
-    """
-    return yarl.URL(url, encoded=True)
+
+_presigned_url = encoded_http_url
 
 
 def _encode_resource_address_for_storage_service(resource_address: str) -> str:
     parsed = urllib.parse.urlsplit(resource_address.replace("\\", "/"))
-    quoted_path = urllib.parse.quote(parsed.path, safe="/")
-    return urllib.parse.urlunsplit((parsed.scheme, parsed.netloc, quoted_path, parsed.query, parsed.fragment))
-
-
-def _decode_resource_address_from_storage_service(resource_address: str) -> str:
-    parsed = urllib.parse.urlsplit(resource_address.replace("\\", "/"))
-    unquoted_path = urllib.parse.unquote(parsed.path)
-    return urllib.parse.urlunsplit((parsed.scheme, parsed.netloc, unquoted_path, parsed.query, parsed.fragment))
+    quoted_path = urllib.parse.quote(urllib.parse.unquote(parsed.path), safe="/")
+    return urlunsplit((parsed.scheme, parsed.netloc, quoted_path, parsed.query, parsed.fragment))
 
 
 def _stat_snapshot(st: os.stat_result) -> Tuple[int, int, int, int]:
-    # ctime_ns is included because a same-size rewrite can restore mtime (e.g.
-    # touch -r) but cannot restore ctime on POSIX. On Windows st_ctime_ns is the
-    # creation time, so an in-place same-size rewrite with restored mtime is not
-    # detectable there without re-hashing.
-    return (st.st_size, st.st_mtime_ns, st.st_ctime_ns, st.st_ino)
+    """Capture comparable path and handle metadata for queued upload validation."""
+    # POSIX ctime detects same-size rewrites even if mtime was restored. Windows
+    # stat and fstat can report creation time and change time respectively, so
+    # exclude ctime there to keep path and handle snapshots comparable. Upload
+    # hashing still binds the stored content hash to the bytes actually sent.
+    ctime_ns = 0 if os.name == "nt" else st.st_ctime_ns
+    return (st.st_size, st.st_mtime_ns, ctime_ns, st.st_ino)
 
 
 class _WriteSource:
@@ -550,13 +558,13 @@ class StorageAPIListEntry(ListEntry):
         path-only URL, or with an extra bucket segment). This method normalizes those variants
         so callers can consistently use catalog relative paths.
         """
-        normalized_base = _decode_resource_address_from_storage_service(base_resource_address).rstrip("/")
-        normalized_item = _decode_resource_address_from_storage_service(item_resource_address)
+        normalized_base = _encode_resource_address_for_storage_service(base_resource_address).rstrip("/")
+        normalized_item = _encode_resource_address_for_storage_service(item_resource_address)
 
         # Fast path: exact URL/prefix style match.
         base_prefix = normalized_base + "/"
         if normalized_item.startswith(base_prefix):
-            return normalized_item[len(base_prefix) :].lstrip("/\\")
+            return urllib.parse.unquote(normalized_item[len(base_prefix) :]).lstrip("/\\")
         if normalized_item == normalized_base:
             return ""
 
@@ -569,10 +577,10 @@ class StorageAPIListEntry(ListEntry):
             window = len(base_path_parts)
             for i in range(len(item_path_parts) - window + 1):
                 if item_path_parts[i : i + window] == base_path_parts:
-                    return "/".join(item_path_parts[i + window :]).lstrip("/\\")
+                    return urllib.parse.unquote("/".join(item_path_parts[i + window :])).lstrip("/\\")
 
         # Last resort: preserve previous behavior for non-matching path forms.
-        return normalized_item.lstrip("/\\")
+        return urllib.parse.unquote(normalized_item).lstrip("/\\")
 
     @staticmethod
     def from_list_item(base_resource_address: str, item):
@@ -629,12 +637,22 @@ class StorageAPIListEntry(ListEntry):
 
 class StorageAPIResourceIdentity(storage_interface.ResourceIdentity):
     def __init__(self, resource_identity: str):
+        if not isinstance(resource_identity, str) or not resource_identity:
+            raise ValueError("Storage API resource identity must be a non-empty string")
         self._resource_identity = resource_identity
 
     async def read_data(self, storage) -> Tuple[Result, bytes]:
-        return await storage.read_resource_identity(self._resource_identity)
+        return await storage.read_resource_identity(self.to_string())
 
-    def to_string(self) -> str:
+    def to_string(self) -> storage_interface.SerializedResourceIdentity:
+        return storage_interface.SerializedResourceIdentity(self._resource_identity)
+
+    @classmethod
+    def from_string(cls, value: str) -> "StorageAPIResourceIdentity":
+        return cls(value)
+
+    @property
+    def encoded_identity(self) -> str:
         return self._resource_identity
 
 
@@ -701,7 +719,7 @@ class StorageAPIStorageGRPC(StorageAPIStorage):
         Direct ``host:port`` of the gRPC endpoint. Used only when the discovery
         URL is empty. No default — when neither this nor the discovery URL is
         set, the backend is inert: it does not claim URLs and the Router falls
-        through to the dedicated backends (S3, Azure, GCS, ...).
+        through to the dedicated backends (S3, Azure, GCS, Hugging Face, ...).
     ``WRAPP_STORAGE_API_CAPABILITIES``, ``WRAPP_STORAGE_API_FILEOBJECT``,
     ``WRAPP_STORAGE_API_FILEFOLDER``, ``WRAPP_STORAGE_API_METADATA``
         Optional per-service API version pins (for example ``v1alpha`` or
@@ -775,6 +793,11 @@ class StorageAPIStorageGRPC(StorageAPIStorage):
         self._top_level_addresses: Optional[List[str]] = None
         self._routes: Optional[List[str]] = None
         self._route_regexes: Optional[List[re.Pattern]] = None
+        # Keep the server-advertised scope separately for routing opaque
+        # resource identities. Configured routes override address routing,
+        # but must not make identities issued by this service unreadable.
+        self._identity_route_regexes: Optional[List[re.Pattern]] = None
+        self._identity_top_level_addresses: Optional[List[str]] = None
         # Route override loaded from wrapp.toml. When set, _route_regexes is
         # populated with these patterns after _fetch_routes/_fetch_top_level_addresses
         # have run (the server's response is still logged for diagnostics).
@@ -885,8 +908,7 @@ class StorageAPIStorageGRPC(StorageAPIStorage):
         if backend.routes:
             if not self._endpoint and not self._discovery_url:
                 logger.error(
-                    "wrapp config %s: %s.routes is set but no gRPC endpoint or "
-                    "discovery URL is configured; routes will be ignored.",
+                    "wrapp config %s: %s.routes is set but no gRPC endpoint or " "discovery URL is configured; routes will be ignored.",
                     source,
                     label,
                 )
@@ -1343,14 +1365,20 @@ class StorageAPIStorageGRPC(StorageAPIStorage):
         if not g_list_routes_enabled:
             logger.debug("ListRoutes disabled via WRAPP_DISABLE_LIST_ROUTES")
             return False
-        if self._capabilities_version != "v1alpha":
-            logger.debug("ListRoutes requires v1alpha CapabilitiesService, skipping")
-            return False
+        if self._capabilities_version == "v1alpha":
+            capability_api = self._capability_api
+            capability_msgs = self._capabilities_msgs
+        else:
+            # ListRoutes exists only in v1alpha. A service may support both
+            # capabilities versions while WRAPP selected v1beta for the other
+            # calls, so probe the v1alpha method on the same channel.
+            capability_api = cap_grpc_v1alpha.CapabilitiesServiceStub(self._channel)
+            capability_msgs = cap_pb2_v1alpha
         try:
             response = await self._run_control_grpc_with_retries(
                 "ListRoutes",
-                self._capability_api.ListRoutes,
-                self._capabilities_msgs.ListRoutesRequest(),
+                capability_api.ListRoutes,
+                capability_msgs.ListRoutesRequest(),
             )
             patterns = [route.wildcard_pattern for route in response.items if route.wildcard_pattern]
             if not patterns:
@@ -1358,6 +1386,7 @@ class StorageAPIStorageGRPC(StorageAPIStorage):
                 return False
             self._routes = patterns
             self._route_regexes = [self._compile_route_pattern(p) for p in patterns]
+            self._identity_route_regexes = list(self._route_regexes)
             logger.info(f"StorageAPI[{self._name}] routes: {self._routes}")
             return True
         except grpc.RpcError as e:
@@ -1375,7 +1404,7 @@ class StorageAPIStorageGRPC(StorageAPIStorage):
         """Compile a route wildcard pattern into a regex.
 
         Wildcard semantics (from the proto definition):
-        - ``*``  matches a single identifier ``[a-zA-Z0-9_.-]+``
+        - ``*``  matches a single identifier ``[a-zA-Z0-9_-]+``
         - ``**`` matches any substring (including ``/``)
 
         A trailing ``/**`` also matches the base URL without the slash,
@@ -1386,12 +1415,13 @@ class StorageAPIStorageGRPC(StorageAPIStorage):
         for i, part in enumerate(parts):
             segments = part.split("*")
             escaped = [re.escape(s) for s in segments]
-            literal = "[a-zA-Z0-9_.\\-]+".join(escaped)
+            literal = "[a-zA-Z0-9_\\-]+".join(escaped)
             if i < len(parts) - 1:
-                if literal.endswith("/"):
-                    literal = literal[:-1] + "/?"
-                regex_parts.append(literal)
-                regex_parts.append(".*")
+                if literal.endswith("/") and i == len(parts) - 2 and not parts[-1]:
+                    regex_parts.append(literal[:-1] + "(?:/.*)?")
+                else:
+                    regex_parts.append(literal)
+                    regex_parts.append(".*")
             else:
                 regex_parts.append(literal)
         return re.compile("^" + "".join(regex_parts) + "$")
@@ -1409,10 +1439,12 @@ class StorageAPIStorageGRPC(StorageAPIStorage):
                 self._capabilities_msgs.ListTopLevelAddressesRequest(),
             )
             self._top_level_addresses = [entry.top_level_address.rstrip("/") for entry in response.items]
+            self._identity_top_level_addresses = list(self._top_level_addresses)
             logger.info(f"StorageAPI[{self._name}] top-level addresses: {self._top_level_addresses}")
         except Exception as e:
             logger.warning(f"Failed to fetch top-level addresses, URL routing will use catch-all: {e}")
             self._top_level_addresses = None
+            self._identity_top_level_addresses = None
 
     async def _determine_s3_bucket_region(self, bucket: str) -> str | None:
         if bucket in self._bucket_region_cache:
@@ -1442,7 +1474,7 @@ class StorageAPIStorageGRPC(StorageAPIStorage):
             region = await self._determine_s3_bucket_region(bucket)
             if region:
                 host = f"{bucket}.s3.{region}.amazonaws.com"
-                return str(urllib.parse.urlunsplit(["https", host, path, query, fragment]))
+                return str(urlunsplit(["https", host, path, query, fragment]))
             else:
                 raise StorageOperationError(
                     f"Bucket {bucket} for address {resource_address} doesn't exist, cannot determine region. Aborting operation."
@@ -2046,6 +2078,16 @@ class StorageAPIStorageGRPC(StorageAPIStorage):
         u = url.rstrip("/")
         return any(u == tla or u.startswith(tla + "/") for tla in self._top_level_addresses)
 
+    def can_handle_resource_identity(self, resource_identity: SerializedResourceIdentity) -> bool:
+        if not resource_identity:
+            return False
+        if self._identity_route_regexes is not None:
+            return any(self._url_matches_route(rx, resource_identity) for rx in self._identity_route_regexes)
+        if self._identity_top_level_addresses is not None:
+            identity = resource_identity.rstrip("/")
+            return any(identity == tla or identity.startswith(tla + "/") for tla in self._identity_top_level_addresses)
+        return False
+
     def backend_throttlers(self) -> list[TaskThrottler]:
         return [self._throttler_roundtrip, self._throttler_networkdata, self._throttler_serverdata]
 
@@ -2222,7 +2264,6 @@ class StorageAPIStorageGRPC(StorageAPIStorage):
         decide whether to swallow or surface that.
         """
         max_attempts = self._metadata_max_attempts
-        base_delay = 1.0
         method_name = getattr(grpc_method, "_method", None) or getattr(grpc_method, "__name__", "metadata")
         for attempt in range(1, max_attempts + 1):
             try:
@@ -2230,7 +2271,7 @@ class StorageAPIStorageGRPC(StorageAPIStorage):
             except grpc.RpcError as e:
                 if attempt == max_attempts or not self._is_retryable_grpc_error(e):
                     raise
-                delay = base_delay * (2 ** (attempt - 1))
+                delay = _retry_delay(attempt)
                 # Per-attempt retries are routine on a transient blip; only
                 # the final-give-up path stays a WARNING. Use info so a
                 # successful retry doesn't look like an error.
@@ -2255,7 +2296,6 @@ class StorageAPIStorageGRPC(StorageAPIStorage):
     ) -> Any:
         """Run a read-side gRPC call with retries for transient proxy/backend timeouts."""
         max_attempts = self._read_max_attempts
-        base_delay = 1.0
         method_name = getattr(grpc_method, "_method", None) or getattr(grpc_method, "__name__", "read")
         for attempt in range(1, max_attempts + 1):
             try:
@@ -2263,7 +2303,7 @@ class StorageAPIStorageGRPC(StorageAPIStorage):
             except grpc.RpcError as e:
                 if attempt == max_attempts or not self._is_retryable_grpc_error(e):
                     raise
-                delay = base_delay * (2 ** (attempt - 1))
+                delay = _retry_delay(attempt)
                 logger.info(
                     "[%s] read %s attempt %d/%d failed: %s. Retrying in %.1fs...",
                     op_label,
@@ -2285,7 +2325,6 @@ class StorageAPIStorageGRPC(StorageAPIStorage):
     ) -> Any:
         """Run a read-only control-plane gRPC call with retries."""
         max_attempts = self._read_max_attempts
-        base_delay = 1.0
         method_name = getattr(grpc_method, "_method", None) or getattr(grpc_method, "__name__", "control")
         for attempt in range(1, max_attempts + 1):
             try:
@@ -2293,7 +2332,7 @@ class StorageAPIStorageGRPC(StorageAPIStorage):
             except grpc.RpcError as e:
                 if attempt == max_attempts or not self._is_retryable_grpc_error(e):
                     raise
-                delay = base_delay * (2 ** (attempt - 1))
+                delay = _retry_delay(attempt)
                 logger.info(
                     "[%s] control %s attempt %d/%d failed: %s. Retrying in %.1fs...",
                     op_label,
@@ -2316,7 +2355,6 @@ class StorageAPIStorageGRPC(StorageAPIStorage):
     ) -> _TaskReturnType:
         """Run a read-side operation with retries for retryable gRPC stream failures."""
         max_attempts = self._read_max_attempts
-        base_delay = 1.0
         for attempt in range(1, max_attempts + 1):
             try:
                 return await operation()
@@ -2325,7 +2363,7 @@ class StorageAPIStorageGRPC(StorageAPIStorage):
                     raise
                 if on_retry is not None:
                     await on_retry()
-                delay = base_delay * (2 ** (attempt - 1))
+                delay = _retry_delay(attempt)
                 logger.info(
                     "[%s] read stream attempt %d/%d failed: %s. Retrying in %.1fs...",
                     op_label,
@@ -2353,7 +2391,7 @@ class StorageAPIStorageGRPC(StorageAPIStorage):
         """
         if attempt == max_attempts or not self._is_retryable_grpc_error(error):
             return False
-        delay = 1.0 * (2 ** (attempt - 1))
+        delay = _retry_delay(attempt)
         logger.info(
             "[%s] %s stream attempt %d/%d failed: %s. Retrying in %.1fs...",
             op_label,
@@ -2373,15 +2411,25 @@ class StorageAPIStorageGRPC(StorageAPIStorage):
         Returns None when the Metadata service is unavailable, the key does not
         exist, or the call fails for any other reason.
         """
+        return await self._get_nucleus_hash_for_metadata_uri(
+            _encode_resource_address_for_storage_service(resource_address), resource_address
+        )
+
+    async def _get_nucleus_hash_for_identity(self, resource_identity: str) -> Optional[str]:
+        """Retrieve the stored nucleus hash for an exact Storage API identity."""
+
+        return await self._get_nucleus_hash_for_metadata_uri(resource_identity, repr(resource_identity))
+
+    async def _get_nucleus_hash_for_metadata_uri(self, metadata_uri: str, op_label: str) -> Optional[str]:
         if not self._metadata_api or not self._metadata_msgs:
             return None
         Stats.get().increment(StatType.GET_METADATA_ASYNC)
         try:
             response = await self._run_metadata_grpc_with_retries(
-                resource_address,
+                op_label,
                 self._metadata_api.GetMetadata,
                 self._metadata_msgs.GetMetadataRequest(
-                    uri=_encode_resource_address_for_storage_service(resource_address),
+                    uri=metadata_uri,
                     user_metadata_keys=[NUCLEUS_HASH_METADATA_KEY],
                 ),
             )
@@ -2392,55 +2440,59 @@ class StorageAPIStorageGRPC(StorageAPIStorage):
         except grpc.RpcError as e:
             if e.code() in (grpc.StatusCode.NOT_FOUND, grpc.StatusCode.UNIMPLEMENTED):
                 return None
-            logger.debug("Failed to retrieve nucleus hash metadata for %s: %s", resource_address, e)
+            logger.debug("Failed to retrieve nucleus hash metadata for %s: %s", op_label, e)
             return None
 
-    async def _set_nucleus_hash(self, resource_address: str, nucleus_hash: str) -> None:
-        """Store the nucleus hash for a resource via the Metadata API (best-effort)."""
+    async def _set_nucleus_hash_for_identity(self, resource_identity: str, nucleus_hash: str) -> None:
+        """Store a hash on the exact Storage API identity."""
+
+        await self._set_nucleus_hash_for_metadata_uri(resource_identity, repr(resource_identity), nucleus_hash)
+
+    async def _set_nucleus_hash_for_metadata_uri(self, metadata_uri: str, op_label: str, nucleus_hash: str) -> None:
         if not self._metadata_api or not self._metadata_msgs:
             return
         Stats.get().increment(StatType.SET_METADATA_ASYNC)
         try:
             await self._run_metadata_grpc_with_retries(
-                resource_address,
+                op_label,
                 self._metadata_api.UpdateMetadata,
                 self._metadata_msgs.UpdateMetadataRequest(
-                    uri=_encode_resource_address_for_storage_service(resource_address),
+                    uri=metadata_uri,
                     user_metadata_key=NUCLEUS_HASH_METADATA_KEY,
                     user_metadata=Value(string_value=nucleus_hash),
                 ),
             )
         except grpc.RpcError as e:
-            logger.warning("Failed to store nucleus hash metadata for %s: %s", resource_address, e)
+            logger.warning("Failed to store nucleus hash metadata for %s: %s", op_label, e)
 
-    async def _delete_nucleus_hash(self, resource_address: str) -> None:
-        """Remove any stored nucleus hash for a resource via the Metadata API (best-effort).
+    async def _delete_nucleus_hash_for_identity(self, resource_identity: str) -> None:
+        """Remove any stored hash from the exact Storage API identity."""
+
+        await self._delete_nucleus_hash_for_metadata_uri(resource_identity, repr(resource_identity))
+
+    async def _delete_nucleus_hash_for_metadata_uri(self, metadata_uri: str, op_label: str) -> None:
+        """Remove any stored nucleus hash via the Metadata API (best-effort).
 
         Used when an upload cannot provide a trustworthy hash: on overwrite the
         destination may still carry the previous object's hash, which must not
         be left describing the new content.
-
-        Benign race: a retried/delayed delete can remove a hash that a newer
-        concurrent upload to the same address just wrote. That leaves the hash
-        missing — re-derivable, never incorrect — which matches this method's
-        semantics.
         """
         if not self._metadata_api or not self._metadata_msgs:
             return
         Stats.get().increment(StatType.DELETE_METADATA_ASYNC)
         try:
             await self._run_metadata_grpc_with_retries(
-                resource_address,
+                op_label,
                 self._metadata_api.DeleteMetadata,
                 self._metadata_msgs.DeleteMetadataRequest(
-                    uri=_encode_resource_address_for_storage_service(resource_address),
+                    uri=metadata_uri,
                     user_metadata_key=NUCLEUS_HASH_METADATA_KEY,
                 ),
             )
         except grpc.RpcError as e:
             if e.code() in (grpc.StatusCode.NOT_FOUND, grpc.StatusCode.UNIMPLEMENTED):
                 return
-            logger.warning("Failed to delete nucleus hash metadata for %s: %s", resource_address, e)
+            logger.warning("Failed to delete nucleus hash metadata for %s: %s", op_label, e)
 
     @property
     def has_metadata_support(self) -> bool:
@@ -2489,6 +2541,10 @@ class StorageAPIStorageGRPC(StorageAPIStorage):
         if not isinstance(item, StorageAPIListEntry):
             raise TypeError("Can only generate ResourceIdentity for StorageAPI list entries")
         if item._resource_identity:
+            if not item.nucleus_hash:
+                identity_hash = await self._get_nucleus_hash_for_identity(item._resource_identity)
+                if identity_hash:
+                    item.nucleus_hash = identity_hash
             return file_url, relative_url, StorageAPIResourceIdentity(item._resource_identity)
         # AddressInfo protos from Enumerate do not carry identities. Most
         # list_file_tree callers receive entries already classified and
@@ -2512,16 +2568,17 @@ class StorageAPIStorageGRPC(StorageAPIStorage):
             raise StorageOperationError("Failed to initialize Storage API backend!")
         resource_address = await self._sanitize_address_for_storage_service(url)
         try:
-            stat_coro = self._run_read_grpc_with_retries(
+            response = await self._run_read_grpc_with_retries(
                 resource_address,
                 self._fileobject_api.Stat,
                 self._fileobject_msgs.StatRequest(resource_address=_encode_resource_address_for_storage_service(resource_address)),
             )
-            hash_coro = self._get_nucleus_hash(resource_address)
-
-            response, nucleus_hash = await asyncio.gather(stat_coro, hash_coro)
-
             entry = StorageAPIListEntry.from_resource_info(url, response.resource_info)
+            nucleus_hash = (
+                await self._get_nucleus_hash_for_identity(entry._resource_identity)
+                if entry._resource_identity
+                else await self._get_nucleus_hash(resource_address)
+            )
             if nucleus_hash:
                 entry.nucleus_hash = nucleus_hash
             return Result.OK, entry
@@ -2634,11 +2691,11 @@ class StorageAPIStorageGRPC(StorageAPIStorage):
                 async for results in enumerate_response:
                     for entry in results.items:
                         raw_entry_resource_address = entry.resource_address
-                        entry_resource_address = _decode_resource_address_from_storage_service(raw_entry_resource_address)
+                        entry_resource_address = _encode_resource_address_for_storage_service(raw_entry_resource_address)
                         if not urllib.parse.urlsplit(entry_resource_address).scheme:
                             relative_entry_address = entry_resource_address.lstrip("/\\")
                             entry_resource_address = f"{prefix.rstrip('/')}/{relative_entry_address}"
-                            relative_resource_address = relative_entry_address
+                            relative_resource_address = urllib.parse.unquote(relative_entry_address)
                         else:
                             relative_resource_address = StorageAPIListEntry.relative_resource_address(prefix, raw_entry_resource_address)
                         normalized_relative = relative_resource_address.rstrip("/\\")
@@ -2730,47 +2787,137 @@ class StorageAPIStorageGRPC(StorageAPIStorage):
     async def list_checkpoints(self, url: str) -> Tuple[Result, List[ListEntry]]:
         raise NotImplementedError
 
-    async def copy(self, src_url: str, dst_url: str, overwrite: bool = False, message: str = "") -> Result:
+    async def copy_address(
+        self,
+        src_url: str,
+        dst_url: str,
+        overwrite: bool = False,
+        message: str = "",
+    ) -> Result:
         await self._ensure_grpc_stubs()
         if not self._fileobject_api:
             raise StorageOperationError("Failed to initialize Storage API backend!")
         src_resource_address = await self._sanitize_address_for_storage_service(src_url)
         dst_resource_address = await self._sanitize_address_for_storage_service(dst_url)
 
-        if self._fileobject_version == "v1alpha":
-            try:
+        if self._fileobject_version != "v1alpha":
+            raise NotImplementedError("Storage API backend has no server-side Copy RPC; caller should use download+upload via temp file")
+
+        destination_result, destination_previous_identity = await self._destination_previous_identity(dst_url, overwrite)
+        if destination_result != Result.OK:
+            return destination_result
+
+        try:
+            if destination_previous_identity is None:
                 return await self._server_side_copy(src_resource_address, dst_resource_address)
-            except grpc.RpcError as e:
-                if e.code() == grpc.StatusCode.UNIMPLEMENTED:
-                    logger.info("Server-side Copy RPC not available, falling back to client-side copy")
-                else:
-                    raise StorageOperationError(f"Error calling server-side copy: {str(e)}") from e
+            return await self._server_side_copy(
+                src_resource_address, dst_resource_address, destination_previous_identity=destination_previous_identity
+            )
+        except grpc.RpcError as e:
+            if e.code() == grpc.StatusCode.UNIMPLEMENTED:
+                logger.info("Server-side Copy RPC not available, falling back to client-side copy")
+            else:
+                raise StorageOperationError(f"Error calling server-side copy: {str(e)}") from e
 
-        raise NotImplementedError("StorageAPI backend has no client-side copy; caller should use download+upload via temp file")
+        raise NotImplementedError("Storage API server-side Copy RPC is unavailable; caller should use download+upload via temp file")
 
-    async def _server_side_copy(self, src_resource_address: str, dst_resource_address: str) -> Result:
+    async def copy_resource_identity(
+        self,
+        resource_identity: SerializedResourceIdentity,
+        dst_url: ResourceAddress,
+        overwrite: bool = False,
+        message: str = "",
+    ) -> Result:
+        await self._ensure_grpc_stubs()
+        if not self._fileobject_api:
+            raise StorageOperationError("Failed to initialize Storage API backend!")
+        if self._fileobject_version != "v1alpha":
+            raise NotImplementedError("Storage API backend has no server-side Copy RPC; caller should use an identity read")
+
+        try:
+            source_identity = StorageAPIResourceIdentity.from_string(resource_identity).encoded_identity
+        except ValueError as e:
+            logger.error("Invalid Storage API resource identity: %s", e)
+            return Result.ERROR_BAD_REQUEST
+
+        dst_resource_address = await self._sanitize_address_for_storage_service(dst_url)
+        destination_result, destination_previous_identity = await self._destination_previous_identity(dst_url, overwrite)
+        if destination_result != Result.OK:
+            return destination_result
+
+        try:
+            return await self._server_side_copy(
+                "",
+                dst_resource_address,
+                resource_identity=source_identity,
+                destination_previous_identity=destination_previous_identity,
+            )
+        except grpc.RpcError as e:
+            if e.code() == grpc.StatusCode.UNIMPLEMENTED:
+                logger.info("Server-side Copy RPC not available, falling back to an identity read")
+            else:
+                raise StorageOperationError(f"Error calling server-side copy: {str(e)}") from e
+        raise NotImplementedError("Storage API server-side Copy RPC is unavailable; caller should use an identity read")
+
+    async def _destination_previous_identity(self, dst_url: str, overwrite: bool) -> Tuple[Result, Optional[str]]:
+        destination_result, destination_item = await self.stat(dst_url)
+        if destination_result == Result.OK:
+            if not overwrite:
+                return Result.ERROR_ALREADY_EXISTS, None
+            if not isinstance(destination_item, StorageAPIListEntry) or not destination_item._resource_identity:
+                raise StorageOperationError(f"Cannot overwrite {dst_url}: destination has no resource identity")
+            return Result.OK, destination_item._resource_identity
+        if destination_result == Result.ERROR_NOT_FOUND:
+            return Result.OK, None
+        return destination_result, None
+
+    async def _server_side_copy(
+        self,
+        src_resource_address: str,
+        dst_resource_address: str,
+        resource_identity: Optional[str] = None,
+        destination_previous_identity: Optional[str] = None,
+    ) -> Result:
         """Use the v1alpha-only Copy RPC for server-side copy."""
         assert self._fileobject_api is not None
         assert self._fileobject_msgs is not None
-        source_stat = await self._run_grpc(
-            self._throttler_roundtrip,
-            self._fileobject_api.Stat,
-            self._fileobject_msgs.StatRequest(resource_address=_encode_resource_address_for_storage_service(src_resource_address)),
-        )
-        await self._run_grpc(
+        assert self._fileobject_types is not None
+        if resource_identity is None:
+            source_stat = await self._run_grpc(
+                self._throttler_roundtrip,
+                self._fileobject_api.Stat,
+                self._fileobject_msgs.StatRequest(resource_address=_encode_resource_address_for_storage_service(src_resource_address)),
+            )
+            source_identity_token = self._resource_info_identity(source_stat)
+            if not source_identity_token:
+                raise StorageOperationError(f"Cannot copy {src_resource_address}: Stat returned no resource identity")
+        else:
+            source_identity_token = resource_identity
+        source_identity = self._fileobject_types.ResourceIdentity(encoded_identity=source_identity_token)
+        source_hash = await self._get_nucleus_hash_for_identity(source_identity_token)
+        if destination_previous_identity is not None:
+            request = self._fileobject_msgs.CopyRequest(
+                source_resource_identity=source_identity,
+                destination_resource_address=_encode_resource_address_for_storage_service(dst_resource_address),
+                previous_version=self._fileobject_types.ResourceIdentity(encoded_identity=destination_previous_identity),
+            )
+        else:
+            request = self._fileobject_msgs.CopyRequest(
+                source_resource_identity=source_identity,
+                destination_resource_address=_encode_resource_address_for_storage_service(dst_resource_address),
+            )
+        copy_response = await self._run_grpc(
             self._throttler_serverdata,
             self._fileobject_api.Copy,
-            self._fileobject_msgs.CopyRequest(
-                source_resource_identity=source_stat.resource_info.resource_identity,
-                destination_resource_address=_encode_resource_address_for_storage_service(dst_resource_address),
-            ),
+            request,
         )
-        # Best-effort hash propagation: if the source is overwritten between
-        # the Copy RPC and this read, the hash may be stale.  Acceptable
-        # because metadata is advisory and the next write will correct it.
-        src_hash = await self._get_nucleus_hash(src_resource_address)
-        if src_hash:
-            await self._set_nucleus_hash(dst_resource_address, src_hash)
+        destination_identity = getattr(getattr(copy_response, "resource_identity", None), "encoded_identity", "")
+        if not destination_identity:
+            raise StorageOperationError(f"Storage API Copy for {dst_resource_address} returned no resource identity")
+        if source_hash:
+            await self._set_nucleus_hash_for_identity(destination_identity, source_hash)
+        else:
+            await self._delete_nucleus_hash_for_identity(destination_identity)
         return Result.OK
 
     @staticmethod
@@ -2785,6 +2932,15 @@ class StorageAPIStorageGRPC(StorageAPIStorage):
             except ValueError:
                 return None
         return getattr(metadata, "data_object_size", None)
+
+    @staticmethod
+    def _resource_info_identity(response) -> Optional[str]:
+        """Return an encoded identity from a response's ResourceInfo, if present."""
+
+        resource_info = getattr(response, "resource_info", None)
+        resource_identity = getattr(resource_info, "resource_identity", None)
+        encoded_identity = getattr(resource_identity, "encoded_identity", "")
+        return encoded_identity or None
 
     @staticmethod
     def _metadata_last_modified_time(metadata) -> Optional[datetime]:
@@ -2835,18 +2991,17 @@ class StorageAPIStorageGRPC(StorageAPIStorage):
         file_path: str,
         expected_size: Optional[int],
     ) -> None:
-        downloaded_bytes = 0
-
         async def _download():
-            nonlocal downloaded_bytes
-            async with session.get(_presigned_url(redirect_target_url), headers=headers) as redirected_response:
-                redirected_response.raise_for_status()
-                with open(file_path, "wb") as f:
-                    async for chunk in redirected_response.content.iter_chunked(_STORAGEAPI_DOWNLOAD_CHUNK_SIZE):
-                        f.write(chunk)
-                        downloaded_bytes += len(chunk)
+            with open(file_path, "wb") as f:
+                return await stream_http_response_to_file(
+                    session,
+                    redirect_target_url,
+                    headers,
+                    f,
+                    chunk_size=_STORAGEAPI_DOWNLOAD_CHUNK_SIZE,
+                )
 
-        await self._throttler_networkdata.run(_download())
+        downloaded_bytes = await self._throttler_networkdata.run(_download())
         if expected_size is not None and downloaded_bytes != expected_size:
             logger.warning(
                 "Downloaded %d bytes from redirect for %s but metadata reported %d bytes",
@@ -2965,8 +3120,6 @@ class StorageAPIStorageGRPC(StorageAPIStorage):
             3,
             legacy_env_var=_LEGACY_DOWNLOAD_RETRIES_ENV_VAR,
         )
-        base_delay = 1.0
-
         for attempt in range(1, max_attempts + 1):
             try:
                 if self._enable_range_download:
@@ -2995,7 +3148,7 @@ class StorageAPIStorageGRPC(StorageAPIStorage):
             except (aiohttp.ClientError, asyncio.TimeoutError, StorageOperationError) as e:
                 if attempt == max_attempts:
                     raise
-                delay = base_delay * (2 ** (attempt - 1))
+                delay = _retry_delay(attempt)
                 logger.info(f"[{redirect_target_url}] download attempt {attempt}/{max_attempts} failed: {e}. Retrying in {delay:.1f}s...")
                 Stats.get().increment(StatType.GRPC_RETRY)
                 await asyncio.sleep(delay)
@@ -3027,16 +3180,30 @@ class StorageAPIStorageGRPC(StorageAPIStorage):
                 except FileNotFoundError:
                     pass
 
-    async def read_resource_identity(self, resource_identity: str) -> Tuple[Result, bytes]:
+    async def read_resource_identity(
+        self,
+        resource_identity: SerializedResourceIdentity,
+        *,
+        expected_hash: Optional[str] = None,
+    ) -> Tuple[Result, bytes]:
         await self._ensure_grpc_stubs()
         if not self._fileobject_api:
             raise StorageOperationError("Failed to initialize Storage API backend!")
         try:
+            encoded_identity = StorageAPIResourceIdentity.from_string(resource_identity).encoded_identity
+        except ValueError as e:
+            logger.error("Invalid Storage API resource identity: %s", e)
+            return Result.ERROR_BAD_REQUEST, b""
+        try:
             return await self._run_read_operation_with_retries(
-                resource_identity,
-                lambda: self._read_resource_identity_once(resource_identity),
+                encoded_identity,
+                lambda: self._read_resource_identity_once(encoded_identity),
             )
         except grpc.RpcError as e:
+            if e.code() == grpc.StatusCode.NOT_FOUND:
+                return Result.ERROR_NOT_FOUND, b""
+            if e.code() == grpc.StatusCode.INVALID_ARGUMENT:
+                return Result.ERROR_BAD_REQUEST, b""
             raise StorageOperationError(f"Error calling read: {str(e)}") from e
 
     async def _read_resource_identity_once(self, resource_identity: str) -> Tuple[Result, bytes]:
@@ -3127,15 +3294,26 @@ class StorageAPIStorageGRPC(StorageAPIStorage):
         except grpc.RpcError:
             raise
 
-    async def _download_to_file(self, src_url: str, file_path: str) -> Result:
+    async def _download_to_file(
+        self,
+        src_url: str,
+        file_path: str,
+        *,
+        resource_identity: Optional[str] = None,
+    ) -> Result:
         await self._ensure_grpc_stubs()
         if not self._fileobject_api:
             raise StorageOperationError("Failed to initialize Storage API backend!")
-        resource_address = await self._sanitize_address_for_storage_service(src_url)
+        resource_address = resource_identity if resource_identity is not None else await self._sanitize_address_for_storage_service(src_url)
         attempt_path = f"{file_path}.wrapp-download-{secrets.token_hex(8)}.tmp"
 
         async def _download_once_to_temp_file() -> Result:
-            result = await self._download_to_file_once(src_url, attempt_path, resource_address)
+            result = await self._download_to_file_once(
+                src_url,
+                attempt_path,
+                resource_address,
+                read_by_identity=resource_identity is not None,
+            )
             if result == Result.OK:
                 os.replace(attempt_path, file_path)
             else:
@@ -3158,12 +3336,28 @@ class StorageAPIStorageGRPC(StorageAPIStorage):
             await _remove_partial_download()
             if e.code() == grpc.StatusCode.NOT_FOUND:
                 return Result.ERROR_NOT_FOUND
+            if e.code() == grpc.StatusCode.INVALID_ARGUMENT:
+                return Result.ERROR_BAD_REQUEST
             raise StorageOperationError(f"Error calling read: {str(e)}") from e
 
-    async def _download_to_file_once(self, src_url: str, file_path: str, resource_address: str) -> Result:
-        request = self._fileobject_msgs.ReadFromAddressRequest(
-            resource_address=_encode_resource_address_for_storage_service(resource_address)
-        )
+    async def _download_to_file_once(
+        self,
+        src_url: str,
+        file_path: str,
+        resource_address: str,
+        *,
+        read_by_identity: bool = False,
+    ) -> Result:
+        if read_by_identity:
+            request = self._fileobject_msgs.ReadRequest(
+                resource_identity=self._fileobject_types.ResourceIdentity(encoded_identity=resource_address)
+            )
+            read_rpc = self._fileobject_api.Read
+        else:
+            request = self._fileobject_msgs.ReadFromAddressRequest(
+                resource_address=_encode_resource_address_for_storage_service(resource_address)
+            )
+            read_rpc = self._fileobject_api.ReadFromAddress
 
         async def _throttled_grpc_download() -> Tuple[Optional[Any], Optional[int], Result]:
             """Drain the Read stream under ONE held NetworkDataTransfer slot.
@@ -3185,13 +3379,13 @@ class StorageAPIStorageGRPC(StorageAPIStorage):
             dst_file = None
             grpc_metadata = await self._grpc_metadata()
             if grpc_metadata:
-                stream = self._fileobject_api.ReadFromAddress(request, metadata=grpc_metadata)
+                stream = read_rpc(request, metadata=grpc_metadata)
             else:
-                stream = self._fileobject_api.ReadFromAddress(request)
+                stream = read_rpc(request)
             try:
                 async for reply in stream:
-                    if reply.HasField("resource_info"):
-                        metadata = reply.resource_info.metadata
+                    if (read_by_identity and reply.HasField("metadata")) or (not read_by_identity and reply.HasField("resource_info")):
+                        metadata = reply.metadata if read_by_identity else reply.resource_info.metadata
                         if metadata.HasField("data_object_size"):
                             expected_size = metadata.data_object_size
                         logger.debug(f"Found {src_url}, downloading {expected_size if expected_size is not None else 'unknown'} bytes")
@@ -3265,20 +3459,21 @@ class StorageAPIStorageGRPC(StorageAPIStorage):
         if not self._fileobject_api:
             raise StorageOperationError("Failed to initialize Storage API backend!")
         resource_address = await self._sanitize_address_for_storage_service(file_url)
-        result, sent_hash = await self._write_source_content(resource_address, _WriteSource.from_bytes(content))
+        result, sent_hash, written_identity = await self._write_source_content(resource_address, _WriteSource.from_bytes(content))
         if result == Result.OK:
             if sent_hash is None:
                 sent_hash, _ = calc_nucleus_hash_from_stream(io.BytesIO(content))
-            await self._set_nucleus_hash(resource_address, sent_hash)
+            if written_identity:
+                await self._set_nucleus_hash_for_identity(written_identity, sent_hash)
         return result
 
     async def write_file_content(self, resource_address: str, content: bytes) -> Result:
         """Upload the contents of a file object at the specified address."""
-        result, _ = await self._write_source_content(resource_address, _WriteSource.from_bytes(content))
+        result, _, _ = await self._write_source_content(resource_address, _WriteSource.from_bytes(content))
         return result
 
-    async def _write_source_content(self, resource_address: str, source: _WriteSource) -> Tuple[Result, Optional[str]]:
-        """Upload the source's content; returns the result and the nucleus hash of the bytes actually sent.
+    async def _write_source_content(self, resource_address: str, source: _WriteSource) -> Tuple[Result, Optional[str], Optional[str]]:
+        """Upload content and return result, sent-byte hash, and created identity.
 
         The hash is computed from the bytes each transport streams out, so the
         stored hash can never go stale relative to the uploaded content, even if
@@ -3291,7 +3486,6 @@ class StorageAPIStorageGRPC(StorageAPIStorage):
             3,
             legacy_env_var=_LEGACY_UPLOAD_RETRIES_ENV_VAR,
         )
-        base_delay = 1.0
 
         for attempt in range(1, max_attempts + 1):
             try:
@@ -3299,57 +3493,74 @@ class StorageAPIStorageGRPC(StorageAPIStorage):
             except grpc.RpcError as e:
                 if attempt == max_attempts or not self._is_retryable_grpc_error(e):
                     raise StorageOperationError(f"Error calling Write for {resource_address}: {str(e)}") from e
-                delay = base_delay * (2 ** (attempt - 1))
+                delay = _retry_delay(attempt)
                 logger.info(f"[{resource_address}] gRPC write attempt {attempt}/{max_attempts} failed: {e}. Retrying in {delay:.1f}s...")
                 Stats.get().increment(StatType.GRPC_RETRY)
                 await asyncio.sleep(delay)
 
         raise AssertionError("_write_source_content retry loop exited without returning or raising")
 
-    async def _write_file_content_once(self, resource_address: str, source: "_WriteSource") -> Tuple[Result, Optional[str]]:
+    async def _write_file_content_once(self, resource_address: str, source: "_WriteSource") -> Tuple[Result, Optional[str], Optional[str]]:
         """Upload once using a fresh request stream; see _write_source_content for the return contract."""
         assert self._fileobject_msgs is not None
         assert self._fileobject_types is not None
         content_length = source.size
         # Fresh per attempt: hashes the bytes this attempt actually sends.
         sent_hasher = IncrementalNucleusHasher()
-        async with _write_message_queue_async() as (requests, request_iterator):
-            await requests.put(
-                self._fileobject_msgs.WriteRequest(
-                    params=self._fileobject_msgs.WriteParameters(
-                        destination_resource_address=_encode_resource_address_for_storage_service(resource_address),
-                        data_object_size=content_length,
+        flow_control_message = None
+
+        async def _throttled_grpc_write() -> Tuple[Optional[Any], Optional[Tuple[Result, Optional[str], Optional[str]]]]:
+            """Run one Write RPC under a single held NetworkDataTransfer slot.
+
+            The stream is created only after this task holds the slot, and body
+            uploads keep request params, source reads, chunk sends, and the final
+            resource_info response in the same acquisition. Redirect and multipart
+            replies are returned to the caller so their upload handlers can acquire
+            their own slots after this one is released.
+            """
+            async with _write_message_queue_async() as (requests, request_iterator):
+                await requests.put(
+                    self._fileobject_msgs.WriteRequest(
+                        params=self._fileobject_msgs.WriteParameters(
+                            destination_resource_address=_encode_resource_address_for_storage_service(resource_address),
+                            data_object_size=content_length,
+                        ),
                     ),
-                ),
-            )
+                )
 
-            write_responses = self._iterate_grpc(self._throttler_networkdata, self._fileobject_api.Write, request_iterator)
+                grpc_metadata = await self._grpc_metadata()
+                if grpc_metadata:
+                    write_responses = aiter(self._fileobject_api.Write(request_iterator, metadata=grpc_metadata))
+                else:
+                    write_responses = aiter(self._fileobject_api.Write(request_iterator))
 
-            flow_control_message = await anext(aiter(write_responses))
+                flow_control_response = await anext(write_responses)
 
-            # A service may immediately respond with a "resource info" message, meaning that a 0-byte object write has
-            # been performed immediately without the need for any further actions on the client end.
-            if flow_control_message.HasField("resource_info"):
-                if content_length == 0:
-                    # The server wrote the object without the client ever opening the
-                    # source; make sure it is still the 0-byte file that was advertised
-                    # (OMPE-74369).
-                    source.ensure_unchanged()
-                    empty_hash, _ = sent_hasher.finalize()
-                    return Result.OK, empty_hash
-                return Result.ERROR, None
+                # A service may immediately respond with a "resource info" message, meaning that a 0-byte object write has
+                # been performed immediately without the need for any further actions on the client end.
+                if flow_control_response.HasField("resource_info"):
+                    if content_length == 0:
+                        # The server wrote the object without the client ever opening the
+                        # source; make sure it is still the 0-byte file that was advertised
+                        # (OMPE-74369).
+                        source.ensure_unchanged()
+                        empty_hash, _ = sent_hasher.finalize()
+                        written_identity = self._resource_info_identity(flow_control_response)
+                        if not written_identity:
+                            raise StorageOperationError(f"Storage API Write for {resource_address} returned no resource identity")
+                        return None, (Result.OK, empty_hash, written_identity)
+                    return None, (Result.ERROR, None, None)
 
-            # If we receive a "write chunks accepted" message, stream the chunks and finally await for a "resource info"
-            # response message.
-            if flow_control_message.HasField("write_chunks_accepted"):
-                Chunk = self._fileobject_types.Chunk
-                WReq = self._fileobject_msgs.WriteRequest
+                # If we receive a "write chunks accepted" message, stream the chunks and finally await for a "resource info"
+                # response message.
+                if flow_control_response.HasField("write_chunks_accepted"):
+                    Chunk = self._fileobject_types.Chunk
+                    WReq = self._fileobject_msgs.WriteRequest
 
-                async def _stream_chunks() -> None:
                     # The source is opened and read only while this task holds ONE
-                    # NetworkDataTransfer slot for the whole data transfer; previously
-                    # the chunk loop ran unthrottled with the entire file in memory
-                    # (OMPE-74369). Nothing in here may re-acquire networkdata.
+                    # NetworkDataTransfer slot for the whole Write RPC; previously
+                    # the raw stream stayed open across throttler re-acquisition
+                    # points (OMPE-107621). Nothing in here may re-acquire networkdata.
                     with source.open() as f_src:
                         while True:
                             data = f_src.read(_STORAGEAPI_WRITE_CHUNK_SIZE)
@@ -3358,43 +3569,66 @@ class StorageAPIStorageGRPC(StorageAPIStorage):
                             sent_hasher.update(data)
                             await requests.put(WReq(chunk=Chunk(chunk=data)))
 
-                await self._throttler_networkdata.run(_stream_chunks())
-                # End chunk transmission.
-                await requests.put(None)
-                resource_info_response = await anext(aiter(write_responses))
-                if resource_info_response.HasField("resource_info"):
-                    sent_hash, _ = sent_hasher.finalize()
-                    return Result.OK, sent_hash
-                else:
+                    # End chunk transmission.
+                    await requests.put(None)
+                    resource_info_response = await anext(write_responses)
+                    if resource_info_response.HasField("resource_info"):
+                        sent_hash, _ = sent_hasher.finalize()
+                        written_identity = self._resource_info_identity(resource_info_response)
+                        if not written_identity:
+                            raise StorageOperationError(f"Storage API Write for {resource_address} returned no resource identity")
+                        return None, (Result.OK, sent_hash, written_identity)
                     # Resource info message is expected.
-                    return Result.ERROR, None
+                    return None, (Result.ERROR, None, None)
+
+                return flow_control_response, None
+
+        try:
+            flow_control_message, completed_result = await self._throttler_networkdata.run(_throttled_grpc_write())
+        except grpc.RpcError as e:
+            # Mirror _iterate_grpc's UNAUTHENTICATED handling for the raw stream.
+            if e.code() != grpc.StatusCode.UNAUTHENTICATED or not await self._try_refresh_auth():
+                raise
+            sent_hasher = IncrementalNucleusHasher()
+            flow_control_message, completed_result = await self._throttler_networkdata.run(_throttled_grpc_write())
+
+        if completed_result is not None:
+            return completed_result
 
         # Write redirect and multipart upload methods don't operate over the same stream of Write requests, so we should
         # close the write stream.
-        if flow_control_message.HasField("write_redirect"):
+        if flow_control_message is not None and flow_control_message.HasField("write_redirect"):
             redirect_response = await self._write_via_redirect(flow_control_message.write_redirect, source, sent_hasher)
             if 200 <= redirect_response.status < 300:
-                await self._complete_redirect_upload(resource_address, flow_control_message.write_redirect, redirect_response)
+                completion_supported, written_identity = await self._complete_redirect_upload(
+                    resource_address, flow_control_message.write_redirect, redirect_response
+                )
+                if completion_supported and not written_identity:
+                    raise StorageOperationError(f"Storage API CompleteRedirectUpload for {resource_address} returned no resource identity")
                 if sent_hasher.is_valid and sent_hasher.size == content_length:
                     sent_hash, _ = sent_hasher.finalize()
-                    return Result.OK, sent_hash
-                return Result.OK, None
+                    return Result.OK, sent_hash, written_identity
+                return Result.OK, None, written_identity
             else:
                 raise StorageOperationError(
                     f"Failed to write to redirect URL {flow_control_message.write_redirect.redirect_target_url}: {redirect_response.status}"
                 )
 
-        if flow_control_message.HasField("multipart_upload"):
-            multipart_result = await self._write_via_multipart(flow_control_message.multipart_upload, resource_address, source, sent_hasher)
+        if flow_control_message is not None and flow_control_message.HasField("multipart_upload"):
+            multipart_result, written_identity = await self._write_via_multipart(
+                flow_control_message.multipart_upload, resource_address, source, sent_hasher
+            )
+            if multipart_result == Result.OK and not written_identity:
+                raise StorageOperationError(f"Storage API multipart Write for {resource_address} returned no resource identity")
             if multipart_result == Result.OK and sent_hasher.is_valid and sent_hasher.size == content_length:
                 sent_hash, _ = sent_hasher.finalize()
-                return multipart_result, sent_hash
-            return multipart_result, None
+                return multipart_result, sent_hash, written_identity
+            return multipart_result, None, written_identity
 
         # "Unexpected flow control message."
-        return Result.ERROR, None
+        return Result.ERROR, None, None
 
-    async def _complete_redirect_upload(self, resource_address: str, parameters, response) -> None:
+    async def _complete_redirect_upload(self, resource_address: str, parameters, response) -> Tuple[bool, Optional[str]]:
         """Synchronously register a redirect upload via CompleteRedirectUpload.
 
         The RPC is optional in the protocol, but servers that otherwise learn of
@@ -3408,7 +3642,7 @@ class StorageAPIStorageGRPC(StorageAPIStorage):
                 for name in getattr(parameters, "completion_header_names", [])
                 if name in response.headers
             ]
-            await self._run_grpc(
+            completion = await self._run_grpc(
                 self._throttler_roundtrip,
                 self._fileobject_api.CompleteRedirectUpload,
                 self._fileobject_msgs.CompleteRedirectUploadRequest(
@@ -3416,8 +3650,10 @@ class StorageAPIStorageGRPC(StorageAPIStorage):
                     additional_headers=headers,
                 ),
             )
+            return True, self._resource_info_identity(completion)
         except grpc.RpcError as e:
             logger.info(f"CompleteRedirectUpload not accepted for {resource_address} ({e.code()}); " "relying on server-side registration")
+            return False, None
 
     async def _write_via_redirect(
         self, parameters, source: "_WriteSource", sent_hasher: Optional[IncrementalNucleusHasher] = None
@@ -3427,7 +3663,6 @@ class StorageAPIStorageGRPC(StorageAPIStorage):
             3,
             legacy_env_var=_LEGACY_UPLOAD_RETRIES_ENV_VAR,
         )
-        base_delay = 1.0
 
         for attempt in range(1, max_attempts + 1):
             try:
@@ -3470,7 +3705,7 @@ class StorageAPIStorageGRPC(StorageAPIStorage):
             except (aiohttp.ClientError, asyncio.TimeoutError) as e:
                 if attempt == max_attempts:
                     raise StorageOperationError(f"Failure to HTTP upload data to {parameters.redirect_target_url}: {str(e)}") from e
-                delay = base_delay * (2 ** (attempt - 1))
+                delay = _retry_delay(attempt)
                 logger.info(
                     f"[{parameters.redirect_target_url}] upload attempt {attempt}/{max_attempts} failed: {e}. " f"Retrying in {delay:.1f}s…"
                 )
@@ -3480,7 +3715,7 @@ class StorageAPIStorageGRPC(StorageAPIStorage):
 
     async def _write_via_multipart(
         self, parameters, resource_address: str, source: "_WriteSource", sent_hasher: Optional[IncrementalNucleusHasher] = None
-    ) -> Result:
+    ) -> Tuple[Result, Optional[str]]:
         if not self._fileobject_api:
             raise StorageOperationError("Failed to initialize Storage API backend!")
         # Calculate the number of parts
@@ -3537,7 +3772,7 @@ class StorageAPIStorageGRPC(StorageAPIStorage):
                         raise StorageOperationError(f"Part upload response missing required return header: '{requested_header}'")
                 completed_parts.append(self._fileobject_msgs.CompletedUploadPart(part_number=part_number, headers=return_headers))
 
-            await self._run_grpc(
+            completion = await self._run_grpc(
                 self._throttler_roundtrip,
                 self._fileobject_api.CompleteMultipartUpload,
                 self._fileobject_msgs.CompleteMultipartUploadRequest(
@@ -3546,7 +3781,7 @@ class StorageAPIStorageGRPC(StorageAPIStorage):
                     parts=completed_parts,
                 ),
             )
-            return Result.OK
+            return Result.OK, self._resource_info_identity(completion)
         except grpc.RpcError as e:
             raise StorageOperationError(f"Error calling MultipartUpload Write: {str(e)}")
 
@@ -3611,13 +3846,14 @@ class StorageAPIStorageGRPC(StorageAPIStorage):
         return Result.OK
 
     async def upload_file(self, src_url: str, dst_url: str, overwrite: bool, message: Optional[str] = None) -> Result:
+        """Upload a native local path or an escaped file URL to this backend."""
         if not is_file_url(src_url):
             raise RuntimeError(f"{src_url} is not a file")
         if not overwrite:
             stat_result, entry = await self.stat(dst_url)
             if stat_result == Result.OK:
                 return Result.ERROR_ALREADY_EXISTS
-        file_path = get_path_from_url(src_url)
+        file_path = file_url_to_path(src_url)
         await self._ensure_grpc_stubs()
         if not self._fileobject_api:
             raise StorageOperationError("Failed to initialize Storage API backend!")
@@ -3631,37 +3867,65 @@ class StorageAPIStorageGRPC(StorageAPIStorage):
             # read exactly once. The stat snapshot taken here still rejects
             # detectably-changed sources early (see _WriteSource).
             source = _WriteSource.from_path(file_path)
-            result, sent_hash = await self._write_source_content(resource_address, source)
+            result, sent_hash, written_identity = await self._write_source_content(resource_address, source)
         except FileNotFoundError:
             return Result.ERROR_NOT_FOUND
         except PermissionError as e:
             logger.error(f"Storage API upload_file, permission error {src_url}: {e}")
             return Result.ERROR_ACCESS_DENIED
         if result == Result.OK:
-            if sent_hash is None:
+            if not written_identity:
+                # CompleteRedirectUpload is optional. A successful redirect
+                # upload may therefore have no immediately returned identity;
+                # the service registers it asynchronously in that case.
+                pass
+            elif sent_hash is None:
                 # The transferred bytes could not be observed (e.g. the request body
                 # was not read sequentially). Never hash the mutable path after the
                 # fact — that could store a hash of different bytes than were
                 # uploaded. Leave the hash metadata unset instead; a missing nucleus
                 # hash is an accepted state (like writes without a metadata service).
-                # An overwritten destination may still carry the previous object's
-                # hash, which must not be left describing the new content.
                 logger.warning(f"Not storing a nucleus hash for {dst_url}: the uploaded bytes could not be hashed while streaming")
-                await self._delete_nucleus_hash(resource_address)
+                await self._delete_nucleus_hash_for_identity(written_identity)
             else:
-                await self._set_nucleus_hash(resource_address, sent_hash)
+                await self._set_nucleus_hash_for_identity(written_identity, sent_hash)
         return result
 
     async def download_file(self, src_url: str, dst_url: str, overwrite: bool) -> Result:
+        """Download an address to a native path or an escaped file URL."""
         if not is_file_url(dst_url):
             raise RuntimeError(f"{dst_url} is not a file url")
-        file_path = get_path_from_url(dst_url)
+        file_path = file_url_to_path(dst_url)
         if not overwrite and os.path.exists(file_path):
             return Result.ERROR_ALREADY_EXISTS
         if os.path.isdir(file_path):
             return Result.ERROR_WRONG_TYPE
         os.makedirs(os.path.dirname(file_path), exist_ok=True)
         return await self._download_to_file(src_url, file_path)
+
+    async def download_resource_identity(
+        self,
+        resource_identity: SerializedResourceIdentity,
+        dst_url: ResourceAddress,
+        overwrite: bool,
+        *,
+        expected_hash: Optional[str] = None,
+    ) -> Result:
+        """Download identity-locked bytes to the literal local destination path."""
+        try:
+            encoded_identity = StorageAPIResourceIdentity.from_string(resource_identity).encoded_identity
+        except ValueError as e:
+            logger.error("Invalid Storage API resource identity: %s", e)
+            return Result.ERROR_BAD_REQUEST
+        if not is_file_url(dst_url):
+            raise RuntimeError(f"{dst_url} is not a file url")
+        file_path = file_url_to_path(dst_url)
+        if not overwrite and os.path.exists(file_path):
+            return Result.ERROR_ALREADY_EXISTS
+        if os.path.isdir(file_path):
+            return Result.ERROR_WRONG_TYPE
+        os.makedirs(os.path.dirname(file_path), exist_ok=True)
+        return await self._download_to_file(repr(resource_identity), file_path, resource_identity=encoded_identity)
 
 
 @asynccontextmanager

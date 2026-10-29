@@ -13,13 +13,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import importlib
 import json
 import os
 from datetime import (
     datetime,
     timezone,
 )
-from types import SimpleNamespace
 from typing import (
     Tuple,
 )
@@ -27,7 +27,10 @@ from typing import (
 import pytest
 
 import wrapp
-from wrapp.commands.build_manifest import _validate_manifest_stat
+from wrapp.commands.build_manifest import (
+    _manifest_entry_from_catalog_item,
+    _resource_identity_for_manifest_item,
+)
 from wrapp.datastructures.catalog import CatalogItem
 from wrapp.datastructures.package import (
     PackageInfo,
@@ -36,7 +39,6 @@ from wrapp.datastructures.package import (
 from wrapp.repo.repository import Repository
 from wrapp.utils.utils import (
     FailedCommand,
-    StorageOperationError,
 )
 
 from .common import (
@@ -45,9 +47,18 @@ from .common import (
     join_paths,
     run_wrapp,
 )
+from .storage_test_helpers import StorageBackendForTests
+
+build_manifest_module = importlib.import_module("wrapp.commands.build_manifest")
 
 # Note: Fixtures from wrapp_test_fixtures are available via conftest.py plugin registration
 # Do not import them directly to avoid duplicate module loading
+
+
+@pytest.fixture
+def identity_backend(storage_backend_type):
+    if storage_backend_type not in (StorageBackendForTests.STORAGEAPI, StorageBackendForTests.STORAGEAPI_WITH_ENUMERATE):
+        pytest.skip("Storage-core manifests require Storage API identities")
 
 
 def _manifest_files(manifest_data):
@@ -75,15 +86,51 @@ def compare_manifest_with_catalog(manifest_data, expected: wrapp.Catalog, *, min
         if minimal_format:
             assert "resource_identity" in item
             assert "resource_info" not in item
-            assert isinstance(item["resource_identity"], str)
+            assert isinstance(item["resource_identity"], str) and item["resource_identity"]
         else:
             assert "resource_identity" not in item
             assert "resource_info" in item
             resource_info = item["resource_info"]
-            assert isinstance(resource_info["resource_identity"], str)
+            assert isinstance(resource_info["resource_identity"], str) and resource_info["resource_identity"]
             assert isinstance(resource_info["size"], int)
             assert resource_info["modified_time"].endswith("Z")
             datetime.fromisoformat(resource_info["modified_time"].replace("Z", "+00:00"))
+
+
+@pytest.mark.asyncio
+async def test_manifest_preserves_catalog_resource_identity(monkeypatch):
+    recorded_identity = "storage-identity://immutable/catalog-version"
+    item = CatalogItem(
+        relative_path="asset.usd",
+        source_path="storage-address://mutable/asset.usd",
+        resource_identity_v2=recorded_identity,
+        hash="sha-256-flat;1048576;catalogued",
+        size=10,
+    )
+
+    async def fail_if_reconstructed(*_args, **_kwargs):
+        pytest.fail("A manifest must not reconstruct an existing catalog identity from source_path")
+
+    monkeypatch.setattr(build_manifest_module, "wrapp_stat", fail_if_reconstructed)
+    monkeypatch.setattr(build_manifest_module, "wrapp_resource_identity_for_manifest", lambda token, **kw: token)
+
+    assert await _resource_identity_for_manifest_item(item) == recorded_identity
+
+
+@pytest.mark.asyncio
+async def test_manifest_does_not_treat_source_address_as_resource_identity(monkeypatch):
+    item = CatalogItem(
+        relative_path="asset.usd",
+        source_path="storage-address://mutable/asset.usd",
+    )
+
+    async def unexpected_stat(*_args, **_kwargs):
+        pytest.fail("Manifest generation must not stat a content address")
+
+    monkeypatch.setattr(build_manifest_module, "wrapp_stat", unexpected_stat)
+
+    with pytest.raises(FailedCommand, match="asset.usd.*resource_identity_v2"):
+        await _resource_identity_for_manifest_item(item)
 
 
 async def create_example_repo_structure(test_folder_url, storage_backend) -> Tuple[str, wrapp.Catalog, str]:
@@ -109,7 +156,7 @@ async def create_example_repo_structure(test_folder_url, storage_backend) -> Tup
 
 
 @pytest.mark.asyncio
-async def test_build_manifest_from_workspace_file(local_tmp_folder, test_folder_url, cli_runner, storage_backend):
+async def test_build_manifest_from_workspace_file(local_tmp_folder, test_folder_url, cli_runner, storage_backend, identity_backend):
     """Test build-manifest with a workspace file (not in repository)."""
     # Create a wrapp file in the workspace
     workspace_dir = join_paths(test_folder_url, "workspace")
@@ -137,7 +184,7 @@ async def test_build_manifest_from_workspace_file(local_tmp_folder, test_folder_
 
 
 @pytest.mark.asyncio
-async def test_build_manifest_api_returns_persistent_model(test_folder_url, storage_backend):
+async def test_build_manifest_api_returns_persistent_model(test_folder_url, storage_backend, identity_backend):
     """Test build_manifest returns the WRAPP persistent manifest model."""
     workspace_dir = join_paths(test_folder_url, "api_workspace")
     test_package = await generate_named_package(storage_backend, "api_package", "1.0.0", workspace_dir, prefix="api_", create_catalog=True)
@@ -150,7 +197,7 @@ async def test_build_manifest_api_returns_persistent_model(test_folder_url, stor
 
 
 @pytest.mark.asyncio
-async def test_build_manifest_minimal_format(local_tmp_folder, test_folder_url, cli_runner, storage_backend):
+async def test_build_manifest_minimal_format(local_tmp_folder, test_folder_url, cli_runner, storage_backend, identity_backend):
     """Test build-manifest --minimal-format keeps the top-level manifest object."""
     workspace_dir = join_paths(test_folder_url, "minimal_workspace")
     test_package = await generate_named_package(
@@ -169,7 +216,7 @@ async def test_build_manifest_minimal_format(local_tmp_folder, test_folder_url, 
 
 
 @pytest.mark.asyncio
-async def test_build_manifest_repository_file(local_tmp_folder, cli_runner, test_folder_url, storage_backend):
+async def test_build_manifest_repository_file(local_tmp_folder, cli_runner, test_folder_url, storage_backend, identity_backend):
     """Test build-manifest with a repository file."""
     wrapp_file, package_catalog, _repo_root = await create_example_repo_structure(test_folder_url, storage_backend)
 
@@ -214,7 +261,7 @@ async def test_build_manifest_output_file_exists(local_tmp_folder, cli_runner, w
 
 
 @pytest.mark.asyncio
-async def test_build_manifest_output_file_exists_with_overwrite(local_tmp_folder, cli_runner, wrapp_init):
+async def test_build_manifest_failure_preserves_output_even_with_overwrite(local_tmp_folder, cli_runner, wrapp_init):
     # Create a simple package info for testing
     test_wrapp_file = os.path.join(local_tmp_folder, "test_wrapp.wrapp")
     package_info = PackageInfo(name="test", version="1.0.0")
@@ -225,14 +272,11 @@ async def test_build_manifest_output_file_exists_with_overwrite(local_tmp_folder
     with open(output_file, "w") as f:
         f.write("existing content")
 
-    # Run with --overwrite should succeed
-    run_wrapp(cli_runner, ["build-manifest", test_wrapp_file, output_file, "--overwrite"])
+    # Local files cannot provide durable identities; --overwrite must not truncate the output on failure.
+    run_wrapp(cli_runner, ["build-manifest", test_wrapp_file, output_file, "--overwrite"], 1)
 
-    # Check that the file was overwritten
     with open(output_file, "r") as f:
-        manifest_data = json.load(f)
-    assert isinstance(manifest_data, dict)
-    assert isinstance(manifest_data["files"], list)
+        assert f.read() == "existing content"
 
 
 @pytest.mark.asyncio
@@ -270,54 +314,29 @@ async def test_build_manifest_invalid_wrapp_file(local_tmp_folder, cli_runner):
     run_wrapp(cli_runner, ["build-manifest", invalid_file, output_file], 1)
 
 
-def _manifest_catalog_item() -> CatalogItem:
-    """A minimal CatalogItem whose source_path appears in the error messages."""
-    return CatalogItem(source_path="/repo/file.bin", relative_path="file.bin")
+@pytest.mark.asyncio
+@pytest.mark.parametrize("missing", ["size", "modified_time"])
+async def test_manifest_missing_recorded_metadata_requires_validated_rebuild(missing):
+    item = CatalogItem(
+        source_path="/repo/file.bin",
+        relative_path="file.bin",
+        size=42,
+        modified_time=datetime(2024, 1, 1, tzinfo=timezone.utc),
+        resource_identity_v2="storage-identity://recorded",
+    )
+    setattr(item, missing, None)
+    with pytest.raises(FailedCommand, match=f"{missing}.*validated catalog rebuild"):
+        await _manifest_entry_from_catalog_item(item, minimal_format=False)
 
 
-def _good_stat_item() -> SimpleNamespace:
-    """A well-formed stat item mirroring the ListEntry attributes used by _validate_manifest_stat."""
-    return SimpleNamespace(
-        is_regular_file=True,
+@pytest.mark.asyncio
+@pytest.mark.parametrize("minimal", [False, True])
+async def test_manifest_complete_recorded_metadata_still_requires_identity(minimal):
+    item = CatalogItem(
+        source_path="storage-address://repo/file.bin",
+        relative_path="file.bin",
         size=42,
         modified_time=datetime(2024, 1, 1, tzinfo=timezone.utc),
     )
-
-
-def test_validate_manifest_stat_none_raises_storage_operation_error():
-    """stat_item is None -> StorageOperationError."""
-    item = _manifest_catalog_item()
-    with pytest.raises(StorageOperationError, match=f"Failed to stat manifest item {item.source_path}"):
-        _validate_manifest_stat(item, None)
-
-
-def test_validate_manifest_stat_not_regular_file_raises_failed_command():
-    """stat_item.is_regular_file is False -> FailedCommand."""
-    item = _manifest_catalog_item()
-    stat_item = _good_stat_item()
-    stat_item.is_regular_file = False
-    with pytest.raises(FailedCommand, match=f"Manifest item {item.source_path} is not a regular file"):
-        _validate_manifest_stat(item, stat_item)
-
-
-def test_validate_manifest_stat_missing_size_raises_failed_command():
-    """stat_item.size is None -> FailedCommand."""
-    item = _manifest_catalog_item()
-    stat_item = _good_stat_item()
-    stat_item.size = None
-    with pytest.raises(FailedCommand, match=f"Manifest item {item.source_path} has no size metadata"):
-        _validate_manifest_stat(item, stat_item)
-
-
-def test_validate_manifest_stat_missing_modified_time_raises_failed_command():
-    """stat_item.modified_time is None -> FailedCommand."""
-    item = _manifest_catalog_item()
-    stat_item = _good_stat_item()
-    stat_item.modified_time = None
-    with pytest.raises(FailedCommand, match=f"Manifest item {item.source_path} has no modified_time metadata"):
-        _validate_manifest_stat(item, stat_item)
-
-
-def test_validate_manifest_stat_well_formed_does_not_raise():
-    """A well-formed stat item does not raise."""
-    _validate_manifest_stat(_manifest_catalog_item(), _good_stat_item())
+    with pytest.raises(FailedCommand, match="file.bin.*resource_identity_v2"):
+        await _manifest_entry_from_catalog_item(item, minimal_format=minimal)

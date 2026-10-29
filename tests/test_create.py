@@ -25,11 +25,20 @@ from wrapp.datastructures.command_context import (
     SchedulingParameters,
     WrappScheduler,
 )
+from wrapp.datastructures.package import (
+    load_package_setup,
+    wrapp_file_in_repo,
+)
+from wrapp.repo.repository import Repository
 from wrapp.utils.storage import (
     wrapp_delete_item,
     wrapp_url_exists,
 )
-from wrapp.utils.utils import join_paths
+from wrapp.utils.utils import (
+    FailedCommand,
+    join_paths,
+    normalize_url,
+)
 
 
 def test_create(cli_runner, test_folder_url, authenticator, source_package):
@@ -139,6 +148,47 @@ async def test_create_with_missing_dependency_OMPE48853(test_folder_url, storage
     # Check that the content exists, but not the subwrapp file (the files of the subpackage have been collected by the top level package)
     assert await wrapp_url_exists(join_paths(target_dir, "subpath", "csource_package", "ctestfile.txt"))
     assert not await wrapp_url_exists(join_paths(target_dir, "subpath", ".subpackage.wrapp"))
+
+
+@pytest.mark.asyncio
+async def test_create_strip_source(test_folder_url, authenticator, source_package):
+    """--strip-source clears the source and repository provenance in the created .wrapp file (OMPE-51673)."""
+    repo = Repository(repo_url=test_folder_url)
+    await wrapp.create("strip_pkg", "v1", source_package, catalog=False, repo=test_folder_url, strip_source=True)
+
+    created = await load_package_setup(wrapp_file_in_repo(repo, "strip_pkg", "v1"))
+    assert created.source is None
+    assert created.repository is None
+    # Content is still present and installable.
+    assert created.catalog is not None
+    assert len(created.catalog.items) > 0
+
+
+@pytest.mark.asyncio
+async def test_create_canonical_source(test_folder_url, authenticator, source_package):
+    """--canonical-source records a public base URL instead of the internal address (OMPE-51673)."""
+    repo = Repository(repo_url=test_folder_url)
+    canonical = "https://simready.nvidia.com"
+    await wrapp.create("canonical_pkg", "v1", source_package, catalog=False, repo=test_folder_url, canonical_source=canonical)
+
+    created = await load_package_setup(wrapp_file_in_repo(repo, "canonical_pkg", "v1"))
+    assert created.source == normalize_url(canonical)
+    assert created.repository == normalize_url(canonical)
+
+
+@pytest.mark.asyncio
+async def test_create_strip_source_and_canonical_source_conflict(test_folder_url, authenticator, source_package):
+    """--strip-source and --canonical-source are mutually exclusive (OMPE-51673)."""
+    with pytest.raises(FailedCommand):
+        await wrapp.create(
+            "conflict_pkg",
+            "v1",
+            source_package,
+            catalog=False,
+            repo=test_folder_url,
+            strip_source=True,
+            canonical_source="https://simready.nvidia.com",
+        )
 
 
 @pytest.mark.asyncio

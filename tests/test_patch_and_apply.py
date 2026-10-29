@@ -231,6 +231,33 @@ async def test_patch_load_v0():
 
 
 @pytest.mark.asyncio
+async def test_patch_resource_identity_round_trip(wrapp_init, tmp_path):
+    resource_identity = "storage-id://service/original-version"
+    patch_path = str(tmp_path / "identity-patch.json")
+    patch = Patch()
+    patch.add(
+        PatchOpCopy(
+            src="https://content.example/asset.usd",
+            dst="file:///install/asset.usd",
+            hash="sha-256-flat;1048576;original",
+            resource_identity_v2=resource_identity,
+            item_type=ItemType.file,
+        )
+    )
+
+    await patch.save(CommandParameters(), patch_path)
+    loaded_patch = Patch()
+    await loaded_patch.load(patch_path)
+
+    assert loaded_patch.ops.format_version.version_string == "3.0"
+    assert len(loaded_patch.ops.operations) == 1
+    loaded_op = loaded_patch.ops.operations[0]
+    assert isinstance(loaded_op, PatchOpCopy)
+    assert loaded_op.resource_identity_v2 == resource_identity
+    assert "resource_identity" not in loaded_op.model_dump()
+
+
+@pytest.mark.asyncio
 async def test_patch_error_handling(wrapp_init, local_tmp_folder):
     command_params = CommandParameters()
 

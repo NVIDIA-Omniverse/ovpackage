@@ -301,13 +301,8 @@ def test_region():
     yield os.environ.get("WRAPP_S3_TEST_REGION", "us-west-1")
 
 
-@pytest.fixture(scope="session")
-def storage_backend_test_helper(
-    storage_backend_type, wrapp_init, test_host, alternate_host_test_host_no_fail
-) -> Generator[StorageTestHelper, None, None]:
-    from wrapp.utils.utils import StorageOperationError
-
-    backend = None
+def _make_storage_test_helper(storage_backend_type) -> StorageTestHelper:
+    """Construct the shared helper for one available storage-backend type."""
     try:
         if storage_backend_type == StorageBackendForTests.NUCLEUS:
             from tests.clientlib_test_helpers import ClientLibTestHelper
@@ -340,6 +335,18 @@ def storage_backend_test_helper(
     except ImportError as e:
         pytest.skip(f"Storage backend {storage_backend_type} not available: missing dependencies ({e})")
 
+    return backend
+
+
+@pytest.fixture(scope="session")
+def storage_backend_test_helper(
+    storage_backend_type, wrapp_init, test_host, alternate_host_test_host_no_fail
+) -> Generator[StorageTestHelper, None, None]:
+    """Initialize the selected backend and its configured alternate host."""
+    from wrapp.utils.utils import StorageOperationError
+
+    backend = _make_storage_test_helper(storage_backend_type)
+
     try:
         # pytest will use this fixture as a generator - it will create the generator,
         # and then call next(...) on it twice:
@@ -357,6 +364,20 @@ def storage_backend_test_helper(
         pytest.skip(f"Storage backend {storage_backend_type} not available: {e}")
     except Exception:
         pytest.fail(f"Failed to initialize storage: {traceback.format_exc()}")
+
+
+@pytest.fixture(scope="session")
+def alternate_storage_backend_test_helper(
+    alternate_storage_backend_type, storage_backend_test_helper, alternate_storage_test_host
+) -> Generator[StorageTestHelper, None, None]:
+    """Initialize both sides of a cross-backend test independently of test order."""
+    from wrapp.utils.utils import StorageOperationError
+
+    backend = _make_storage_test_helper(alternate_storage_backend_type)
+    try:
+        yield from backend.session_initialization([alternate_storage_test_host])
+    except StorageOperationError as e:
+        pytest.skip(f"Storage backend {alternate_storage_backend_type} not available: {e}")
 
 
 @pytest.fixture(scope="session")

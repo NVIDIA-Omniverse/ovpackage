@@ -27,6 +27,7 @@ from typing import (
 from pydantic import (
     BaseModel,
     ConfigDict,
+    TypeAdapter,
     ValidationError,
 )
 
@@ -52,6 +53,7 @@ from wrapp.utils.nucleus_hash import (  # noqa: F401  (re-exported for callers/t
 from wrapp.utils.storage import (
     Result,
     wrapp_list_directory,
+    wrapp_list_directory_supported,
     wrapp_list_file_tree,
     wrapp_list_file_tree_supported,
     wrapp_read_file_content,
@@ -68,6 +70,7 @@ from wrapp.utils.utils import (
     is_folder,
     is_regular_file,
     join_paths,
+    join_url_path,
 )
 
 logger = logging.getLogger("omni.wrapp")
@@ -158,18 +161,23 @@ def guard_package_standard_metadata_relative_path(relative_path: str) -> str:
 
     Returns the POSIX-normalized path (``\\`` -> ``/``, leading separators stripped) when it stays
     *inside* the ``.metadata`` folder. Raises ``ValueError`` naming the offending path when it is
-    empty, ``.``/``..``, or contains any ``..`` segment (``../x``, ``x/../y``, ``x/..``), because
-    ``join_paths`` does not collapse ``..`` and such a path would let a write escape the folder.
+    empty, ``.``/``..``, contains any ``..`` segment (``../x``, ``x/../y``, ``x/..``), contains a
+    NUL byte, or is absolute on Windows (drive-prefixed or UNC/double-slash), because ``join_paths``
+    does not collapse ``..`` and platform absolute paths can let a write escape the folder.
 
     Both write sites route their attacker-/listing-derived relative paths through this guard before
     building a write URL: import restore keys tar members verbatim, and the copy/list walk surfaces
     arbitrary object-store keys under the ``.metadata`` prefix. Callers translate the ``ValueError``
     into their own domain error (``FailedCommand`` on import, ``StorageOperationError`` on copy/list).
     """
-    normalized = relative_path.replace("\\", "/").lstrip("/")
-    if normalized in ("", ".", "..") or ".." in normalized.split("/"):
+    normalized = relative_path.replace("\\", "/")
+    stripped = normalized.lstrip("/")
+    has_windows_drive = len(stripped) >= 2 and stripped[0].isalpha() and stripped[1] == ":"
+    if "\0" in relative_path or normalized.startswith("//") or has_windows_drive:
         raise ValueError(f"Unsafe package-standard .metadata relative path (escapes the folder): {relative_path!r}")
-    return normalized
+    if stripped in ("", ".", "..") or ".." in stripped.split("/"):
+        raise ValueError(f"Unsafe package-standard .metadata relative path (escapes the folder): {relative_path!r}")
+    return stripped
 
 
 def is_package_standard_sidecar_path(relative_path: str) -> bool:
@@ -250,9 +258,32 @@ async def list_package_standard_metadata_files(package_url: str) -> list[Tuple[s
     or ``sub/extra.json``). The folder is listed by URL rather than discovered by scanning
     the package directory, so a missing ``.metadata`` folder surfaces as a not-found (or
     wrong-type) listing error which is treated as "no metadata" and yields an empty list.
+    If listing is unsupported, use the paths declared in the package definition
+    instead. Plain WRAPP packages without a definition return an empty list quietly;
+    standard packages warn that additional, unregistered files cannot be discovered.
     """
     metadata_dir = package_standard_metadata_folder_url(package_url)
     files: list[Tuple[str, str]] = []
+    if not wrapp_list_directory_supported(metadata_dir):
+        definition = await read_package_standard_definition(package_url)
+        if definition is None:
+            return []
+        try:
+            metadata = TypeAdapter(list[PackageStandardMetadataEntry]).validate_python((definition.model_extra or {}).get("metadata", []))
+        except ValidationError as e:
+            raise FailedCommand(f"Package-standard sidecar for '{package_url}' has invalid metadata entries: {e.errors()}") from e
+        for entry in metadata:
+            try:
+                rel_path = guard_package_standard_metadata_relative_path(entry.name)
+            except ValueError as e:
+                raise StorageOperationError(str(e)) from e
+            files.append((rel_path, join_url_path(metadata_dir, rel_path)))
+        logger.warning(
+            "Storage backend for %s does not support directory listing; only metadata referenced by the package definition "
+            "can be discovered, not additional files in .metadata/",
+            metadata_dir,
+        )
+        return files
 
     async def _walk(url: str, prefix: str) -> None:
         use_tree = wrapp_list_file_tree_supported(url)
@@ -264,9 +295,9 @@ async def list_package_standard_metadata_files(package_url: str) -> list[Tuple[s
             except ValueError as e:
                 raise StorageOperationError(str(e)) from e
             if is_regular_file(item):
-                files.append((rel_path, join_paths(metadata_dir, rel_path)))
+                files.append((rel_path, join_url_path(metadata_dir, rel_path)))
             elif is_folder(item) and not use_tree:
-                await _walk(join_paths(url, item.relative_path), rel_path)
+                await _walk(join_url_path(url, item.relative_path), rel_path)
 
     try:
         await _walk(metadata_dir, "")
@@ -278,10 +309,11 @@ async def list_package_standard_metadata_files(package_url: str) -> list[Tuple[s
 
 
 async def read_package_standard_metadata_files(package_url: str) -> Dict[str, bytes]:
-    """Read every file in a package's ``.metadata`` folder, keyed by path relative to it.
+    """Read discovered metadata files, keyed by path relative to ``.metadata``.
 
     The bytes are returned verbatim so callers can preserve the metadata without
-    re-serializing or re-hashing it. Returns an empty mapping when the folder is absent.
+    re-serializing or re-hashing it. Without listing support, only paths declared in
+    the package definition are read. Missing declared files raise an error.
     """
     contents: Dict[str, bytes] = {}
     for rel_path, url in await list_package_standard_metadata_files(package_url):
@@ -303,6 +335,8 @@ async def copy_package_standard_sidecars(
     content copies; install/mirror/import preserve them with this helper. The root
     definition file and every file in the ``.metadata`` folder are copied byte-for-byte,
     so no re-hashing of the payload is required. Existing target files are left untouched.
+    Without listing support, only metadata referenced by the definition is copied,
+    with a warning that additional files cannot be discovered.
     """
     if context.dry_run:
         return
@@ -316,7 +350,7 @@ async def copy_package_standard_sidecars(
 
     target_metadata_dir = package_standard_metadata_folder_url(target_package_url)
     for rel_path, source_url in await list_package_standard_metadata_files(source_package_url):
-        target_url = join_paths(target_metadata_dir, rel_path)
+        target_url = join_url_path(target_metadata_dir, rel_path)
         if await wrapp_url_exists(target_url):
             continue
         status, content = await wrapp_read_file_content(source_url)

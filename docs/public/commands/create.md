@@ -28,6 +28,16 @@ metadata does not model ovpackage dependencies yet.
 See package standard sidecars for the compatibility model and sidecar
 behavior.
 
+By default the created `.wrapp` file records where the content came from in its
+`source` and `repository` fields. When publishing data outside internal
+infrastructure these can expose internal addresses. Use `--strip-source` (env
+`OVPACKAGE_STRIP_SOURCE`) to clear both fields, or `--canonical-source <url>`
+(`--cs`, env `OVPACKAGE_CANONICAL_SOURCE`) to record a canonical public base
+address instead — for example `https://simready.example.com` — so a package
+built from a local disk still advertises the globally recognized repository. The
+two options are mutually exclusive and are also available on `mirror`,
+`export`, `import`, and `publish-redirect`.
+
 For usage examples, see the [Tutorial](../tutorial.md). For CLI options, run `ovpackage create --help`.
 
 ## Python API Reference

@@ -14,6 +14,10 @@ trusted the same way its `.wrapp` catalog and content hashes are trusted, so
 whatever sidecars the archive carries are imported as-is. See
 package standard sidecars.
 
+Use `--strip-source` or `--canonical-source <url>` to keep internal source
+addresses out of the imported `.wrapp` file. See
+source provenance options for details.
+
 For usage examples, see the [Tutorial](../tutorial.md). For CLI options, run `ovpackage import --help`.
 
 ## Python API Reference

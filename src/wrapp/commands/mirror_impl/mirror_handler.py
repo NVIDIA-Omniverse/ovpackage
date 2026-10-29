@@ -25,6 +25,9 @@ from typing import (
     Tuple,
 )
 
+from wrapp.commands.case_insensitive_paths import (
+    raise_if_case_insensitive_path_conflicts,
+)
 from wrapp.commands.catalog import (
     Catalog,
     catalog,
@@ -40,6 +43,7 @@ from wrapp.datastructures.package import (
     PackageInfo,
     UniquePackageLocation,
     _write_package_info,
+    apply_source_policy,
     load_package_setup,
     wrapp_file_name,
     write_package_info,
@@ -77,9 +81,13 @@ class _MirrorHandler:
         mirror_tags: bool,
         context: CommandParameters,
         scheduler: SchedulerContext,
+        strip_source: bool = False,
+        canonical_source: Optional[str] = None,
     ):
         self._mirror_context = _MirrorContext(safe_package_to_repo_callback, mirror_tags, context, scheduler)
         self.package_collection = _MirrorPackageCollection(self._mirror_context)
+        self._strip_source = strip_source
+        self._canonical_source = canonical_source
 
     @staticmethod
     def _build_catalog_match_indexes(catalog_items: List[CatalogItem]) -> Tuple[Set[str], Dict[str, List[str]], Dict[str, List[str]]]:
@@ -172,6 +180,8 @@ class _MirrorHandler:
 
             # Destination path for the package
             destination = package.destination_repo.package_url(package_name, version)
+            if source_setup.catalog is not None:
+                raise_if_case_insensitive_path_conflicts(source_setup.catalog, destination)
 
             # If a template was specified, use it
             if package.template_version is not None:
@@ -328,6 +338,9 @@ class _MirrorHandler:
 
             # Set the repository field to the source repository
             mirror_package.repository = package.source_repo.base_url()
+
+            # Keep internal source addresses out of the mirrored (published) package if requested
+            apply_source_policy(mirror_package, strip_source=self._strip_source, canonical_source=self._canonical_source)
 
             # Write the package info file
             package_file = wrapp_file_name(package_name)

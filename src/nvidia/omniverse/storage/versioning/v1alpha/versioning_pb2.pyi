@@ -35,10 +35,23 @@ class VersionsOrder(int, metaclass=_enum_type_wrapper.EnumTypeWrapper):
     VERSIONS_ORDER_NEWEST_FIRST: _ClassVar[VersionsOrder]
     VERSIONS_ORDER_OLDEST_FIRST: _ClassVar[VersionsOrder]
     VERSIONS_ORDER_BY_KEY: _ClassVar[VersionsOrder]
+
 VERSIONS_ORDER_UNSPECIFIED: VersionsOrder
 VERSIONS_ORDER_NEWEST_FIRST: VersionsOrder
 VERSIONS_ORDER_OLDEST_FIRST: VersionsOrder
 VERSIONS_ORDER_BY_KEY: VersionsOrder
+
+class IsVersionedRequest(_message.Message):
+    __slots__ = ("resource_address",)
+    RESOURCE_ADDRESS_FIELD_NUMBER: _ClassVar[int]
+    resource_address: str
+    def __init__(self, resource_address: _Optional[str] = ...) -> None: ...
+
+class IsVersionedResponse(_message.Message):
+    __slots__ = ("is_versioned",)
+    IS_VERSIONED_FIELD_NUMBER: _ClassVar[int]
+    is_versioned: bool
+    def __init__(self, is_versioned: bool = ...) -> None: ...
 
 class EnumerateVersionsRequest(_message.Message):
     __slots__ = ("resource_address",)
@@ -52,7 +65,9 @@ class EnumerateVersionsResponse(_message.Message):
     VERSIONS_ORDER_FIELD_NUMBER: _ClassVar[int]
     items: _containers.RepeatedCompositeFieldContainer[VersionInfo]
     versions_order: VersionsOrder
-    def __init__(self, items: _Optional[_Iterable[_Union[VersionInfo, _Mapping]]] = ..., versions_order: _Optional[_Union[VersionsOrder, str]] = ...) -> None: ...
+    def __init__(
+        self, items: _Optional[_Iterable[_Union[VersionInfo, _Mapping]]] = ..., versions_order: _Optional[_Union[VersionsOrder, str]] = ...
+    ) -> None: ...
 
 class VersionInfo(_message.Message):
     __slots__ = ("resource_info", "sorting_key", "resource_address")
@@ -62,4 +77,9 @@ class VersionInfo(_message.Message):
     resource_info: _fileobject_pb2.ResourceInfo
     sorting_key: str
     resource_address: str
-    def __init__(self, resource_info: _Optional[_Union[_fileobject_pb2.ResourceInfo, _Mapping]] = ..., sorting_key: _Optional[str] = ..., resource_address: _Optional[str] = ...) -> None: ...
+    def __init__(
+        self,
+        resource_info: _Optional[_Union[_fileobject_pb2.ResourceInfo, _Mapping]] = ...,
+        sorting_key: _Optional[str] = ...,
+        resource_address: _Optional[str] = ...,
+    ) -> None: ...

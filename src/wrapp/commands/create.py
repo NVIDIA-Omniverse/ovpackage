@@ -29,6 +29,9 @@ from wrapp.app import (
     measure_time,
     print_stats,
 )
+from wrapp.commands.case_insensitive_paths import (
+    warn_if_case_insensitive_path_conflicts,
+)
 from wrapp.commands.catalog import (
     ContentHashAlgorithm,
     catalog_with_content_hashes,
@@ -60,6 +63,7 @@ from wrapp.datastructures.package import (
     Dependency,
     PackageInfo,
     _write_package_info,
+    apply_source_policy,
     load_package_setup,
     validate_package_and_version,
     wrapp_file_in_repo,
@@ -75,6 +79,7 @@ from wrapp.datastructures.workspace_analysis import (
 from wrapp.options import (
     AllowDirtySubpackagesFlag,
     AuthOption,
+    CanonicalSourceOption,
     CatalogOptionFlag,
     CheckSubpackages,
     CreatePackageStandardOption,
@@ -90,6 +95,7 @@ from wrapp.options import (
     ProgressReportOption,
     RepoOption,
     StatsFlag,
+    StripSourceFlag,
     TaggingJobsNumber,
     TagsFlag,
     TimeFlag,
@@ -103,12 +109,16 @@ from wrapp.utils.coro import (
     force_wrapp_thread,
 )
 from wrapp.utils.ensure_scheduler import ensure_scheduler
-from wrapp.utils.storage import wrapp_url_exists
+from wrapp.utils.storage import (
+    wrapp_require_writable,
+    wrapp_url_exists,
+)
 from wrapp.utils.utils import (
     FailedCommand,
     StorageOperationError,
     get_base_directory_from_url,
     join_paths,
+    join_url_path,
     normalize_url,
     validate_non_empty_string,
 )
@@ -164,6 +174,8 @@ async def create_command(
         "--eu",
         help="External base URL for redirect package storage_map (used with --publish-redirect)",
     ),
+    strip_source: bool = StripSourceFlag,
+    canonical_source: Optional[str] = CanonicalSourceOption,
     time: bool = TimeFlag,
 ) -> None:
     """
@@ -214,6 +226,8 @@ async def create_command(
                 publish_redirect=publish_redirect,
                 external_url=external_url,
                 create_package_standard_license=create_package_standard_license,
+                strip_source=strip_source,
+                canonical_source=canonical_source,
                 context=context,
                 scheduler=scheduler,
             )
@@ -241,13 +255,13 @@ async def _remove_non_existing_top_level_dependencies(extended_setup: PackageInf
         cleaned_deps = [
             dep
             for dep in extended_setup.dependencies
-            if wrapp_file_path(join_paths(source, dep.relative_destination), dep.package) not in missing_deps
+            if wrapp_file_path(join_url_path(source, dep.relative_destination), dep.package) not in missing_deps
         ]
         extended_setup.dependencies = cleaned_deps
 
 
 async def _check_if_wrapp_file_exists(dep: Dependency, source, missing_deps: set[str]):
-    sub_wrapp_file_path = wrapp_file_path(join_paths(source, dep.relative_destination), dep.package)
+    sub_wrapp_file_path = wrapp_file_path(join_url_path(source, dep.relative_destination), dep.package)
     if not await wrapp_url_exists(sub_wrapp_file_path):
         missing_deps.add(sub_wrapp_file_path)
 
@@ -271,6 +285,8 @@ async def create(
     *,
     ignore_file: Optional[str] = None,
     create_package_standard_license: Optional[str] = None,
+    strip_source: bool = False,
+    canonical_source: Optional[str] = None,
     context: CommandParameters = CommandParameters(),
     scheduler: Optional[SchedulerContext] = None,
 ) -> None:
@@ -299,6 +315,8 @@ async def create(
     :param publish_redirect: Specify a redirect repository URL to also create a redirect package in that repository
     :param external_url: External base URL for redirect package storage_map (used with publish_redirect).
                         If specified, storage_map URLs will use this base instead of the source repo URL.
+    :param strip_source: When True, clear the source and repository provenance fields in the written .wrapp file so internal addresses are not published. Mutually exclusive with canonical_source.
+    :param canonical_source: When set, record this canonical base URL as the source/repository provenance instead of the internal address. Mutually exclusive with strip_source.
     :param ignore_file: Deprecated, use ignores instead. Specify the name of an ignore file containing rules for ignoring items
     :param context: Global configuration parameters
     :param scheduler: Optionally pre-constructed SchedulerContext. When calling many functions in a row make sure to pre-construct the scheduler.
@@ -309,6 +327,8 @@ async def create(
     validate_non_empty_string("package_name", package_name)
     validate_non_empty_string("version", version)
     validate_non_empty_string("source", source)
+    if strip_source and canonical_source:
+        raise FailedCommand("Use either --strip-source or --canonical-source, not both.")
 
     if scheduler is None:
         raise RuntimeError("No scheduler present and ensure_scheduler malfunctioned, program error!")
@@ -316,6 +336,9 @@ async def create(
     validate_package_and_version(package_name, version)
     repo_object = Repository(repo_url=repo, fallback_base=source)
     target_base_url = repo_object.package_url(package_name, version)
+    wrapp_require_writable(target_base_url)
+    if publish_redirect:
+        wrapp_require_writable(publish_redirect)
 
     package_file_name = f".{package_name}.wrapp"
 
@@ -464,7 +487,7 @@ async def create(
     # so its license flows into the generated sidecars without re-specifying --cps. An explicit --cps wins.
     effective_package_standard_license = create_package_standard_license
     if effective_package_standard_license is None and not catalog:
-        source_seed = await read_package_standard_definition(join_paths(source, package_file_name))
+        source_seed = await read_package_standard_definition(join_url_path(source, package_file_name))
         if source_seed is not None and source_seed.license and source_seed.license.strip():
             effective_package_standard_license = source_seed.license.strip()
 
@@ -507,6 +530,7 @@ async def create(
                 package_name  # This could actually rename a package, as the source might have been called differently. Feature or bug?
             )
             existing_package.repository = repo_object.base_url()
+            apply_source_policy(existing_package, strip_source=strip_source, canonical_source=canonical_source)
             await write_package_info(
                 package_target_file,
                 existing_package,
@@ -519,6 +543,7 @@ async def create(
             package_source = PackageInfo(
                 name=package_name, version=version, catalog=destination_catalog, dependencies=None, repository=repo_object.base_url()
             )
+            apply_source_policy(package_source, strip_source=strip_source, canonical_source=canonical_source)
             await write_package_info(
                 package_target_file,
                 package_source,
@@ -535,6 +560,7 @@ async def create(
         extended_setup.repository = repo_object.base_url()
         extended_setup.catalog = destination_catalog
         extended_setup.source = normalize_url(source)
+        apply_source_policy(extended_setup, strip_source=strip_source, canonical_source=canonical_source)
         await write_package_info(
             package_target_file,
             extended_setup,
@@ -544,6 +570,8 @@ async def create(
         )
     else:
         raise RuntimeError("Program error, neither catalog nor extended_setup defined")
+
+    warn_if_case_insensitive_path_conflicts(destination_catalog, target_base_url)
 
     if check_subpackage:
         created_package: Optional[PackageInfo] = await load_package_setup(package_target_file)

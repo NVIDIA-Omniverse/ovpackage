@@ -225,7 +225,8 @@ async def extract_catalog(
             raise FailedCommand(f"Failed to determine source_url for wrapp file {wrapp_file}")
         final_catalog.items.append(single_file_catalog.items[0])
 
-    # Recalculate resource_identities if requested (needed when building manifests for old catalogs without resource_identity field)
+    # Explicitly validate recorded content before establishing v2 identities and
+    # observation metadata for legacy catalog entries. Never promote old tokens.
     if recalculate_identities:
         await _recalculate_catalog_resource_identities(final_catalog, context, scheduler)
 

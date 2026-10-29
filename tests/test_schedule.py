@@ -40,10 +40,6 @@ from wrapp.datastructures.command_context import (
     WrappScheduler,
 )
 from wrapp.utils.coro import WrappEventLoopThread
-from wrapp.utils.router import (
-    g_aws_enabled,
-    g_nucleus_enabled,
-)
 from wrapp.utils.scheduler_task_group import (
     SchedulerTaskGroup,
     TaskGroupState,
@@ -53,18 +49,6 @@ from wrapp.utils.scheduler_task_node import (
     SchedulerTreeNode,
 )
 from wrapp.utils.utils import random_string
-
-# Check actual nucleus availability: both omni.client importable AND backend enabled
-try:
-    import omni.client
-
-    _nucleus_available = g_nucleus_enabled
-except ImportError:
-    _nucleus_available = False
-
-# When S3 is enabled with a local endpoint override (e.g. MinIO), it will intercept
-# virtual-hosted-style S3 HTTP URLs but fail to resolve real AWS data.
-_s3_local_endpoint = g_aws_enabled and bool(os.getenv("WRAPP_S3_ENDPOINT"))
 
 
 @contextmanager
@@ -565,17 +549,14 @@ def test_wrapp_thread_ctrl_c_cancels_scheduler_tasks(wrapp_init):
 
 
 @pytest.mark.asyncio
-@pytest.mark.skipif(
-    not _nucleus_available or _s3_local_endpoint,
-    reason="Requires Nucleus backend enabled and no local S3 endpoint override",
-)
-async def test_scheduling_initialized_multiple_calls(wrapp_init):
+async def test_scheduling_initialized_multiple_calls_OM_116094(wrapp_init, tmp_path):
     # See OM-116094
     # Make sure we can call the same function multiple times, despite CommandContext being the same object
     # for each call.
-    test_data_path = (
-        "http://omniverse-content-production.s3.us-west-2.amazonaws.com/Assets/simready_content/common_assets/props/plasticdrum_a02"
-    )
+    test_data_path = tmp_path / "catalog-source"
+    test_data_path.mkdir()
+    (test_data_path / "asset.usd").write_text("#usda 1.0", encoding="utf-8")
+    test_data_path = str(test_data_path)
     c = await catalog(test_data_path, local_hash=True)
     assert len(c.items) > 0
     c = await catalog(test_data_path, local_hash=True)

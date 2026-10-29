@@ -54,6 +54,15 @@ from wrapp.utils.utils import (
 )
 
 
+def _skip_case_collision_tests_on_windows_minio(storage_backend) -> None:
+    if (
+        os.path.sep == "\\"
+        and storage_backend.storage_type() == StorageBackendForTests.S3
+        and os.environ.get("WRAPP_ENABLE_MINIO_BOTO3_COMPATIBILITY", "").lower() == "true"
+    ):
+        pytest.skip("MinIO on Windows cannot reliably store S3 keys that differ only by case")
+
+
 def test_local_copy_ops_for_eager_hash_cache_skips_remote_destinations():
     local_op = PatchOpCopy(
         src="https://example.invalid/source.txt",
@@ -727,6 +736,8 @@ async def test_install_from_cross_storage_type_OMPE62817(
 @pytest.mark.asyncio
 async def test_install_fails_on_case_insensitive_path_conflicts_OMPE52420(cli_runner, test_folder_url, storage_backend):
     """Test that install detects case-insensitive path conflicts when the destination storage is case-insensitive"""
+    _skip_case_collision_tests_on_windows_minio(storage_backend)
+
     package = "".join(random.choices(string.ascii_lowercase, k=8))
     version = "1.0.0-" + "".join(random.choices(string.ascii_lowercase, k=8))
     source_package = await storage_backend.create_source_package(join_paths(test_folder_url, "package_source"))
@@ -763,6 +774,8 @@ async def test_install_fails_on_case_insensitive_path_conflicts_OMPE52420(cli_ru
 
 @pytest.mark.asyncio
 async def test_install_fails_on_case_insensitive_dependency_path_conflicts_OMPE52420(cli_runner, test_folder_url, storage_backend):
+    _skip_case_collision_tests_on_windows_minio(storage_backend)
+
     dependency_package = "dep" + "".join(random.choices(string.ascii_lowercase, k=8))
     package = "pkg" + "".join(random.choices(string.ascii_lowercase, k=8))
     version = "1.0.0-" + "".join(random.choices(string.ascii_lowercase, k=8))

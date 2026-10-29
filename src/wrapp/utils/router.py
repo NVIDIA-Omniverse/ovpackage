@@ -25,6 +25,10 @@ from typing import (
     Optional,
     Tuple,
 )
+from urllib.parse import (
+    urlparse,
+    urlsplit,
+)
 
 if TYPE_CHECKING:
     from wrapp.datastructures.command_context import ThrottlingParameters
@@ -39,7 +43,9 @@ from wrapp.utils.coro import (
 )
 from wrapp.utils.storage_impls.import_tagging_client import g_tagging_client_available
 from wrapp.utils.storage_interface import (
+    ResourceAddress,
     Result,
+    SerializedResourceIdentity,
     StorageInterface,
 )
 from wrapp.utils.task_throttler import TaskThrottler
@@ -54,23 +60,28 @@ from wrapp.utils.utils import (
 
 logger = logging.getLogger("omni.wrapp")
 
+
 g_storage_api_enabled = (
     os.getenv("WRAPP_DISABLE_STORAGE_API", "False") != "True" and os.getenv("WRAPP_ENABLE_STORAGE_API", "True") != "False"
 )
 g_azure_enabled = os.getenv("WRAPP_DISABLE_AZURE", "False") == "False"
 g_aws_enabled = os.getenv("WRAPP_DISABLE_AWS", "False") == "False"
 g_gcs_enabled = os.getenv("WRAPP_DISABLE_GCS", "False") == "False"
+g_huggingface_enabled = os.getenv("WRAPP_DISABLE_HUGGINGFACE", "False") == "False"
 g_nucleus_enabled = os.getenv("WRAPP_DISABLE_NUCLEUS", "False") == "False"
+g_http_enabled = os.getenv("WRAPP_DISABLE_HTTP", "False") == "False"
 g_list_routes_enabled = os.getenv("WRAPP_DISABLE_LIST_ROUTES", "False") == "False"
 g_local_file_storage_enabled = True  # Always enabled, independent of Nucleus
 
 
 class StorageType(Enum):
+    HTTP = "HTTP"
     S3 = "S3"
     Nucleus = "Nucleus"
     StorageAPI = "StorageAPI"
     Azure = "Azure Blob Storage"
     GCS = "Google Cloud Storage"
+    HuggingFace = "Hugging Face"
     Local = "Local File System"
     Invalid = "n/a"
 
@@ -81,19 +92,27 @@ class Router:
     The Router owns one instance of every enabled storage backend and decides
     which one handles a given URL.  Routing priority (checked in order):
 
-    1. **Storage API** — if enabled and the URL is in scope (see
-       :meth:`StorageAPIStorageGRPC.is_url_in_scope`). Once Storage API has
-       reported its authoritative scope (via ``ListRoutes`` or
-       ``ListTopLevelAddresses``), it claims any URL within that scope —
-       including ``omniverse://`` and ``file://`` URLs — ahead of the dedicated
-       Nucleus / local backends. Before the first connection, Storage API does
-       not claim ``omniverse://`` or ``file://`` URLs to avoid stealing them
-       from those dedicated backends during lazy init.
-    2. **S3** — ``s3://`` or ``https://...amazonaws.com`` URLs.
-    3. **Azure** — ``https://<account>.blob.core.windows.net/`` URLs.
-    4. **GCS** — ``gs://`` or ``https://storage.googleapis.com/`` URLs.
-    5. **Nucleus / HTTP** — ``omniverse://`` or generic ``http(s)://`` URLs.
-    6. **Local file system** — ``file://`` URLs or bare paths.
+    1. **Storage API** — configured services get the first chance to claim
+       every URL scheme. Once a service has reported its authoritative scope
+       (via ``ListRoutes`` or ``ListTopLevelAddresses``), it claims URLs within
+       that scope ahead of dedicated backends. Before connecting, a configured
+       service may claim HTTP(S) and other non-local URLs permissively so the
+       first operation can connect lazily with credentials installed after
+       initialization. It does not claim ``omniverse://`` or ``file://`` URLs
+       in this window, leaving them to the dedicated backends.
+    2. **HTTP and cloud HTTPS** — generic ``http://`` and ``https://`` storage
+       addresses use the built-in read-only Python backend. Recognized cloud
+       endpoints use their writable provider backend when it is installed and
+       fall back to read-only HTTP otherwise. Storage API
+       discovery/authentication endpoints are routed separately.
+    3. **S3** — ``s3://`` or recognized ``https://...amazonaws.com`` URLs.
+    4. **Azure** — ``azure://`` or recognized
+       ``https://<account>.blob.core.windows.net/`` URLs.
+    5. **GCS** — ``gs://`` or recognized
+       ``https://storage.googleapis.com/`` URLs.
+    6. **Hugging Face** — ``hf://datasets/<owner>/<repo>/...`` URLs.
+    7. **Nucleus** — ``omniverse://`` URLs.
+    8. **Local file system** — ``file://`` URLs or bare paths.
 
     Backends can be disabled via environment variables (e.g.
     ``WRAPP_DISABLE_AWS=True``, ``WRAPP_DISABLE_NUCLEUS=True``,
@@ -143,6 +162,7 @@ class Router:
         self._is_s3_url_impl: Optional[Callable[[str], bool]] = None
         self._is_azure_url_impl: Optional[Callable[[str], bool]] = None
         self._is_gcs_url_impl: Optional[Callable[[str], bool]] = None
+        self._is_huggingface_url_impl: Optional[Callable[[str], bool]] = None
 
         # Store throttling params for later access
         self._throttling_params = throttling_parameters
@@ -180,6 +200,19 @@ class Router:
         except (StorageInitializationError, StorageMissingDependenciesError) as e:
             self._storage_info[StorageType.Local] = f"DISABLED: {e}"
             logger.info(f"{StorageType.Local}: {self._storage_info[StorageType.Local]}")
+
+        self._http: Optional["HTTPStorage"] = None
+        try:
+            if g_http_enabled:
+                from wrapp.utils.storage_impls.http_storage import HTTPStorage
+
+                self._http = HTTPStorage(wrapp_version, debug_level, throttling_parameters)
+                self._storage_info[StorageType.HTTP] = HTTPStorage.version_info()
+            else:
+                self._storage_info[StorageType.HTTP] = f"DISABLED: HTTP backend: {public_env_prefix()}DISABLE_HTTP is set"
+        except (StorageInitializationError, StorageMissingDependenciesError) as e:
+            self._storage_info[StorageType.HTTP] = f"DISABLED: {e}"
+            logger.info(f"{StorageType.HTTP}: {self._storage_info[StorageType.HTTP]}")
 
         self._s3: Optional["S3Storage"] = None
         try:
@@ -242,6 +275,32 @@ class Router:
         except StorageInitializationError as e:
             self._storage_info[StorageType.GCS] = f"DISABLED: {e}"
             logger.error(f"Failed to initialize Google Cloud Storage backend: {e}")
+
+        self._huggingface: Optional["HuggingFaceStorage"] = None
+        try:
+            if g_huggingface_enabled:
+                from wrapp.utils.storage_impls.huggingface_storage import (
+                    HuggingFaceStorage,
+                    is_huggingface_url,
+                )
+
+                # Set the URL predicate before constructing the backend: the module imports
+                # without huggingface_hub, so hf:// URLs still route to the guarded accessor
+                # (clear "not initialized" error) when the extra is missing, and read-only
+                # target rejection keeps working.
+                self._is_huggingface_url_impl = is_huggingface_url
+                self._huggingface = HuggingFaceStorage(wrapp_version, debug_level, throttling_parameters)
+                self._storage_info[StorageType.HuggingFace] = HuggingFaceStorage.version_info()
+            else:
+                self._storage_info[
+                    StorageType.HuggingFace
+                ] = f"DISABLED: Hugging Face backend: {public_env_prefix()}DISABLE_HUGGINGFACE is set"
+        except StorageMissingDependenciesError as e:
+            self._storage_info[StorageType.HuggingFace] = f"DISABLED: {e}"
+            logger.info(f"{StorageType.HuggingFace}: {self._storage_info[StorageType.HuggingFace]}")
+        except StorageInitializationError as e:
+            self._storage_info[StorageType.HuggingFace] = f"DISABLED: {e}"
+            logger.error(f"Failed to initialize Hugging Face backend: {e}")
 
         # Storage API supports multiple simultaneously-connected services: the
         # env-configured ``default`` instance plus any additional named
@@ -426,11 +485,15 @@ class Router:
         if self._local_file_storage is not None:
             if not self._local_file_storage.reconfigure_throttlers(params):
                 success = False
+        if self._http is not None and not self._http.reconfigure_throttlers(params):
+            success = False
         if self._s3 is not None and not self._s3.reconfigure_throttlers(params):
             success = False
         if self._azure is not None and not self._azure.reconfigure_throttlers(params):
             success = False
         if self._gcs is not None and not self._gcs.reconfigure_throttlers(params):
+            success = False
+        if self._huggingface is not None and not self._huggingface.reconfigure_throttlers(params):
             success = False
         for storage_api in self._storage_apis.values():
             if not storage_api.reconfigure_throttlers(params):
@@ -473,10 +536,22 @@ class Router:
             self._gcs = None
 
     @sync_calls_async_on_wrapp_thread
+    async def _huggingface_shutdown(self, exc_type=None, exc_val=None, exc_tb=None):
+        if self._huggingface:
+            await self._huggingface.shutdown(exc_type, exc_val, exc_tb)
+            self._huggingface = None
+
+    @sync_calls_async_on_wrapp_thread
     async def _local_file_storage_shutdown(self, exc_type=None, exc_val=None, exc_tb=None):
         if self._local_file_storage:
             await self._local_file_storage.shutdown(exc_type, exc_val, exc_tb)
             self._local_file_storage = None
+
+    @sync_calls_async_on_wrapp_thread
+    async def _http_shutdown(self, exc_type=None, exc_val=None, exc_tb=None):
+        if self._http:
+            await self._http.shutdown(exc_type, exc_val, exc_tb)
+            self._http = None
 
     @sync_calls_async_on_wrapp_thread
     async def _storageapi_shutdown(self):
@@ -490,7 +565,9 @@ class Router:
         self._s3_shutdown(exc_type, exc_val, exc_tb)
         self._azure_shutdown(exc_type, exc_val, exc_tb)
         self._gcs_shutdown(exc_type, exc_val, exc_tb)
+        self._huggingface_shutdown(exc_type, exc_val, exc_tb)
         self._storageapi_shutdown()
+        self._http_shutdown(exc_type, exc_val, exc_tb)
         self._local_file_storage_shutdown(exc_type, exc_val, exc_tb)
         # Clientlib may not be initialized if disabled via WRAPP_DISABLE_NUCLEUS
         if self._clientlib and shutdown_client_lib:
@@ -529,6 +606,12 @@ class Router:
             return False
         return self._is_gcs_url_impl(url)
 
+    def is_huggingface_url(self, url: str) -> bool:
+        """Check if a URL is a Hugging Face dataset repository URL."""
+        if self._is_huggingface_url_impl is None:
+            return False
+        return self._is_huggingface_url_impl(url)
+
     def is_storage_api_url(self, url: str) -> bool:
         """True if any connected Storage API service claims *url*."""
         return self._select_storage_api(url) is not None
@@ -563,9 +646,9 @@ class Router:
                 if normalized_url == discovery_url or normalized_url.startswith(discovery_url + "/"):
                     return storage_api
 
-        for storage_api in self._storage_apis.values():
-            if storage_api.has_known_scope() and storage_api.is_url_in_scope(url):
-                return storage_api
+        known_storage_api = self._select_known_storage_api(url)
+        if known_storage_api is not None:
+            return known_storage_api
 
         # No connected instance claims it. Fall through to the permissive
         # pre-connection window only for schemes not owned by a dedicated backend.
@@ -573,6 +656,13 @@ class Router:
             return None
         for storage_api in self._storage_apis.values():
             if not storage_api.has_known_scope() and storage_api.is_url_in_scope(url):
+                return storage_api
+        return None
+
+    def _select_known_storage_api(self, url: str):
+        """Return the configured service whose authoritative scope owns *url*."""
+        for storage_api in self._storage_apis.values():
+            if storage_api.has_known_scope() and storage_api.is_url_in_scope(url):
                 return storage_api
         return None
 
@@ -597,21 +687,41 @@ class Router:
     def _get_storage(self, url: Optional[str]) -> Tuple[StorageInterface, StorageType]:
         if not url or not url.strip():
             raise StorageOperationError("URL cannot be empty")
-        # Prefer StorageAPI if a connected service claims this URL. With multiple
-        # services, route to the specific owning instance (not just "the"
-        # StorageAPI) so cross-service reads/writes/copies hit the right server.
+        # Include the permissive pre-connection window for HTTP(S), so a
+        # configured Storage API can connect lazily after command auth is set.
         storage_api = self._select_storage_api(url)
         if storage_api is not None:
             return storage_api, StorageType.StorageAPI
+
+        # Generic HTTP(S) storage addresses use WRAPP's Python HTTP backend.
+        # Preserve writable provider URL compatibility when that optional
+        # backend is installed; an HTTP-only installation can still consume the
+        # same public or presigned provider URL without cloud SDKs.
+        if urlsplit(url).scheme.lower() in ("http", "https"):
+            if self.is_s3_url(url) and self._s3 is not None:
+                return self._s3, StorageType.S3
+            if self.is_azure_url(url) and self._azure is not None:
+                return self._azure, StorageType.Azure
+            if self.is_gcs_url(url) and self._gcs is not None:
+                return self._gcs, StorageType.GCS
+            if self._http is None:
+                # Preserve the legacy clientlib HTTP path when Nucleus support
+                # is installed but the Python HTTP backend is not.
+                if self._clientlib is not None:
+                    return self._clientlib, StorageType.Nucleus
+                http_info = self._storage_info.get(StorageType.HTTP, "unknown reason")
+                raise StorageOperationError(f"HTTP storage backend is not available ({http_info}), cannot handle URL: {url}")
+            return self._http, StorageType.HTTP
+
         if self.is_s3_url(url):
             return self.s3(), StorageType.S3
         elif self.is_azure_url(url):
             return self.azure(), StorageType.Azure
         elif self.is_gcs_url(url):
             return self.gcs(), StorageType.GCS
-        elif (
-            is_nucleus_url(url) or url.startswith("http://") or url.startswith("https://")
-        ):  # we still handle http:// links through clientlib - TODO
+        elif self.is_huggingface_url(url):
+            return self.huggingface(), StorageType.HuggingFace
+        elif is_nucleus_url(url):
             if self._clientlib is None:
                 if is_ovpackage_invocation():
                     raise StorageOperationError(f"No backend enabled to handle URL '{url}'")
@@ -637,12 +747,16 @@ class Router:
             throttlers.extend(self.clientlib().backend_throttlers())
         if self._local_file_storage:
             throttlers.extend(self._local_file_storage.backend_throttlers())
+        if self._http:
+            throttlers.extend(self._http.backend_throttlers())
         if self._s3:
             throttlers.extend(self.s3().backend_throttlers())
         if self._azure:
             throttlers.extend(self.azure().backend_throttlers())
         if self._gcs:
             throttlers.extend(self.gcs().backend_throttlers())
+        if self._huggingface:
+            throttlers.extend(self.huggingface().backend_throttlers())
         for storage_api in self._storage_apis.values():
             throttlers.extend(storage_api.backend_throttlers())
         return throttlers
@@ -650,24 +764,91 @@ class Router:
     def storage_for_read(self, url: str) -> StorageInterface:
         return self._get_storage(url)[0]
 
-    def storage_for_write(self, url: str) -> StorageInterface:
-        # TODO - we have no variation yet, but at some point we might have a choice of faster providers?
-        return self._get_storage(url)[0]
+    def _get_storage_for_resource_identity(self, resource_identity: SerializedResourceIdentity) -> Tuple[StorageInterface, StorageType]:
+        """Route an identity without interpreting its backend-owned payload.
 
-    def storage_types_for_copy(self, read_url: str, write_url: str) -> Tuple[StorageType, StorageType]:
+        Backends get the first chance to claim their serialized identity. URL
+        identities remain routable by scheme.
+        """
+        candidates = [
+            *((storage, StorageType.StorageAPI) for storage in self._storage_apis.values()),
+            (self._s3, StorageType.S3),
+            (self._azure, StorageType.Azure),
+            (self._gcs, StorageType.GCS),
+            (self._clientlib, StorageType.Nucleus),
+            (self._local_file_storage, StorageType.Local),
+        ]
+        for storage, storage_type in candidates:
+            can_handle_identity = getattr(storage, "can_handle_resource_identity", None)
+            if storage is not None and callable(can_handle_identity) and can_handle_identity(resource_identity) is True:
+                return storage, storage_type
+
+        if urlparse(resource_identity).scheme:
+            try:
+                return self._get_storage(resource_identity)
+            except StorageOperationError:
+                pass
+        raise StorageOperationError("No backend configured to handle the resource identity")
+
+    def storage_for_resource_identity(self, resource_identity: SerializedResourceIdentity) -> StorageInterface:
+        return self._get_storage_for_resource_identity(resource_identity)[0]
+
+    def _raise_if_huggingface_read_only_destination(self, url: str) -> None:
+        if not self.is_huggingface_url(url):
+            return
+        from wrapp.utils.storage_impls.huggingface_storage import HuggingFaceStorage
+
+        if HuggingFaceStorage.is_read_only:
+            raise StorageOperationError(
+                f"Cannot write to '{url}': storage backend '{StorageType.HuggingFace.value}' is read-only",
+                Result.ERROR_NOT_SUPPORTED,
+            )
+
+    def _get_storage_for_write(self, url: str) -> Tuple[StorageInterface, StorageType]:
+        try:
+            storage, storage_type = self._get_storage(url)
+        except StorageOperationError:
+            self._raise_if_huggingface_read_only_destination(url)
+            raise
+        if storage.is_read_only:
+            raise StorageOperationError(
+                f"Cannot write to '{url}': storage backend '{storage_type.value}' is read-only",
+                Result.ERROR_NOT_SUPPORTED,
+            )
+        return storage, storage_type
+
+    def storage_for_write(self, url: str) -> StorageInterface:
+        return self._get_storage_for_write(url)[0]
+
+    def storage_for_auth(self, url: str) -> StorageInterface:
+        """Route authentication endpoints independently from storage URLs."""
+        storage_api = self._select_storage_api(url)
+        return storage_api if storage_api is not None else self._get_storage(url)[0]
+
+    def storage_types_for_address_copy(self, read_url: ResourceAddress, write_url: ResourceAddress) -> Tuple[StorageType, StorageType]:
         read_storage, read_storage_type = self._get_storage(read_url)
         write_storage, write_storage_type = self._get_storage(write_url)
         return read_storage_type, write_storage_type
 
-    def storages_for_copy(self, read_url: str, write_url: str) -> Tuple[StorageInterface, StorageType, StorageInterface, StorageType]:
+    def storages_for_address_copy(
+        self, read_url: ResourceAddress, write_url: ResourceAddress
+    ) -> Tuple[StorageInterface, StorageType, StorageInterface, StorageType]:
         """Route both URLs in one pass, returning the backend *instances* and
         their types. Callers compare the instances (not just the types) so that
         two different Storage API services — which share ``StorageType.StorageAPI``
         — are correctly treated as a cross-storage copy rather than a same-service
         server-side copy.
         """
+        write_storage, write_storage_type = self._get_storage_for_write(write_url)
         read_storage, read_storage_type = self._get_storage(read_url)
-        write_storage, write_storage_type = self._get_storage(write_url)
+        return read_storage, read_storage_type, write_storage, write_storage_type
+
+    def storages_for_resource_identity_copy(
+        self, resource_identity: SerializedResourceIdentity, write_url: ResourceAddress
+    ) -> Tuple[StorageInterface, StorageType, StorageInterface, StorageType]:
+        """Route an exact source identity and a destination address."""
+        write_storage, write_storage_type = self._get_storage_for_write(write_url)
+        read_storage, read_storage_type = self._get_storage_for_resource_identity(resource_identity)
         return read_storage, read_storage_type, write_storage, write_storage_type
 
     def storage_api_instance_for(self, url: str):
@@ -721,6 +902,13 @@ class Router:
             if not self._gcs:
                 raise StorageOperationError("Storage Google Cloud Storage was not successfully initialized")
             return self._gcs
+
+    if g_huggingface_enabled:
+
+        def huggingface(self) -> "HuggingFaceStorage":  # type: ignore[name-defined]
+            if not self._huggingface:
+                raise StorageOperationError("Storage Hugging Face was not successfully initialized")
+            return self._huggingface
 
     if g_nucleus_enabled:
 

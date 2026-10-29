@@ -18,6 +18,14 @@ If the source package has SimReady package-standard sidecars, `mirror` copies
 them to the mirrored package verbatim, preserving package-standard identity; it
 does not create or regenerate sidecars. See package standard sidecars.
 
+The source repository may be a read-only Hugging Face dataset repository
+(`hf://datasets/<owner>/<repo>/...`); the destination cannot, because ovpackage
+does not write to Hugging Face. See [Supported Storage Systems](../storage.md).
+
+Use `--strip-source` or `--canonical-source <url>` to keep internal source
+addresses out of the mirrored `.wrapp` file. See
+source provenance options for details.
+
 For usage examples, see the [Tutorial](../tutorial.md). For CLI options, run `ovpackage mirror --help`.
 
 ## Python API Reference
